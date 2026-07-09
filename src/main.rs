@@ -23,7 +23,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Index a BIDS dataset
+    /// Index a BIDS dataset into a DuckDB database (also used to bring
+    /// additional datasets under management — see `docs/managed-mode.md`).
     Index {
         /// Input BIDS dataset directory or S3 URI (e.g., s3://bucket/prefix)
         #[arg(short, long)]
@@ -45,6 +46,27 @@ enum Commands {
         #[arg(long)]
         schema_path: Option<PathBuf>,
     },
+
+    /// (Managed mode, not yet implemented) Verify integrity of managed files:
+    /// check that every file the catalog records is present and uncorrupted.
+    Verify {
+        /// bidslake DuckDB database
+        #[arg(short, long, default_value = "bidslake.duckdb")]
+        database: String,
+    },
+
+    /// (Managed mode, not yet implemented) Change the on-disk storage format of
+    /// managed files (e.g. recompress .nii.gz -> .nii.zst), updating catalog
+    /// storage pointers.
+    Transcode {
+        /// bidslake DuckDB database
+        #[arg(short, long, default_value = "bidslake.duckdb")]
+        database: String,
+
+        /// Target storage format (e.g. "zst")
+        #[arg(long)]
+        to: String,
+    },
 }
 
 #[tokio::main]
@@ -62,6 +84,18 @@ async fn main() -> Result<()> {
             let schema_path_str = schema_path.as_ref().map(|p| p.to_str().unwrap());
             let schema = Schema::load(schema_path_str);
             run_indexer(input, output, dataset_id, no_sign_request, schema).await
+        }
+        Commands::Verify { database } => {
+            anyhow::bail!(
+                "`verify` is not yet implemented (managed mode). \
+                 See docs/managed-mode.md. (database: {database})"
+            )
+        }
+        Commands::Transcode { database, to } => {
+            anyhow::bail!(
+                "`transcode` is not yet implemented (managed mode). \
+                 See docs/managed-mode.md. (database: {database}, to: {to})"
+            )
         }
     }
 }

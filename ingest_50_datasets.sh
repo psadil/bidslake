@@ -69,8 +69,8 @@ datasets=(
 	"ds003097" # Natural Scenes Dataset (NSD)
 )
 
-# Build the cargo command with S3 feature
-CARGO_CMD="cargo run --release --features s3 --bin bidslake --"
+# S3 support is compiled in unconditionally (no cargo feature gate).
+CARGO_CMD="cargo run --release --bin bidslake --"
 
 successful=0
 failed=0

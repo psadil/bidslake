@@ -97,14 +97,29 @@ impl BidsParser {
             }
         }
 
+        // Datasets can carry nested dataset_description.json files (e.g. under
+        // derivatives/). Sort shallowest-first so the dataset root wins when we
+        // resolve the dataset_id and insert the description.
+        dataset_description.sort_by_key(|p| p.components().count());
+
         // Pass 0: Process dataset_description.json first to resolve dataset_id
         for path in &dataset_description {
             if self.dataset_id.is_none() {
                 let content = self.fs.read_to_string(path).await?;
-                let dataset_desc: Value = serde_json::from_str(&content)?;
-                if let Some(name) = dataset_desc.get("Name").and_then(|v| v.as_str()) {
-                    println!("Using dataset name from dataset_description.json: {}", name);
-                    self.dataset_id = Some(name.to_string());
+                match serde_json::from_str::<Value>(&content) {
+                    Ok(dataset_desc) => {
+                        if let Some(name) = dataset_desc.get("Name").and_then(|v| v.as_str()) {
+                            println!("Using dataset name from dataset_description.json: {}", name);
+                            self.dataset_id = Some(name.to_string());
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "Warning: skipping unparseable dataset_description.json at {}: {}",
+                            path.display(),
+                            e
+                        );
+                    }
                 }
             }
         }
@@ -194,10 +209,16 @@ impl BidsParser {
             }
         }
 
-        if !self.has_scans_tsv && !self.imaging_files.is_empty() {
+        // Ensure every discovered imaging file has a scans row. scans.tsv rows
+        // (inserted earlier, with richer metadata) win via insert-if-not-exists;
+        // this adds any imaging files a scans.tsv omitted (derivatives, files not
+        // listed) so their sidecars/associations have a referent. Running it
+        // unconditionally is what keeps the sidecars FK satisfied.
+        if !self.imaging_files.is_empty() {
             println!(
-                "No scans.tsv files found. Auto-populating scans table with {} imaging files.",
-                self.imaging_files.len()
+                "Populating scans table with {} imaging files ({}scans.tsv present).",
+                self.imaging_files.len(),
+                if self.has_scans_tsv { "" } else { "no " }
             );
             for img_file in &self.imaging_files {
                 let mut scan_data = serde_json::Map::new();
@@ -407,29 +428,6 @@ impl BidsParser {
             }
         }
 
-        // Determine datatype, suffix, extension
-        // Simple heuristic for now
-        let parts: Vec<&str> = file_name.split('_').collect();
-        let suffix_parts: Vec<&str> = parts.last().unwrap().split('.').collect();
-        let _suffix = suffix_parts[0];
-        let _extension = if suffix_parts.len() > 1 {
-            Some(suffix_parts[1..].join("."))
-        } else {
-            None
-        };
-
-        // Datatype is usually the parent directory name if it's a standard BIDS folder
-        let parent_dir_name = path
-            .parent()
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
-        let _datatype = if ["anat", "func", "dwi", "fmap", "beh"].contains(&parent_dir_name) {
-            Some(parent_dir_name)
-        } else {
-            None
-        };
-
         // Specific file processing
         if file_name == "dataset_description.json" {
             self.process_dataset_description(path, db, dataset_id)
@@ -528,7 +526,17 @@ impl BidsParser {
         dataset_id: &str,
     ) -> Result<()> {
         let content = self.fs.read_to_string(path).await?;
-        let mut json_value: Value = serde_json::from_str(&content)?;
+        let mut json_value: Value = match serde_json::from_str(&content) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!(
+                    "Warning: skipping unparseable dataset_description.json at {}: {}",
+                    path.display(),
+                    e
+                );
+                return Ok(());
+            }
+        };
 
         if let Value::Object(ref mut map) = json_value {
             map.insert(
@@ -553,12 +561,8 @@ impl BidsParser {
         // Read the bval or bvec file
         let content = self.fs.read_to_string(path).await?;
 
-        // Find the base name (remove .bval or .bvec extension)
-        let base_name = if file_name.ends_with(".bval") {
-            &rel_path[..rel_path.len() - 5]
-        } else {
-            &rel_path[..rel_path.len() - 5]
-        };
+        // Find the base name (both ".bval" and ".bvec" are 5 chars).
+        let base_name = &rel_path[..rel_path.len() - 5];
 
         // The NIfTI file path
         let nifti_path = format!("{}.nii.gz", base_name);
@@ -922,13 +926,32 @@ impl BidsParser {
         }
     }
 
-    /// Normalize IntendedFor path (handle session-relative, dataset-relative)
-    fn normalize_path(&self, target: &str, _source_file: &str) -> String {
-        // Remove leading slashes and "bids::" prefix if present
+    /// Normalize an IntendedFor target into a full dataset-relative path so it
+    /// matches `scans.file_path`.
+    ///
+    /// BIDS allows two forms:
+    /// - dataset-relative, e.g. `bids::sub-01/ses-mri/func/..._bold.nii.gz`
+    ///   (optionally with a `bids::` prefix or leading `/`);
+    /// - subject-relative (legacy), e.g. `ses-mri/func/..._bold.nii.gz`, which is
+    ///   relative to the declaring file's subject directory.
+    ///
+    /// We strip URI decoration, and for the subject-relative form prepend the
+    /// `sub-XX/` taken from `source_file`.
+    fn normalize_path(&self, target: &str, source_file: &str) -> String {
         let target = target.trim_start_matches("bids::").trim_start_matches('/');
 
-        // If target starts with "ses-", it's session-relative
-        // Otherwise it's dataset-relative and already correct
+        // Already dataset-relative.
+        if target.starts_with("sub-") {
+            return target.to_string();
+        }
+
+        // Subject-relative: prepend the source file's subject directory.
+        if let Some(sub) = source_file.split('/').next() {
+            if sub.starts_with("sub-") {
+                return format!("{}/{}", sub, target);
+            }
+        }
+
         target.to_string()
     }
 

@@ -682,20 +682,18 @@ impl Schema {
                     params.push(None);
                 }
             } else {
+                // A dedicated column has a fixed scalar type, but BIDS metadata is
+                // messy: numeric columns receive non-numeric strings (censored ages
+                // like "89+", ranges like "35-40") and even arrays (ASL
+                // PostLabelingDelay, some MRS fields can be scalar OR a list). None
+                // of those fit a numeric column. Rather than let DuckDB's implicit
+                // cast abort the whole row insert — dropping every other field on
+                // that row — store NULL for the mismatched value and keep the row.
+                let is_numeric_col = matches!(
+                    col_type.as_str(),
+                    "DOUBLE" | "BIGINT" | "FLOAT" | "REAL" | "INTEGER" | "HUGEINT"
+                );
                 match val {
-                    Some(Value::String(s)) => {
-                        // Handle "n/a" for numeric columns (BIDS convention for missing values)
-                        if (col_type == "DOUBLE"
-                            || col_type == "BIGINT"
-                            || col_type == "FLOAT"
-                            || col_type == "REAL")
-                            && s == "n/a"
-                        {
-                            params.push(None);
-                        } else {
-                            params.push(Some(duckdb::types::Value::Text(s.clone())));
-                        }
-                    }
                     Some(Value::Number(n)) => {
                         if n.is_i64() {
                             params.push(Some(duckdb::types::Value::BigInt(n.as_i64().unwrap())));
@@ -705,6 +703,25 @@ impl Schema {
                             params.push(Some(duckdb::types::Value::Text(n.to_string())));
                         }
                     }
+                    Some(Value::String(s)) if is_numeric_col => {
+                        if let Ok(i) = s.parse::<i64>() {
+                            params.push(Some(duckdb::types::Value::BigInt(i)));
+                        } else if let Ok(f) = s.parse::<f64>() {
+                            params.push(Some(duckdb::types::Value::Double(f)));
+                        } else {
+                            params.push(None);
+                        }
+                    }
+                    Some(Value::String(s)) => {
+                        params.push(Some(duckdb::types::Value::Text(s.clone())));
+                    }
+                    // Non-scalar (array/object) or bool value in a numeric column:
+                    // cannot represent it, so store NULL.
+                    Some(Value::Array(_)) | Some(Value::Object(_)) | Some(Value::Bool(_))
+                        if is_numeric_col =>
+                    {
+                        params.push(None);
+                    }
                     Some(Value::Bool(b)) => {
                         params.push(Some(duckdb::types::Value::Boolean(*b)));
                     }
@@ -712,8 +729,7 @@ impl Schema {
                         params.push(None);
                     }
                     Some(v) => {
-                        // Fallback for other types to string if expected type is TEXT
-                        // For arrays, serialize to JSON string
+                        // Non-numeric column: arrays/objects serialize to JSON text.
                         if v.is_array() || v.is_object() {
                             let json_str = v.to_string();
                             string_values.push(json_str);

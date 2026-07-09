@@ -1,2 +1,3 @@
 /target
 *duckdb
+ingest_log.txt

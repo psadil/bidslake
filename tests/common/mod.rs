@@ -1,0 +1,86 @@
+//! Shared helpers for integration tests.
+//!
+//! Included via `mod common;` in each test file. Living under `tests/common/`
+//! (a subdirectory) keeps Cargo from compiling it as its own test binary.
+//!
+//! Not every test binary uses every helper, so suppress the cross-binary
+//! "never used" warnings that Cargo's per-binary compilation produces.
+#![allow(dead_code)]
+
+use anyhow::Result;
+use bidslake::{bids::BidsParser, db::BidsDb, fs::LocalFileSystem, schema::Schema};
+use std::path::{Path, PathBuf};
+
+/// Ingest a BIDS dataset from `dataset_path` into a fresh in-memory DuckDB and
+/// return the connection. Using `:memory:` avoids temp-file lifetime juggling
+/// and keeps each test fully isolated.
+pub async fn ingest(dataset_path: impl AsRef<Path>) -> Result<BidsDb> {
+    let db = BidsDb::new(":memory:")?;
+    let schema = Schema::load(None);
+    db.create_tables(&schema)?;
+
+    let fs = Box::new(LocalFileSystem::new(dataset_path.as_ref().to_path_buf()));
+    let mut parser = BidsParser::new(fs, None, schema);
+    parser.parse(&db).await?;
+    Ok(db)
+}
+
+/// `COUNT(*)` for a table.
+pub fn count(db: &BidsDb, table: &str) -> Result<i64> {
+    let sql = format!("SELECT COUNT(*) FROM {table}");
+    Ok(db.conn.query_row(&sql, [], |r| r.get(0))?)
+}
+
+/// Absolute path to the vendored `bids-examples` submodule.
+pub fn bids_examples_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/bids-examples")
+}
+
+/// Path to a single dataset inside `bids-examples`.
+pub fn bids_example(name: &str) -> PathBuf {
+    bids_examples_dir().join(name)
+}
+
+/// Datasets deliberately excluded from ingestion. `genetics_ukbb` carries
+/// genetic/UK-Biobank-style data that we do not process.
+pub const EXCLUDED_DATASETS: &[&str] = &["genetics_ukbb"];
+
+/// Whether a dataset name is on the exclusion list (see [`EXCLUDED_DATASETS`]).
+pub fn is_excluded(name: &str) -> bool {
+    EXCLUDED_DATASETS.contains(&name) || name.starts_with("genetics")
+}
+
+/// Every dataset directory in `bids-examples` — i.e. immediate subdirectories
+/// that contain a `dataset_description.json` and are not excluded. Returns
+/// `(name, path)` sorted by name. Empty (with a clear panic) if the submodule
+/// has not been checked out.
+pub fn all_datasets() -> Vec<(String, PathBuf)> {
+    let root = bids_examples_dir();
+    let entries = std::fs::read_dir(&root).unwrap_or_else(|e| {
+        panic!(
+            "cannot read bids-examples at {} ({e}). Run `git submodule update --init`.",
+            root.display()
+        )
+    });
+
+    let mut datasets: Vec<(String, PathBuf)> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.join("dataset_description.json").is_file())
+        .filter_map(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| (n.to_string(), p.clone()))
+        })
+        .filter(|(name, _)| !is_excluded(name))
+        .collect();
+
+    assert!(
+        !datasets.is_empty(),
+        "no datasets found under {}. Run `git submodule update --init`.",
+        root.display()
+    );
+
+    datasets.sort_by(|a, b| a.0.cmp(&b.0));
+    datasets
+}
