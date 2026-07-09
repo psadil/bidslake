@@ -47,6 +47,35 @@ scans schema (`acq_time_scans`, …) plus `other_data`. Populated from
 `*_scans.tsv` where present, and augmented so that **every** discovered imaging
 file has a row (including files a `scans.tsv` omits, such as derivatives).
 
+**Query by BIDS concept, not by path.** `scans` also carries *generated* columns
+derived from `file_path`, so you filter on BIDS concepts directly instead of
+`LIKE '%…%'` on paths:
+
+- one column per BIDS **entity** — `sub`, `ses`, `task`, `run`, `acq`, `dir`,
+  `echo`, `ce`, `rec`, `space`, `desc`, … — holding the raw entity value
+  (`task='rest'`, `run='01'`), or `NULL` when the entity is absent (so `ses` is
+  `NULL` for datasets without sessions, and one query spans a mixed pool);
+- **`datatype`** — the datatype directory (`func`, `anat`, `dwi`, `fmap`, …);
+- **`suffix`** — the file suffix (`bold`, `T1w`, `dwi`, …);
+- **`extension`** — the file extension (`.nii.gz`, …);
+- **`modality`** — the broad modality (`mri`, `eeg`, `meg`, …).
+
+These are generated from the BIDS schema itself (its `objects.entities`,
+`objects.datatypes`, and `rules.modalities`), so they track the spec. They are
+DuckDB `GENERATED … VIRTUAL` columns — computed on read, costing nothing at
+ingest. Example:
+
+```sql
+SELECT dataset_id, sub, ses, run, file_path
+FROM scans
+WHERE task = 'rest' AND datatype = 'func' AND suffix = 'bold';
+```
+
+To filter sidecar metadata by concept, join back to `scans`:
+`… FROM sidecars sc JOIN scans s USING (dataset_id, file_path) WHERE s.task='rest'`.
+Entity values are raw (`sub='01'`); join to `participants` with
+`'sub-' || s.sub = p.participant_id`.
+
 ### `sidecars`
 The consolidated JSON-sidecar metadata for each imaging file, after applying
 **BIDS inheritance** (dataset- and subject-level sidecars merged into the most

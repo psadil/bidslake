@@ -1,3 +1,10 @@
+//! Filesystem abstraction for ingestion.
+//!
+//! [`BidsFileSystem`] lets the parser walk and read a dataset without caring
+//! whether it lives on local disk ([`LocalFileSystem`]) or in S3
+//! ([`crate::s3::S3Client`]). All paths returned by `walk` are relative to the
+//! dataset root.
+
 use anyhow::Result;
 use futures::future::BoxFuture;
 use std::path::{Path, PathBuf};

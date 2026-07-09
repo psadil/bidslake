@@ -75,15 +75,17 @@ JOIN scans s
 WHERE p.age < 30;
 ```
 
-See [docs/workflow.md](docs/workflow.md) for a full walkthrough (selecting files
-by metadata, renaming participants, inspecting sidecar metadata) and
-[docs/schema.md](docs/schema.md) for the table reference.
-
 ## Documentation
 
+Worked, **runnable** examples live in the API docs — build them with
+`cargo doc --open`. The crate-level docs cover the common tasks (select files by
+metadata or BIDS concept, iterate the results into a pipeline, rename a
+participant, find associated files, query across datasets); each is a doctest, so
+`cargo test --doc` runs them and they cannot drift from the code.
+
+- `cargo doc --open` — the API + usage docs (start at the crate page).
 - [docs/schema.md](docs/schema.md) — the database schema (tables, keys, the
-  `other_data` overflow column).
-- [docs/workflow.md](docs/workflow.md) — worked examples of common tasks in SQL.
+  `other_data` overflow column, and the generated BIDS-concept columns).
 - [docs/managed-mode.md](docs/managed-mode.md) — the fully-managed design.
 
 ## Status

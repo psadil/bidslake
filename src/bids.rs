@@ -1,3 +1,29 @@
+//! The ingestion pipeline: BIDS dataset → DuckDB rows.
+//!
+//! [`BidsParser::parse`] runs the whole ingest against a [`BidsFileSystem`]
+//! (local or S3), driven by a [`Schema`]. The steps:
+//!
+//! 1. **Walk & categorize.** List every file and bucket it: `dataset_description.json`,
+//!    `participants.tsv`, `sessions.tsv`, and everything else.
+//! 2. **Resolve the dataset id** from the root `dataset_description.json` (nested
+//!    ones under `derivatives/` are sorted shallowest-first so the root wins).
+//! 3. **Process in passes** — dataset_description, then participants, then
+//!    sessions, then all other files — via `process_file`. Filename
+//!    entities are parsed here (`sub-01` → `sub`), participants/sessions are
+//!    implicitly created (deduped in-memory via `seen_participants`/
+//!    `seen_sessions`), and TSV/JSON/bval-bvec files are dispatched to handlers.
+//! 4. **Flush deferred work**: `IntendedFor` file associations, parsed
+//!    `.bval`/`.bvec` diffusion arrays, and the `scans` table (every imaging file
+//!    gets a row, whether or not a `*_scans.tsv` listed it).
+//! 5. **Apply BIDS inheritance** to build `sidecars`: for each imaging file, the
+//!    applicable dataset-/subject-level JSON sidecars are merged (more-specific
+//!    wins), indexed by `(dataset_id, suffix)` to keep matching near-linear.
+//!
+//! Two performance notes worth knowing: `events` rows (by far the highest row
+//! count) are written with the DuckDB `Appender` (bulk path, bypassing SQL
+//! planning), and the entire parse runs inside a single transaction (opened by
+//! the caller in `main`), so it commits atomically.
+
 use crate::db::{BidsDb, FileAssociation};
 use crate::fs::BidsFileSystem;
 use crate::schema::Schema;

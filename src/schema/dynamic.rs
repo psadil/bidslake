@@ -1,7 +1,50 @@
+//! Generating the DuckDB schema from the BIDS schema.
+//!
+//! bidslake does not hardcode its tables — it derives them from the vendored
+//! BIDS `schema.json` (embedded via `SCHEMA_JSON`). That file is an *instance*
+//! of the BIDS **metaschema**, which defines the structure of concepts like
+//! entities, datatypes, suffixes, and modalities. Reading those `objects.*` and
+//! `rules.*` sections is how [`Schema`] stays faithful to whatever BIDS version
+//! is vendored.
+//!
+//! ## The column model
+//!
+//! For each generated table, [`Schema`] stores three things:
+//! - `table_definitions`: the `CREATE TABLE` text.
+//! - `table_columns`: a `Vec<(col_name, col_type, json_key)>` — the ordered
+//!   columns that ingestion writes to. `json_key` is the key looked up in the
+//!   input JSON row for that column (see [`Schema::insert`]).
+//! - `primary_keys`: the PK columns, used to build the idempotency guard.
+//!
+//! ### Insert-by-`json_key`, with `other_data` overflow
+//!
+//! [`Schema::insert`] takes a `serde_json` object (one row) and, for each column,
+//! pulls the value at `json_key` (falling back to `col_name`). Any input key that
+//! is *not* claimed by a column lands in the table's `other_data JSON` column, so
+//! nothing is dropped. The INSERT SQL is built once per table
+//! (`build_insert_statements`) and executed via `prepare_cached`, so
+//! DuckDB reuses one compiled plan across every row of that table.
+//!
+//! ## Generated (virtual) BIDS-concept columns
+//!
+//! On top of the written columns, the `scans` table carries generated columns —
+//! `task`, `sub`, `ses`, `run`, …, plus `datatype`, `suffix`, `extension`, and
+//! `modality` — produced by `generated_bids_columns`. These are
+//! `GENERATED ALWAYS AS (…) VIRTUAL`, computed from `file_path` on read, so they
+//! let callers query by BIDS concept (`WHERE task = 'rest'`) instead of by path
+//! regex, and are *not* part of `table_columns` (the write path never touches
+//! them). They too are generated from `objects.entities` / `objects.datatypes` /
+//! `rules.modalities`.
+//!
+//! The static tables `diffusion` and `file_associations` live in the parent
+//! [`crate::schema`] module, not here.
+
 use duckdb::{Connection, Result};
 use serde_json::Value;
 use std::collections::HashMap;
 
+/// The vendored BIDS schema, embedded at compile time. An instance of the BIDS
+/// metaschema; its `objects.*` and `rules.*` sections drive table generation.
 const SCHEMA_JSON: &str = include_str!("../data/schema.json");
 
 #[derive(Clone, Debug)]
@@ -208,6 +251,112 @@ impl Schema {
     }
 
     /// Generate scans and sidecars tables
+    /// Build the `GENERATED ALWAYS AS (…) VIRTUAL` column definitions that expose
+    /// BIDS concepts on the `scans` table, derived from `file_path`.
+    ///
+    /// The column set is generated from the vendored BIDS schema (whose structure
+    /// the BIDS *metaschema* defines), so it tracks the spec rather than being
+    /// hardcoded:
+    ///
+    /// - **one column per entity** in `objects.entities`, named by the entity's
+    ///   `name` (`task`, `sub`, `ses`, `run`, …). The value pattern follows the
+    ///   entity's `format`: `index` entities match `[0-9]+`, `label` entities
+    ///   `[0-9A-Za-z]+`. The match is boundary-anchored (`(?:^|[_/])name-(value)`)
+    ///   so e.g. `rec-` never matches inside `recording-…`, and `NULLIF(…, '')`
+    ///   yields SQL `NULL` when the entity is absent (e.g. `ses` for a dataset
+    ///   without sessions — which is what lets one query span a mixed pool).
+    /// - **`datatype`** — the BIDS datatype directory (`func`, `anat`, …) from
+    ///   `objects.datatypes`.
+    /// - **`suffix`** — the trailing `_<suffix>` before the extension.
+    /// - **`extension`** — the file extension (`.nii.gz`, `.tsv`).
+    /// - **`modality`** — the broad modality (`mri`, `eeg`, …) mapped from the
+    ///   datatype directory via `rules.modalities`, emitted as a `CASE`.
+    ///
+    /// Example emitted column (for the `task` entity):
+    /// ```sql
+    /// "task" VARCHAR GENERATED ALWAYS AS (
+    ///     NULLIF(regexp_extract(file_path, '(?:^|[_/])task-([0-9A-Za-z]+)', 1), '')
+    /// ) VIRTUAL
+    /// ```
+    ///
+    /// These are intentionally left out of `table_columns`, so [`Schema::insert`]
+    /// neither lists nor binds them; DuckDB computes each from `file_path` at
+    /// query time. Adding or changing entities is therefore a schema-file change
+    /// with no impact on the write path.
+    fn generated_bids_columns(&self) -> Vec<String> {
+        let mut cols = Vec::new();
+
+        // One column per BIDS entity, keyed by its short `name`.
+        if let Some(entities) = self.schema["objects"]["entities"].as_object() {
+            let mut ents: Vec<(&str, &str)> = entities
+                .values()
+                .filter_map(|e| {
+                    let name = e.get("name")?.as_str()?;
+                    let valpat = match e.get("format").and_then(|f| f.as_str()) {
+                        Some("index") => "[0-9]+",
+                        _ => "[0-9A-Za-z]+",
+                    };
+                    Some((name, valpat))
+                })
+                .collect();
+            ents.sort_by(|a, b| a.0.cmp(b.0)); // deterministic DDL
+            for (name, valpat) in ents {
+                cols.push(format!(
+                    "\"{name}\" VARCHAR GENERATED ALWAYS AS (NULLIF(regexp_extract(file_path, '(?:^|[_/]){name}-({valpat})', 1), '')) VIRTUAL"
+                ));
+            }
+        }
+
+        // datatype directory (func/anat/dwi/...).
+        if let Some(dts) = self.schema["objects"]["datatypes"].as_object() {
+            let mut keys: Vec<&str> = dts.keys().map(|k| k.as_str()).collect();
+            keys.sort();
+            if !keys.is_empty() {
+                let alt = keys.join("|");
+                cols.push(format!(
+                    "datatype VARCHAR GENERATED ALWAYS AS (NULLIF(regexp_extract(file_path, '/({alt})/', 1), '')) VIRTUAL"
+                ));
+            }
+        }
+
+        // suffix (trailing _<suffix> before the extension) and extension.
+        cols.push(
+            "suffix VARCHAR GENERATED ALWAYS AS (NULLIF(regexp_extract(file_path, '_([A-Za-z0-9]+)\\.[^/]+$', 1), '')) VIRTUAL"
+                .to_string(),
+        );
+        cols.push(
+            "extension VARCHAR GENERATED ALWAYS AS (NULLIF(regexp_extract(file_path, '(\\.[^/]+)$', 1), '')) VIRTUAL"
+                .to_string(),
+        );
+
+        // modality (mri/eeg/...) mapped from the datatype dir via rules.modalities.
+        if let Some(mods) = self.schema["rules"]["modalities"].as_object() {
+            let mut keys: Vec<&str> = mods.keys().map(|k| k.as_str()).collect();
+            keys.sort();
+            let mut whens = Vec::new();
+            for m in keys {
+                if let Some(dts) = mods[m]["datatypes"].as_array() {
+                    let alt: Vec<&str> = dts.iter().filter_map(|d| d.as_str()).collect();
+                    if !alt.is_empty() {
+                        whens.push(format!(
+                            "WHEN regexp_matches(file_path, '/({})/') THEN '{}'",
+                            alt.join("|"),
+                            m
+                        ));
+                    }
+                }
+            }
+            if !whens.is_empty() {
+                cols.push(format!(
+                    "modality VARCHAR GENERATED ALWAYS AS (CASE {} ELSE NULL END) VIRTUAL",
+                    whens.join(" ")
+                ));
+            }
+        }
+
+        cols
+    }
+
     fn generate_scans_tables(&mut self) {
         // 1. Generate 'scans' table (minimal, based on rules)
         let mut scans_columns = Vec::new();
@@ -272,6 +421,12 @@ impl Schema {
             "JSON".to_string(),
             "other_data".to_string(),
         ));
+
+        // BIDS entities/datatype/suffix/modality as generated (virtual) columns,
+        // derived from `file_path`. These are NOT added to `scans_fields`, so the
+        // insert path never touches them — they're computed on read. See
+        // `generated_bids_columns` for how they're built from the BIDS schema.
+        scans_columns.extend(self.generated_bids_columns());
 
         // Constraints for scans
         scans_columns.push("PRIMARY KEY (dataset_id, file_path)".to_string());

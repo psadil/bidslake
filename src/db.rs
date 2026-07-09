@@ -1,7 +1,17 @@
+//! Thin wrapper over the DuckDB connection.
+//!
+//! [`BidsDb`] owns the `duckdb::Connection` and exposes the write primitives the
+//! ingestion pipeline uses. Row shaping and SQL generation live in
+//! [`crate::schema`]; this module just routes calls to it and holds the two
+//! hand-written insert paths ([`BidsDb::insert_diffusion`],
+//! [`BidsDb::insert_file_association`]) for the static tables.
+
 use crate::schema::{self, Schema};
 use duckdb::{params, Connection, Result};
 use serde_json::Value;
 
+/// A cross-reference between two files derived at ingest (e.g. an fmap's
+/// `IntendedFor`). Written to the `file_associations` table.
 #[derive(Debug, Clone)]
 pub struct FileAssociation {
     pub dataset_id: String,
@@ -10,16 +20,21 @@ pub struct FileAssociation {
     pub assoc_type: String,
 }
 
+/// Owns the DuckDB connection bidslake writes to and queries.
 pub struct BidsDb {
     pub conn: Connection,
 }
 
 impl BidsDb {
+    /// Open (or create) the database at `path`. Use `":memory:"` for a transient
+    /// in-memory database.
     pub fn new(path: &str) -> Result<Self> {
         let conn = Connection::open(path)?;
         Ok(Self { conn })
     }
 
+    /// Create every table: the schema-generated ones ([`Schema::create_tables_sql`])
+    /// plus the static `diffusion` and `file_associations` tables.
     pub fn create_tables(&self, schema: &Schema) -> Result<()> {
         let sqls = schema.create_tables_sql();
         for sql in sqls {
@@ -34,11 +49,14 @@ impl BidsDb {
         Ok(())
     }
 
+    /// Insert one row (`data`, a JSON object) into a schema-generated table,
+    /// mapping keys to columns via [`Schema::insert`].
     pub fn insert(&self, schema: &Schema, table_name: &str, data: &Value) -> Result<()> {
         schema.insert(&self.conn, table_name, data)?;
         Ok(())
     }
 
+    /// Insert one derived file association into `file_associations`.
     pub fn insert_file_association(&self, assoc: &FileAssociation) -> Result<()> {
         // Static SQL — prepare_cached reuses the plan across all associations.
         let mut stmt = self.conn.prepare_cached(
@@ -53,6 +71,8 @@ impl BidsDb {
         Ok(())
     }
 
+    /// Insert one diffusion row: the parsed `.bval` / `.bvec` arrays for a
+    /// diffusion NIfTI, stored as DuckDB `DOUBLE[]` list columns.
     pub fn insert_diffusion(
         &self,
         dataset_id: &str,

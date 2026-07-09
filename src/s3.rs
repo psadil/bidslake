@@ -1,3 +1,6 @@
+//! S3-backed [`BidsFileSystem`] for ingesting datasets straight from object
+//! storage (e.g. OpenNeuro's public bucket). Supports anonymous access.
+
 use crate::fs::BidsFileSystem;
 use anyhow::{Context, Result};
 use futures::future;

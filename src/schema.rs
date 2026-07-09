@@ -1,3 +1,11 @@
+//! The DuckDB schema.
+//!
+//! Most tables are generated dynamically from the vendored BIDS schema — see
+//! [`dynamic`] (and [`Schema`]) for that machinery, which is the heart of how
+//! bidslake maps BIDS onto SQL. This module also holds the two *static* tables
+//! whose shape doesn't come from the BIDS schema: `diffusion` (parsed bval/bvec
+//! arrays) and `file_associations` (derived `IntendedFor`-style cross-references).
+
 pub mod dynamic;
 pub use dynamic::Schema;
 
