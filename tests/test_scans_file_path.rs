@@ -55,7 +55,7 @@ async fn test_scans_file_path_with_root_uri() -> Result<()> {
         file_paths.len()
     );
     assert!(
-        file_paths.len() > 0,
+        !file_paths.is_empty(),
         "Should have at least one entry in scans table"
     );
 

@@ -10,6 +10,7 @@ pub struct Schema {
     table_definitions: HashMap<String, String>,
     table_columns: HashMap<String, Vec<(String, String, String)>>, // table -> [(col_name, col_type, json_key)]
     primary_keys: HashMap<String, Vec<String>>,                    // table -> [pk_col_names]
+    insert_sql: HashMap<String, String>, // table -> prebuilt INSERT statement
 }
 
 impl Schema {
@@ -31,9 +32,64 @@ impl Schema {
             table_definitions: HashMap::new(),
             table_columns: HashMap::new(),
             primary_keys: HashMap::new(),
+            insert_sql: HashMap::new(),
         };
         instance.generate_definitions();
+        instance.build_insert_statements();
         instance
+    }
+
+    /// Precompute the INSERT statement for every table once, so ingestion never
+    /// rebuilds the (identical, per-table) SQL string per row. Combined with
+    /// `prepare_cached` at execution time, this reuses the compiled plan across
+    /// all rows of a table.
+    fn build_insert_statements(&mut self) {
+        let tables: Vec<String> = self.table_columns.keys().cloned().collect();
+        for table in tables {
+            if let Some(sql) = self.build_insert_sql(&table) {
+                self.insert_sql.insert(table, sql);
+            }
+        }
+    }
+
+    /// Build the `INSERT ... SELECT ... [WHERE NOT EXISTS ...]` statement for a
+    /// table from its column and primary-key metadata.
+    fn build_insert_sql(&self, table_name: &str) -> Option<String> {
+        let fields = self.table_columns.get(table_name)?;
+        let col_names: Vec<&str> = fields.iter().map(|(n, _, _)| n.as_str()).collect();
+        let placeholders: Vec<String> = (1..=col_names.len()).map(|i| format!("${}", i)).collect();
+
+        let mut sql = format!(
+            "INSERT INTO {} ({}) SELECT {}",
+            table_name,
+            col_names.join(", "),
+            placeholders.join(", ")
+        );
+
+        // Idempotency guard: skip the row if a matching primary key already
+        // exists (safe re-indexing). Kept for correctness; made cheap by caching.
+        if let Some(pks) = self.primary_keys.get(table_name) {
+            if !pks.is_empty() {
+                let where_clauses: Vec<String> = pks
+                    .iter()
+                    .map(|pk| {
+                        let idx = fields
+                            .iter()
+                            .position(|(name, _, _)| name == pk)
+                            .expect("Primary key column not found in fields");
+                        format!("{} = ${}", pk, idx + 1)
+                    })
+                    .collect();
+
+                sql.push_str(&format!(
+                    " WHERE NOT EXISTS (SELECT 1 FROM {} WHERE {})",
+                    table_name,
+                    where_clauses.join(" AND ")
+                ));
+            }
+        }
+
+        Some(sql)
     }
 
     fn generate_definitions(&mut self) {
@@ -598,41 +654,13 @@ impl Schema {
             .map(|(_, _, json_key)| json_key.as_str())
             .collect();
 
-        let col_names: Vec<&str> = fields.iter().map(|(n, _, _)| n.as_str()).collect();
-
-        // Generate numbered placeholders $1, $2, ...
-        let placeholders: Vec<String> = (1..=col_names.len()).map(|i| format!("${}", i)).collect();
-
-        // Construct SQL
-        let mut sql = format!(
-            "INSERT INTO {} ({}) SELECT {}",
-            table_name,
-            col_names.join(", "),
-            placeholders.join(", ")
-        );
-
-        // Add WHERE NOT EXISTS clause if we have primary keys
-        if let Some(pks) = self.primary_keys.get(table_name) {
-            if !pks.is_empty() {
-                let where_clauses: Vec<String> = pks
-                    .iter()
-                    .map(|pk| {
-                        // Find index of this PK in fields to get correct $N
-                        let idx = fields
-                            .iter()
-                            .position(|(name, _, _)| name == pk)
-                            .expect("Primary key column not found in fields");
-                        format!("{} = ${}", pk, idx + 1)
-                    })
-                    .collect();
-
-                sql.push_str(&format!(
-                    " WHERE NOT EXISTS (SELECT 1 FROM {} WHERE {})",
-                    table_name,
-                    where_clauses.join(" AND ")
-                ));
-            }
-        }
+        // Use the statement built once at load time.
+        let sql = self.insert_sql.get(table_name).ok_or_else(|| {
+            duckdb::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("No insert statement for table {}", table_name),
+            )))
+        })?;
 
         let mut params = Vec::new();
         // We need to keep the values alive until the end of the function
@@ -693,7 +721,10 @@ impl Schema {
                     col_type.as_str(),
                     "DOUBLE" | "BIGINT" | "FLOAT" | "REAL" | "INTEGER" | "HUGEINT"
                 );
+                let is_bool_col = col_type == "BOOLEAN";
                 match val {
+                    // A number can't go into a BOOLEAN column.
+                    Some(Value::Number(_)) if is_bool_col => params.push(None),
                     Some(Value::Number(n)) => {
                         if n.is_i64() {
                             params.push(Some(duckdb::types::Value::BigInt(n.as_i64().unwrap())));
@@ -712,16 +743,27 @@ impl Schema {
                             params.push(None);
                         }
                     }
+                    Some(Value::String(s)) if is_bool_col => match s.as_str() {
+                        "true" | "True" | "TRUE" => {
+                            params.push(Some(duckdb::types::Value::Boolean(true)))
+                        }
+                        "false" | "False" | "FALSE" => {
+                            params.push(Some(duckdb::types::Value::Boolean(false)))
+                        }
+                        _ => params.push(None),
+                    },
                     Some(Value::String(s)) => {
                         params.push(Some(duckdb::types::Value::Text(s.clone())));
                     }
-                    // Non-scalar (array/object) or bool value in a numeric column:
-                    // cannot represent it, so store NULL.
-                    Some(Value::Array(_)) | Some(Value::Object(_)) | Some(Value::Bool(_))
-                        if is_numeric_col =>
+                    // Non-scalar (array/object) value in a scalar (numeric or bool)
+                    // column: cannot represent it, so store NULL and keep the row.
+                    Some(Value::Array(_)) | Some(Value::Object(_))
+                        if is_numeric_col || is_bool_col =>
                     {
                         params.push(None);
                     }
+                    // A bool can't go into a numeric column.
+                    Some(Value::Bool(_)) if is_numeric_col => params.push(None),
                     Some(Value::Bool(b)) => {
                         params.push(Some(duckdb::types::Value::Boolean(*b)));
                     }
@@ -748,7 +790,9 @@ impl Schema {
         let params_refs: Vec<&dyn duckdb::ToSql> =
             params.iter().map(|p| p as &dyn duckdb::ToSql).collect();
 
-        conn.execute(&sql, params_refs.as_slice())?;
+        // prepare_cached reuses the compiled plan across every row of this table.
+        let mut stmt = conn.prepare_cached(sql)?;
+        stmt.execute(params_refs.as_slice())?;
         Ok(())
     }
 }

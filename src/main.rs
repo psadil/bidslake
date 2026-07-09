@@ -129,7 +129,14 @@ async fn run_indexer(
     };
 
     let mut parser: BidsParser = BidsParser::new(fs, dataset_id, schema);
+
+    // Wrap the whole ingest in one transaction. DuckDB otherwise autocommits
+    // every statement, fsyncing per row on a file-backed database — the single
+    // biggest cost for real (file) ingests. Dropping `txn` without committing
+    // (i.e. on an error `?` below) rolls the whole ingest back.
+    let txn = db.conn.unchecked_transaction()?;
     parser.parse(&db).await?;
+    txn.commit()?;
 
     println!("Conversion complete!");
 

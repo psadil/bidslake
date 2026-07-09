@@ -40,10 +40,16 @@ impl BidsDb {
     }
 
     pub fn insert_file_association(&self, assoc: &FileAssociation) -> Result<()> {
-        self.conn.execute(
+        // Static SQL — prepare_cached reuses the plan across all associations.
+        let mut stmt = self.conn.prepare_cached(
             "INSERT INTO file_associations (dataset_id, source_file_path, target_file_path, association_type) VALUES (?, ?, ?, ?)",
-            params![&assoc.dataset_id, &assoc.source_file, &assoc.target_file, &assoc.assoc_type],
         )?;
+        stmt.execute(params![
+            &assoc.dataset_id,
+            &assoc.source_file,
+            &assoc.target_file,
+            &assoc.assoc_type
+        ])?;
         Ok(())
     }
 

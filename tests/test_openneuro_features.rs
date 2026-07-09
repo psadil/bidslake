@@ -1,122 +1,77 @@
+//! Feature-focused integration tests against the offline `bids-examples`
+//! corpus: diffusion (bval/bvec), single-band reference (sbref) files, and
+//! fieldmaps.
+//!
+//! These previously fetched datasets from OpenNeuro over S3 (network-dependent,
+//! hence `#[ignore]`d) and queried a `files` table that no longer exists. They
+//! now run offline against the vendored submodule and the current schema.
+
+mod common;
+
 use anyhow::Result;
-/// Integration tests for OpenNeuro datasets with specific features:
-/// - Diffusion data (bval/bvec)
-/// - Fieldmap data (fmap with IntendedFor)
-/// - Single-band reference files (sbref)
-use bidslake::{bids::BidsParser, db::BidsDb, s3::S3Client, schema::Schema};
+use common::{bids_example, count, ingest};
 use duckdb::Connection;
 
-use tempfile::TempDir;
-
-/// Test ds000206 (THP dataset) - Contains diffusion data with bval/bvec
+/// ds000117 carries per-acquisition dwi with bval/bvec next to the niftis, so
+/// the diffusion table is populated with parsed arrays.
 #[tokio::test]
-#[ignore] // Ignore by default - run with --ignored flag
-async fn test_ds000206_diffusion_data() -> Result<()> {
-    let temp_dir = TempDir::new()?;
-    let db_path = temp_dir.path().join("ds000206.duckdb");
+async fn test_diffusion_data() -> Result<()> {
+    let db = ingest(bids_example("ds000117")).await?;
 
-    let db = BidsDb::new(db_path.to_str().unwrap())?;
-    let schema = Schema::load(None);
-    db.create_tables(&schema)?;
-
-    // Use S3 client with anonymous access
-    let s3 = S3Client::new("openneuro.org", "ds000206", true).await?;
-    let mut parser = BidsParser::new(Box::new(s3), Some("ds000206".to_string()), schema);
-    parser.parse(&db).await?;
-
-    // Verify diffusion table has data
-    let diffusion_count: i64 = db
-        .conn
-        .query_row("SELECT COUNT(*) FROM diffusion", [], |r| r.get(0))?;
+    let diffusion_count = count(&db, "diffusion")?;
     assert!(
         diffusion_count > 0,
-        "Should have diffusion data with bval/bvec"
+        "should have diffusion data with bval/bvec"
     );
-    println!("✓ ds000206: Found {} diffusion files", diffusion_count);
 
-    // Verify bval and bvec arrays are populated
+    // bval/bvec are stored as real DuckDB arrays.
     verify_diffusion_arrays(&db.conn)?;
-
     Ok(())
 }
 
-/// Test ds001734 (NARPS) - Contains sbref files
+/// ieeg_visual_multimodal contains single-band reference (`_sbref`) images.
+/// sbref files are imaging data, so each must land in the scans table.
 #[tokio::test]
-#[ignore]
-async fn test_ds001734_sbref_files() -> Result<()> {
-    let temp_dir = TempDir::new()?;
-    let db_path = temp_dir.path().join("ds001734.duckdb");
+async fn test_sbref_files() -> Result<()> {
+    let db = ingest(bids_example("ieeg_visual_multimodal")).await?;
 
-    let db = BidsDb::new(db_path.to_str().unwrap())?;
-    let schema = Schema::load(None);
-    db.create_tables(&schema)?;
-
-    let s3 = S3Client::new("openneuro.org", "ds001734", true).await?;
-    let mut parser = BidsParser::new(Box::new(s3), Some("ds001734".to_string()), schema);
-    parser.parse(&db).await?;
-
-    // Verify sbref files exist
     let sbref_count: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM files WHERE suffix = 'sbref'",
+        "SELECT COUNT(*) FROM scans WHERE file_path LIKE '%_sbref.nii%'",
         [],
         |r| r.get(0),
     )?;
-    assert!(sbref_count > 0, "Should have sbref files");
-    println!("✓ ds001734: Found {} sbref files", sbref_count);
-
-    // List some sbref files for verification
-    let sbref_files: Vec<String> = db
-        .conn
-        .prepare("SELECT file_path FROM files WHERE suffix = 'sbref' LIMIT 3")?
-        .query_map([], |row| row.get(0))?
-        .collect::<Result<Vec<String>, _>>()?;
-
-    for file in &sbref_files {
-        println!("  - {}", file);
-    }
-
+    assert!(sbref_count > 0, "should capture sbref files as scans");
     Ok(())
 }
 
-/// Test ds000244 - Additional fieldmap dataset
+/// ds000117 has fmap acquisitions; every fmap imaging file must appear in scans.
 #[tokio::test]
-#[ignore]
-async fn test_ds000244_fieldmaps() -> Result<()> {
-    let temp_dir = TempDir::new()?;
-    let db_path = temp_dir.path().join("ds000244.duckdb");
+async fn test_fieldmaps() -> Result<()> {
+    let db = ingest(bids_example("ds000117")).await?;
 
-    let db = BidsDb::new(db_path.to_str().unwrap())?;
-    let schema = Schema::load(None);
-    db.create_tables(&schema)?;
-
-    let s3 = S3Client::new("openneuro.org", "ds000244", true).await?;
-    let mut parser = BidsParser::new(Box::new(s3), Some("ds000244".to_string()), schema);
-    parser.parse(&db).await?;
-
-    // Verify fmap directory exists
     let fmap_count: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM files WHERE file_path LIKE '%/fmap/%'",
+        "SELECT COUNT(*) FROM scans WHERE file_path LIKE '%/fmap/%'",
         [],
         |r| r.get(0),
     )?;
-    assert!(fmap_count > 0, "Should have files in fmap directory");
-    println!("✓ ds000244: Found {} fmap files", fmap_count);
-
+    assert!(fmap_count > 0, "should have files in the fmap directory");
     Ok(())
 }
 
-// Helper function to verify diffusion arrays
+/// Verify bval/bvec are stored as arrays with matching lengths.
 fn verify_diffusion_arrays(conn: &Connection) -> Result<()> {
-    // Check that bval/bvec are properly parsed as arrays
-    let sample: Option<String> =
-        conn.query_row("SELECT bval::VARCHAR FROM diffusion LIMIT 1", [], |r| {
-            r.get(0)
-        })?;
+    let bval: String = conn.query_row("SELECT bval::VARCHAR FROM diffusion LIMIT 1", [], |r| {
+        r.get(0)
+    })?;
+    assert!(bval.starts_with('['), "bval should be an array, got {bval}");
 
-    if let Some(bval_str) = sample {
-        assert!(bval_str.starts_with('['), "bval should be an array");
-        println!("  ✓ bval array format verified");
-    }
-
+    // Every diffusion row's bvec components must line up with its bval length.
+    let mismatched: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM diffusion WHERE len(bvec_x) <> len(bval) \
+         OR len(bvec_y) <> len(bval) OR len(bvec_z) <> len(bval)",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(mismatched, 0, "bvec arrays must match bval length");
     Ok(())
 }

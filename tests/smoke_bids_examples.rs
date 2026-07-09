@@ -9,11 +9,6 @@ mod common;
 
 use common::{all_datasets, count};
 
-// Ingesting all ~107 datasets takes several minutes (the wide sidecars table
-// makes each insert costly), so this is #[ignore]d to keep routine `cargo test`
-// fast. The curated tests are the always-on deep signal. Run the full corpus
-// with: `cargo test --test smoke_bids_examples -- --ignored --nocapture`.
-#[ignore = "slow full-corpus sweep; run with --ignored"]
 #[tokio::test]
 async fn ingest_every_bids_example() {
     let datasets = all_datasets();

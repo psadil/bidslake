@@ -32,7 +32,10 @@ async fn test_root_uri_path_reconstruction() -> Result<()> {
         uri.starts_with("file://"),
         "local paths should use file:// URI scheme, got {uri}"
     );
-    assert!(uri.contains("ds001"), "root_uri should contain dataset path: {uri}");
+    assert!(
+        uri.contains("ds001"),
+        "root_uri should contain dataset path: {uri}"
+    );
     Ok(())
 }
 

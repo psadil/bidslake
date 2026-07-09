@@ -5,7 +5,7 @@ use anyhow::Result;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use regex::Regex;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 pub struct BidsParser {
@@ -18,6 +18,10 @@ pub struct BidsParser {
     imaging_files: Vec<ImagingFile>,
     has_scans_tsv: bool,
     sidecars: Vec<SidecarInfo>,
+    // Track which implicit participants/sessions we've already inserted so the
+    // per-file loop doesn't re-issue an insert for every file of a subject.
+    seen_participants: HashSet<(String, String)>, // (dataset_id, participant_id)
+    seen_sessions: HashSet<(String, String, String)>, // (dataset_id, participant_id, session_id)
 }
 
 #[derive(Clone)]
@@ -54,6 +58,8 @@ impl BidsParser {
             imaging_files: Vec::new(),
             has_scans_tsv: false,
             sidecars: Vec::new(),
+            seen_participants: HashSet::new(),
+            seen_sessions: HashSet::new(),
         }
     }
 
@@ -261,6 +267,28 @@ impl BidsParser {
         );
         let entity_re = Regex::new(r"([a-zA-Z0-9]+)-([a-zA-Z0-9]+)")?;
 
+        // A sidecar can only apply to an imaging file of the same dataset and
+        // suffix, so index sidecars by (dataset_id, suffix) and precompute each
+        // one's parent directory. This turns inheritance matching from
+        // O(imaging_files x all_sidecars) into O(imaging_files x same-suffix
+        // sidecars) — the dominant ingestion cost for sidecar-heavy datasets.
+        let sidecar_dirs: Vec<&Path> = self
+            .sidecars
+            .iter()
+            .map(|s| {
+                Path::new(&s.file_path)
+                    .parent()
+                    .unwrap_or_else(|| Path::new(""))
+            })
+            .collect();
+        let mut sidecar_index: HashMap<(&str, &str), Vec<usize>> = HashMap::new();
+        for (i, s) in self.sidecars.iter().enumerate() {
+            sidecar_index
+                .entry((s.dataset_id.as_str(), s.suffix.as_str()))
+                .or_default()
+                .push(i);
+        }
+
         for img_file in &self.imaging_files {
             let mut merged_metadata = serde_json::Map::new();
 
@@ -277,61 +305,45 @@ impl BidsParser {
                 } else {
                     file_name[last_underscore + 1..].to_string()
                 }
-            } else {
+            } else if let Some(first_dot) = file_name.find('.') {
                 // Should have a suffix if it's BIDS, but fallback
-                if let Some(first_dot) = file_name.find('.') {
-                    file_name[..first_dot].to_string()
-                } else {
-                    file_name.to_string()
-                }
+                file_name[..first_dot].to_string()
+            } else {
+                file_name.to_string()
             };
 
-            // Find applicable sidecars
-            let mut applicable_sidecars: Vec<&SidecarInfo> = self
-                .sidecars
-                .iter()
-                .filter(|s| {
-                    // Check dataset_id match
-                    if s.dataset_id != img_file.dataset_id {
-                        return false;
+            // Candidates already share dataset_id + suffix; keep those whose
+            // directory is a prefix of the image's and whose entities are a
+            // subset of the image's.
+            let img_dir = Path::new(&img_file.file_path)
+                .parent()
+                .unwrap_or_else(|| Path::new(""));
+            let mut applicable: Vec<usize> = Vec::new();
+            if let Some(candidates) =
+                sidecar_index.get(&(img_file.dataset_id.as_str(), img_suffix.as_str()))
+            {
+                for &i in candidates {
+                    if !img_dir.starts_with(sidecar_dirs[i]) {
+                        continue;
                     }
-
-                    // 1. Must match suffix
-                    if s.suffix != img_suffix {
-                        return false;
+                    let entities = &self.sidecars[i].entities;
+                    if entities
+                        .iter()
+                        .all(|(key, value)| img_entities.get(key) == Some(value))
+                    {
+                        applicable.push(i);
                     }
-
-                    // 2. Must be in same directory or parent directory
-                    let img_dir = std::path::Path::new(&img_file.file_path)
-                        .parent()
-                        .unwrap_or(std::path::Path::new(""));
-                    let sidecar_dir = std::path::Path::new(&s.file_path)
-                        .parent()
-                        .unwrap_or(std::path::Path::new(""));
-
-                    if !img_dir.starts_with(sidecar_dir) {
-                        return false;
-                    }
-
-                    // 3. Entities must be a subset of image entities
-                    for (key, value) in &s.entities {
-                        if img_entities.get(key) != Some(value) {
-                            return false;
-                        }
-                    }
-
-                    true
-                })
-                .collect();
+                }
+            }
 
             // Sort by specificity (number of entities) - least specific first for merging
             // BIDS Principle of Inheritance: values from more specific files override less specific ones.
             // So we want to merge from top (least specific) to bottom (most specific).
-            applicable_sidecars.sort_by_key(|s| s.entities.len());
+            applicable.sort_by_key(|&i| self.sidecars[i].entities.len());
 
             // Merge metadata
-            for sidecar in applicable_sidecars {
-                if let Value::Object(map) = &sidecar.content {
+            for &i in &applicable {
+                if let Value::Object(map) = &self.sidecars[i].content {
                     for (k, v) in map {
                         merged_metadata.insert(k.clone(), v.clone());
                     }
@@ -396,35 +408,45 @@ impl BidsParser {
         let participant_id = entities.get("sub").map(|s| format!("sub-{}", s));
         let session_id = entities.get("ses").map(|s| format!("ses-{}", s));
 
-        // Auto-create participant/session if they don't exist (implicit)
+        // Auto-create participant/session if they don't exist (implicit).
+        // Only hit the DB the first time we see each one; every file of a subject
+        // would otherwise re-issue an identical (guarded, no-op) insert.
         if let Some(ref pid) = participant_id {
-            // Try to insert participant
-            let mut participant_data = serde_json::Map::new();
-            participant_data.insert(
-                "dataset_id".to_string(),
-                Value::String(dataset_id.to_string()),
-            );
-            participant_data.insert("participant_id".to_string(), Value::String(pid.clone()));
-
-            // Ignore errors - participant might already exist
-            let _ = db.insert(
-                &self.schema,
-                "participants",
-                &Value::Object(participant_data),
-            );
-
-            if let Some(ref sid) = session_id {
-                // Try to insert the session
-                let mut session_data = serde_json::Map::new();
-                session_data.insert(
+            if self
+                .seen_participants
+                .insert((dataset_id.to_string(), pid.clone()))
+            {
+                let mut participant_data = serde_json::Map::new();
+                participant_data.insert(
                     "dataset_id".to_string(),
                     Value::String(dataset_id.to_string()),
                 );
-                session_data.insert("session_id".to_string(), Value::String(sid.clone()));
-                session_data.insert("participant_id".to_string(), Value::String(pid.clone()));
+                participant_data.insert("participant_id".to_string(), Value::String(pid.clone()));
 
-                // Ignore errors - session might already exist
-                let _ = db.insert(&self.schema, "sessions", &Value::Object(session_data));
+                // Ignore errors - participant might already exist (e.g. from participants.tsv)
+                let _ = db.insert(
+                    &self.schema,
+                    "participants",
+                    &Value::Object(participant_data),
+                );
+            }
+
+            if let Some(ref sid) = session_id {
+                if self
+                    .seen_sessions
+                    .insert((dataset_id.to_string(), pid.clone(), sid.clone()))
+                {
+                    let mut session_data = serde_json::Map::new();
+                    session_data.insert(
+                        "dataset_id".to_string(),
+                        Value::String(dataset_id.to_string()),
+                    );
+                    session_data.insert("session_id".to_string(), Value::String(sid.clone()));
+                    session_data.insert("participant_id".to_string(), Value::String(pid.clone()));
+
+                    // Ignore errors - session might already exist
+                    let _ = db.insert(&self.schema, "sessions", &Value::Object(session_data));
+                }
             }
         }
 
@@ -786,40 +808,69 @@ impl BidsParser {
             .delimiter(b'\t')
             .from_reader(content.as_bytes());
 
+        // Events are the dominant row source (thousands per task run) and the
+        // table is append-only with no primary key, so use DuckDB's Appender —
+        // the bulk-load path — instead of one planned INSERT per row.
+        // Column order must match the table: dataset_id, file_path, onset,
+        // duration, other_data.
+        let mut appender = db.conn.appender("events")?;
+
+        // Coerce a cell to a number the way the rest of ingestion does: parse as
+        // f64, otherwise keep it as a string.
+        let coerce = |val: &str| -> Value {
+            if let Ok(num) = val.parse::<f64>() {
+                Value::Number(
+                    serde_json::Number::from_f64(num)
+                        .unwrap_or_else(|| serde_json::Number::from(0)),
+                )
+            } else {
+                Value::String(val.to_string())
+            }
+        };
+
         for result in rdr.deserialize() {
             let record: HashMap<String, String> = result?;
 
-            // Convert the record to a Value, converting numeric strings to numbers
-            let mut value_map = serde_json::Map::new();
-            for (key, val) in &record {
-                // Try to parse as f64, otherwise keep as string
-                let value = if let Ok(num) = val.parse::<f64>() {
-                    serde_json::Value::Number(
-                        serde_json::Number::from_f64(num)
-                            .unwrap_or_else(|| serde_json::Number::from(0)),
-                    )
-                } else {
-                    serde_json::Value::String(val.clone())
-                };
-                value_map.insert(key.clone(), value);
-            }
+            // onset/duration land in their own numeric (FLOAT) columns; a
+            // missing/non-numeric value becomes NULL.
+            let num_col = |key: &str| -> duckdb::types::Value {
+                match record.get(key).and_then(|v| v.parse::<f64>().ok()) {
+                    Some(n) => duckdb::types::Value::Float(n as f32),
+                    None => duckdb::types::Value::Null,
+                }
+            };
+            let onset = num_col("onset");
+            let duration = num_col("duration");
 
-            value_map.insert(
-                "dataset_id".to_string(),
-                Value::String(dataset_id.to_string()),
-            );
-            value_map.insert("file_path".to_string(), Value::String(rel_path.to_string()));
+            // other_data mirrors the generic insert path: every field except the
+            // dedicated columns (onset, duration, dataset_id), plus file_path and
+            // participant/session ids. serde_json::Map sorts keys, matching the
+            // previous output byte-for-byte.
+            let mut other = serde_json::Map::new();
+            for (key, val) in &record {
+                if key == "onset" || key == "duration" {
+                    continue;
+                }
+                other.insert(key.clone(), coerce(val));
+            }
+            other.insert("file_path".to_string(), Value::String(rel_path.to_string()));
             if let Some(pid) = participant_id {
-                value_map.insert("participant_id".to_string(), Value::String(pid.to_string()));
+                other.insert("participant_id".to_string(), Value::String(pid.to_string()));
             }
             if let Some(sid) = session_id {
-                value_map.insert("session_id".to_string(), Value::String(sid.to_string()));
+                other.insert("session_id".to_string(), Value::String(sid.to_string()));
             }
-            value_map.insert("other_data".to_string(), Value::Object(value_map.clone()));
+            let other_json = serde_json::to_string(&Value::Object(other))?;
 
-            let value = serde_json::Value::Object(value_map);
-            db.insert(&self.schema, "events", &value)?;
+            appender.append_row([
+                duckdb::types::Value::Text(dataset_id.to_string()),
+                duckdb::types::Value::Text(rel_path.to_string()),
+                onset,
+                duration,
+                duckdb::types::Value::Text(other_json),
+            ])?;
         }
+        appender.flush()?;
         Ok(())
     }
 

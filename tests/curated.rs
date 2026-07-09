@@ -50,7 +50,10 @@ async fn ds001_structure_and_inheritance() -> anyhow::Result<()> {
         [],
         |r| r.get(0),
     )?;
-    assert_eq!(tr, 2.0, "RepetitionTime inherited from dataset-level bold.json");
+    assert_eq!(
+        tr, 2.0,
+        "RepetitionTime inherited from dataset-level bold.json"
+    );
 
     Ok(())
 }
@@ -61,14 +64,17 @@ async fn ds001_events() -> anyhow::Result<()> {
     let db = ingest(common::bids_example("ds001")).await?;
 
     let n_events = count(&db, "events")?;
-    assert!(n_events > 1000, "ds001 has thousands of event rows, got {n_events}");
+    assert!(
+        n_events > 1000,
+        "ds001 has thousands of event rows, got {n_events}"
+    );
 
     // onset must be numeric and non-negative.
-    let bad_onsets: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM events WHERE onset < 0",
-        [],
-        |r| r.get(0),
-    )?;
+    let bad_onsets: i64 =
+        db.conn
+            .query_row("SELECT COUNT(*) FROM events WHERE onset < 0", [], |r| {
+                r.get(0)
+            })?;
     assert_eq!(bad_onsets, 0);
     Ok(())
 }
@@ -86,7 +92,10 @@ async fn ds114_sessions() -> anyhow::Result<()> {
         .prepare("SELECT DISTINCT session_id FROM sessions ORDER BY 1")?
         .query_map([], |r| r.get(0))?
         .collect::<Result<_, _>>()?;
-    assert_eq!(sessions, vec!["ses-retest".to_string(), "ses-test".to_string()]);
+    assert_eq!(
+        sessions,
+        vec!["ses-retest".to_string(), "ses-test".to_string()]
+    );
     Ok(())
 }
 
@@ -123,7 +132,10 @@ async fn ds000117_diffusion_and_associations() -> anyhow::Result<()> {
         [],
         |r| r.get(0),
     )?;
-    assert!(fieldmaps > 0, "expected fieldmap associations from IntendedFor");
+    assert!(
+        fieldmaps > 0,
+        "expected fieldmap associations from IntendedFor"
+    );
 
     let resolved: i64 = db.conn.query_row(
         "SELECT COUNT(*) FROM file_associations a \
@@ -153,16 +165,23 @@ async fn multi_dataset_coexistence() -> anyhow::Result<()> {
         parser.parse(&db).await?;
     }
 
-    assert_eq!(count(&db, "dataset_description")?, 2, "two datasets present");
+    assert_eq!(
+        count(&db, "dataset_description")?,
+        2,
+        "two datasets present"
+    );
     // ds001 (16) + ds114 (10) participants, isolated by dataset_id.
     assert_eq!(count(&db, "participants")?, 26);
 
-    let ds114_participants: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM participants p JOIN dataset_description d USING (dataset_id) \
+    let ds114_participants: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM participants p JOIN dataset_description d USING (dataset_id) \
          WHERE d.name = 'A test of retest reliability of resting-state connectivity'",
-        [],
-        |r| r.get(0),
-    ).unwrap_or(-1);
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(-1);
     // Name assertion is best-effort (ds114's exact Name may vary); the isolation
     // guarantee is the participant sum above.
     let _ = ds114_participants;
