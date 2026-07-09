@@ -219,25 +219,14 @@ impl BidsParser {
             }
         }
 
-        // Insert pending diffusion data
+        // Insert pending diffusion data — only when we have both bval and bvec.
         for (nifti_path, diff) in &self.pending_diffusion {
-            // Only insert if we have both bval and bvec data
-            if diff.bval.is_some()
-                && diff.bvec_x.is_some()
-                && diff.bvec_y.is_some()
-                && diff.bvec_z.is_some()
+            if let (Some(bval), Some(bvec_x), Some(bvec_y), Some(bvec_z)) =
+                (&diff.bval, &diff.bvec_x, &diff.bvec_y, &diff.bvec_z)
+                && let Err(e) =
+                    db.insert_diffusion(&diff.dataset_id, nifti_path, bval, bvec_x, bvec_y, bvec_z)
             {
-                // Files table removed, so just insert directly
-                if let Err(e) = db.insert_diffusion(
-                    &diff.dataset_id,
-                    nifti_path,
-                    diff.bval.as_ref().unwrap(),
-                    diff.bvec_x.as_ref().unwrap(),
-                    diff.bvec_y.as_ref().unwrap(),
-                    diff.bvec_z.as_ref().unwrap(),
-                ) {
-                    eprintln!("Failed to insert diffusion data for {}: {}", nifti_path, e);
-                }
+                eprintln!("Failed to insert diffusion data for {}: {}", nifti_path, e);
             }
         }
 
@@ -457,22 +446,21 @@ impl BidsParser {
                 );
             }
 
-            if let Some(ref sid) = session_id {
-                if self
+            if let Some(ref sid) = session_id
+                && self
                     .seen_sessions
                     .insert((dataset_id.to_string(), pid.clone(), sid.clone()))
-                {
-                    let mut session_data = serde_json::Map::new();
-                    session_data.insert(
-                        "dataset_id".to_string(),
-                        Value::String(dataset_id.to_string()),
-                    );
-                    session_data.insert("session_id".to_string(), Value::String(sid.clone()));
-                    session_data.insert("participant_id".to_string(), Value::String(pid.clone()));
+            {
+                let mut session_data = serde_json::Map::new();
+                session_data.insert(
+                    "dataset_id".to_string(),
+                    Value::String(dataset_id.to_string()),
+                );
+                session_data.insert("session_id".to_string(), Value::String(sid.clone()));
+                session_data.insert("participant_id".to_string(), Value::String(pid.clone()));
 
-                    // Ignore errors - session might already exist
-                    let _ = db.insert(&self.schema, "sessions", &Value::Object(session_data));
-                }
+                // Ignore errors - session might already exist
+                let _ = db.insert(&self.schema, "sessions", &Value::Object(session_data));
             }
         }
 
@@ -720,13 +708,13 @@ impl BidsParser {
                 map.insert("other_data".to_string(), value_copy);
 
                 // Normalize participant_id
-                if let Some(pid) = map.get("participant_id").and_then(|v| v.as_str()) {
-                    if !pid.starts_with("sub-") {
-                        map.insert(
-                            "participant_id".to_string(),
-                            Value::String(format!("sub-{}", pid)),
-                        );
-                    }
+                if let Some(pid) = map.get("participant_id").and_then(|v| v.as_str())
+                    && !pid.starts_with("sub-")
+                {
+                    map.insert(
+                        "participant_id".to_string(),
+                        Value::String(format!("sub-{}", pid)),
+                    );
                 }
             }
 
@@ -754,13 +742,13 @@ impl BidsParser {
                 map.insert("other_data".to_string(), value_copy);
 
                 // Normalize session_id
-                if let Some(sid) = map.get("session_id").and_then(|v| v.as_str()) {
-                    if !sid.starts_with("ses-") {
-                        map.insert(
-                            "session_id".to_string(),
-                            Value::String(format!("ses-{}", sid)),
-                        );
-                    }
+                if let Some(sid) = map.get("session_id").and_then(|v| v.as_str())
+                    && !sid.starts_with("ses-")
+                {
+                    map.insert(
+                        "session_id".to_string(),
+                        Value::String(format!("ses-{}", sid)),
+                    );
                 }
             }
 
@@ -948,39 +936,38 @@ impl BidsParser {
         entities: &HashMap<String, String>,
     ) -> Result<()> {
         // Parse JSON to extract IntendedFor
-        if let Ok(json) = serde_json::from_str::<Value>(sidecar_content) {
-            if let Some(intended_for) = json.get("IntendedFor") {
-                // Determine association type from source file path
-                let assoc_type = self.infer_association_type(source_file, entities);
+        if let Ok(json) = serde_json::from_str::<Value>(sidecar_content)
+            && let Some(intended_for) = json.get("IntendedFor")
+        {
+            // Determine association type from source file path
+            let assoc_type = self.infer_association_type(source_file, entities);
 
-                match intended_for {
-                    Value::String(target) => {
-                        // Single target
-                        let normalized_target = self.normalize_path(target, source_file);
-                        self.pending_associations.push(FileAssociation {
-                            dataset_id: dataset_id.to_string(),
-                            source_file: source_file.to_string(),
-                            target_file: normalized_target,
-                            assoc_type: assoc_type.clone(),
-                        });
-                    }
-                    Value::Array(targets) => {
-                        // Multiple targets
-                        for target in targets {
-                            if let Some(target_str) = target.as_str() {
-                                let normalized_target =
-                                    self.normalize_path(target_str, source_file);
-                                self.pending_associations.push(FileAssociation {
-                                    dataset_id: dataset_id.to_string(),
-                                    source_file: source_file.to_string(),
-                                    target_file: normalized_target,
-                                    assoc_type: assoc_type.clone(),
-                                });
-                            }
+            match intended_for {
+                Value::String(target) => {
+                    // Single target
+                    let normalized_target = self.normalize_path(target, source_file);
+                    self.pending_associations.push(FileAssociation {
+                        dataset_id: dataset_id.to_string(),
+                        source_file: source_file.to_string(),
+                        target_file: normalized_target,
+                        assoc_type: assoc_type.clone(),
+                    });
+                }
+                Value::Array(targets) => {
+                    // Multiple targets
+                    for target in targets {
+                        if let Some(target_str) = target.as_str() {
+                            let normalized_target = self.normalize_path(target_str, source_file);
+                            self.pending_associations.push(FileAssociation {
+                                dataset_id: dataset_id.to_string(),
+                                source_file: source_file.to_string(),
+                                target_file: normalized_target,
+                                assoc_type: assoc_type.clone(),
+                            });
                         }
                     }
-                    _ => {}
                 }
+                _ => {}
             }
         }
         Ok(())
@@ -1023,10 +1010,10 @@ impl BidsParser {
         }
 
         // Subject-relative: prepend the source file's subject directory.
-        if let Some(sub) = source_file.split('/').next() {
-            if sub.starts_with("sub-") {
-                return format!("{}/{}", sub, target);
-            }
+        if let Some(sub) = source_file.split('/').next()
+            && sub.starts_with("sub-")
+        {
+            return format!("{}/{}", sub, target);
         }
 
         target.to_string()

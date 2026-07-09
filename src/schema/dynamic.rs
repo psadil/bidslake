@@ -111,25 +111,25 @@ impl Schema {
 
         // Idempotency guard: skip the row if a matching primary key already
         // exists (safe re-indexing). Kept for correctness; made cheap by caching.
-        if let Some(pks) = self.primary_keys.get(table_name) {
-            if !pks.is_empty() {
-                let where_clauses: Vec<String> = pks
-                    .iter()
-                    .map(|pk| {
-                        let idx = fields
-                            .iter()
-                            .position(|(name, _, _)| name == pk)
-                            .expect("Primary key column not found in fields");
-                        format!("{} = ${}", pk, idx + 1)
-                    })
-                    .collect();
+        if let Some(pks) = self.primary_keys.get(table_name)
+            && !pks.is_empty()
+        {
+            let where_clauses: Vec<String> = pks
+                .iter()
+                .map(|pk| {
+                    let idx = fields
+                        .iter()
+                        .position(|(name, _, _)| name == pk)
+                        .expect("Primary key column not found in fields");
+                    format!("{} = ${}", pk, idx + 1)
+                })
+                .collect();
 
-                sql.push_str(&format!(
-                    " WHERE NOT EXISTS (SELECT 1 FROM {} WHERE {})",
-                    table_name,
-                    where_clauses.join(" AND ")
-                ));
-            }
+            sql.push_str(&format!(
+                " WHERE NOT EXISTS (SELECT 1 FROM {} WHERE {})",
+                table_name,
+                where_clauses.join(" AND ")
+            ));
         }
 
         Some(sql)
@@ -185,10 +185,10 @@ impl Schema {
         // Handle anyOf (union types) - take the first non-null type
         if let Some(any_of) = field_def.get("anyOf").and_then(|v| v.as_array()) {
             for type_def in any_of {
-                if let Some(t) = type_def.get("type").and_then(|v| v.as_str()) {
-                    if t != "null" {
-                        return self.map_simple_type(t, type_def);
-                    }
+                if let Some(t) = type_def.get("type").and_then(|v| v.as_str())
+                    && t != "null"
+                {
+                    return self.map_simple_type(t, type_def);
                 }
             }
         }
@@ -210,14 +210,14 @@ impl Schema {
         }
 
         // Check inside "definition" object if present (common in BIDS schema)
-        if let Some(def) = field_def.get("definition") {
-            if let Some(format) = def.get("Format").and_then(|v| v.as_str()) {
-                match format {
-                    "number" | "float" => return "DOUBLE".to_string(),
-                    "integer" => return "BIGINT".to_string(),
-                    "boolean" => return "BOOLEAN".to_string(),
-                    _ => {}
-                }
+        if let Some(def) = field_def.get("definition")
+            && let Some(format) = def.get("Format").and_then(|v| v.as_str())
+        {
+            match format {
+                "number" | "float" => return "DOUBLE".to_string(),
+                "integer" => return "BIGINT".to_string(),
+                "boolean" => return "BOOLEAN".to_string(),
+                _ => {}
             }
         }
 
@@ -552,14 +552,14 @@ impl Schema {
             // Heuristic to extract PKs
             if col.starts_with("PRIMARY KEY") {
                 // Extract columns inside parentheses: PRIMARY KEY (col1, col2)
-                if let Some(start) = col.find('(') {
-                    if let Some(end) = col.find(')') {
-                        let pk_cols: Vec<String> = col[start + 1..end]
-                            .split(',')
-                            .map(|s| s.trim().to_string())
-                            .collect();
-                        self.primary_keys.insert(table_name.to_string(), pk_cols);
-                    }
+                if let Some(start) = col.find('(')
+                    && let Some(end) = col.find(')')
+                {
+                    let pk_cols: Vec<String> = col[start + 1..end]
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .collect();
+                    self.primary_keys.insert(table_name.to_string(), pk_cols);
                 }
             }
 

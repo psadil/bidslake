@@ -13,8 +13,10 @@
 //! creates those tables. [`bids::BidsParser`] then walks the dataset (local or
 //! S3 via the [`fs::BidsFileSystem`] abstraction), parses sidecars / TSVs /
 //! filename entities, and writes rows — the whole ingest wrapped in one
-//! transaction. For *how* the schema is generated from the BIDS schema, read
-//! [`schema::dynamic`]; for the ingestion pipeline, read [`bids`].
+//! transaction. The [`schema`] module is the table/column reference; for *how*
+//! that schema is generated from the BIDS schema read [`schema::dynamic`], and
+//! for the ingestion pipeline read [`bids`]. (The README covers the pitch and the
+//! managed-mode design.)
 //!
 //! # Examples
 //!

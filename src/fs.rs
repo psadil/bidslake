@@ -45,10 +45,10 @@ impl BidsFileSystem for LocalFileSystem {
             let walk_res = tokio::task::spawn_blocking(move || {
                 let mut paths = Vec::new();
                 for entry in WalkDir::new(&root).into_iter().filter_map(|e| e.ok()) {
-                    if entry.file_type().is_file() {
-                        if let Ok(rel_path) = entry.path().strip_prefix(&root) {
-                            paths.push(rel_path.to_path_buf());
-                        }
+                    if entry.file_type().is_file()
+                        && let Ok(rel_path) = entry.path().strip_prefix(&root)
+                    {
+                        paths.push(rel_path.to_path_buf());
                     }
                 }
                 paths

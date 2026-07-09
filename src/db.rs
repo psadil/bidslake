@@ -7,7 +7,7 @@
 //! [`BidsDb::insert_file_association`]) for the static tables.
 
 use crate::schema::{self, Schema};
-use duckdb::{params, Connection, Result};
+use duckdb::{Connection, Result, params};
 use serde_json::Value;
 
 /// A cross-reference between two files derived at ingest (e.g. an fmap's

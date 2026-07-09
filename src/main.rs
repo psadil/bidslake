@@ -24,7 +24,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Index a BIDS dataset into a DuckDB database (also used to bring
-    /// additional datasets under management — see `docs/managed-mode.md`).
+    /// additional datasets under management — see the README on managed mode).
     Index {
         /// Input BIDS dataset directory or S3 URI (e.g., s3://bucket/prefix)
         #[arg(short, long)]
@@ -88,13 +88,13 @@ async fn main() -> Result<()> {
         Commands::Verify { database } => {
             anyhow::bail!(
                 "`verify` is not yet implemented (managed mode). \
-                 See docs/managed-mode.md. (database: {database})"
+                 See the README on managed mode. (database: {database})"
             )
         }
         Commands::Transcode { database, to } => {
             anyhow::bail!(
                 "`transcode` is not yet implemented (managed mode). \
-                 See docs/managed-mode.md. (database: {database}, to: {to})"
+                 See the README on managed mode. (database: {database}, to: {to})"
             )
         }
     }

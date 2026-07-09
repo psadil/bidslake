@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use bidslake::{bids::BidsParser, db::BidsDb, fs::LocalFileSystem, schema::Schema};
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 
 /// Small, stable datasets that exercise the common paths (anat/func, sessions,
 /// events, inheritance) without dominating the benchmark with one huge dataset.
