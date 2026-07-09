@@ -117,7 +117,7 @@ impl BidsParser {
             let dir_name = if root.starts_with("s3://") {
                 root.trim_end_matches('/')
                     .split('/')
-                    .last()
+                    .next_back()
                     .unwrap_or("unknown")
                     .to_string()
             } else {
@@ -212,14 +212,14 @@ impl BidsParser {
                 );
 
                 // Extract filename from file_path for the 'filename' field
-                if let Some(filename) = img_file.file_path.split('/').last() {
+                if let Some(filename) = img_file.file_path.split('/').next_back() {
                     scan_data.insert("filename".to_string(), Value::String(filename.to_string()));
                 }
 
                 // Build other_data without file_path and dataset_id
                 let mut other_data = serde_json::Map::new();
                 // Only include filename in other_data (exclude file_path and dataset_id)
-                if let Some(filename) = img_file.file_path.split('/').last() {
+                if let Some(filename) = img_file.file_path.split('/').next_back() {
                     other_data.insert("filename".to_string(), Value::String(filename.to_string()));
                 }
                 scan_data.insert("other_data".to_string(), Value::Object(other_data));
@@ -244,7 +244,7 @@ impl BidsParser {
             let mut merged_metadata = serde_json::Map::new();
 
             // Extract entities and suffix from imaging file
-            let file_name = img_file.file_path.split('/').last().unwrap();
+            let file_name = img_file.file_path.split('/').next_back().unwrap();
             let mut img_entities = HashMap::new();
             for cap in entity_re.captures_iter(file_name) {
                 img_entities.insert(cap[1].to_string(), cap[2].to_string());
@@ -516,7 +516,7 @@ impl BidsParser {
         });
 
         // Check for IntendedFor field to create associations
-        self.process_intended_for(rel_path, &content, dataset_id, &entities)?;
+        self.process_intended_for(rel_path, &content, dataset_id, entities)?;
 
         Ok(())
     }

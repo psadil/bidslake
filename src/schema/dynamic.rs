@@ -2,7 +2,7 @@ use duckdb::{Connection, Result};
 use serde_json::Value;
 use std::collections::HashMap;
 
-const SCHEMA_JSON: &str = include_str!("../../schema.json");
+const SCHEMA_JSON: &str = include_str!("../data/schema.json");
 
 #[derive(Clone, Debug)]
 pub struct Schema {
@@ -748,8 +748,8 @@ fn to_snake_case(s: &str) -> String {
             // 2. Previous char was lowercase, OR
             // 3. Next char exists and is lowercase (end of acronym like "XMLParser" -> "xml_parser")
             if i > 0 {
-                let prev_is_lower = chars.get(i - 1).map_or(false, |ch| ch.is_lowercase());
-                let next_is_lower = chars.get(i + 1).map_or(false, |ch| ch.is_lowercase());
+                let prev_is_lower = chars.get(i - 1).is_some_and(|ch| ch.is_lowercase());
+                let next_is_lower = chars.get(i + 1).is_some_and(|ch| ch.is_lowercase());
 
                 if prev_is_lower || next_is_lower {
                     result.push('_');

@@ -1,7 +1,5 @@
 use crate::fs::BidsFileSystem;
 use anyhow::{Context, Result};
-use aws_config;
-use aws_sdk_s3;
 use futures::future;
 use std::env;
 use std::path::{Path, PathBuf};
