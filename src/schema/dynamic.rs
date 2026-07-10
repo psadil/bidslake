@@ -171,7 +171,7 @@ impl Schema {
 
         if let Some(metadata) = self.schema["objects"]["metadata"].as_object() {
             for (field_name, field_def) in metadata {
-                let sql_type = self.json_type_to_sql(field_def);
+                let sql_type = json_type_to_sql(field_def);
                 // For now, assume all fields are nullable (we'll refine this later based on REQUIRED/RECOMMENDED)
                 fields.insert(field_name.clone(), (sql_type, true));
             }
@@ -180,75 +180,8 @@ impl Schema {
         fields
     }
 
-    /// Map JSON schema type to SQL type
-    fn json_type_to_sql(&self, field_def: &Value) -> String {
-        // Handle anyOf (union types) - take the first non-null type
-        if let Some(any_of) = field_def.get("anyOf").and_then(|v| v.as_array()) {
-            for type_def in any_of {
-                if let Some(t) = type_def.get("type").and_then(|v| v.as_str())
-                    && t != "null"
-                {
-                    return self.map_simple_type(t, type_def);
-                }
-            }
-        }
-
-        // Handle direct type
-        if let Some(type_str) = field_def.get("type").and_then(|v| v.as_str()) {
-            return self.map_simple_type(type_str, field_def);
-        }
-
-        // Handle BIDS "Format" field (e.g. for age)
-        // Some fields like age have "Format": "number" inside definition
-        if let Some(format) = field_def.get("Format").and_then(|v| v.as_str()) {
-            match format {
-                "number" | "float" => return "DOUBLE".to_string(),
-                "integer" => return "BIGINT".to_string(),
-                "boolean" => return "BOOLEAN".to_string(),
-                _ => {} // Fallback to TEXT
-            }
-        }
-
-        // Check inside "definition" object if present (common in BIDS schema)
-        if let Some(def) = field_def.get("definition")
-            && let Some(format) = def.get("Format").and_then(|v| v.as_str())
-        {
-            match format {
-                "number" | "float" => return "DOUBLE".to_string(),
-                "integer" => return "BIGINT".to_string(),
-                "boolean" => return "BOOLEAN".to_string(),
-                _ => {}
-            }
-        }
-
-        // Default to TEXT for unknown types
-        "TEXT".to_string()
-    }
-
-    /// Map a simple JSON type to SQL type
-    fn map_simple_type(&self, json_type: &str, field_def: &Value) -> String {
-        match json_type {
-            "string" => {
-                // Check for special formats
-                if let Some(format) = field_def.get("format").and_then(|v| v.as_str()) {
-                    match format {
-                        "datetime" => "TIMESTAMP",
-                        "date" => "DATE",
-                        _ => "TEXT",
-                    }
-                } else {
-                    "TEXT"
-                }
-            }
-            "number" => "DOUBLE",
-            "integer" => "BIGINT",
-            "boolean" => "BOOLEAN",
-            "array" => "TEXT", // Store as JSON text
-            "object" => "JSON",
-            _ => "TEXT",
-        }
-        .to_string()
-    }
+    // Type mapping lives in the module-level free functions `json_type_to_sql`
+    // and `map_simple_type` (below), so `schema::tabular` can share them.
 
     /// Generate scans and sidecars tables
     /// Build the `GENERATED ALWAYS AS (…) VIRTUAL` column definitions that expose
@@ -403,7 +336,7 @@ impl Schema {
                     .and_then(|c| c.get(key));
 
                 let sql_type = if let Some(def) = field_def {
-                    self.json_type_to_sql(def)
+                    json_type_to_sql(def)
                 } else {
                     "TEXT".to_string()
                 };
@@ -639,7 +572,7 @@ impl Schema {
         if let Some(metadata) = self.schema["objects"]["metadata"].as_object() {
             for field_name in dataset_description_field_names {
                 if let Some(field_def) = metadata.get(field_name) {
-                    let sql_type = self.json_type_to_sql(field_def);
+                    let sql_type = json_type_to_sql(field_def);
                     let col_name = to_snake_case(field_name);
                     let lowercase_name = col_name.to_lowercase();
 
@@ -723,7 +656,7 @@ impl Schema {
                     .and_then(|c| c.get(key));
 
                 let sql_type = if let Some(def) = field_def {
-                    self.json_type_to_sql(def)
+                    json_type_to_sql(def)
                 } else {
                     "TEXT".to_string()
                 };
@@ -952,7 +885,82 @@ impl Schema {
     }
 }
 
-fn to_snake_case(s: &str) -> String {
+/// Map a BIDS schema field/column definition to a DuckDB column type.
+///
+/// Handles the three shapes a definition takes in `objects.columns` /
+/// `objects.metadata`: a direct `type`, an `anyOf` union (first non-null wins),
+/// and the `definition.Format` used by phenotype/physio columns (`age`, `sex`,
+/// `cardiac`, …). Shared by [`Schema`] and [`crate::schema::tabular`].
+pub(crate) fn json_type_to_sql(field_def: &Value) -> String {
+    // Handle anyOf (union types) - take the first non-null type
+    if let Some(any_of) = field_def.get("anyOf").and_then(|v| v.as_array()) {
+        for type_def in any_of {
+            if let Some(t) = type_def.get("type").and_then(|v| v.as_str())
+                && t != "null"
+            {
+                return map_simple_type(t, type_def);
+            }
+        }
+    }
+
+    // Handle direct type
+    if let Some(type_str) = field_def.get("type").and_then(|v| v.as_str()) {
+        return map_simple_type(type_str, field_def);
+    }
+
+    // Handle BIDS "Format" field (e.g. for age)
+    // Some fields like age have "Format": "number" inside definition
+    if let Some(format) = field_def.get("Format").and_then(|v| v.as_str()) {
+        match format {
+            "number" | "float" => return "DOUBLE".to_string(),
+            "integer" => return "BIGINT".to_string(),
+            "boolean" => return "BOOLEAN".to_string(),
+            _ => {} // Fallback to TEXT
+        }
+    }
+
+    // Check inside "definition" object if present (common in BIDS schema)
+    if let Some(def) = field_def.get("definition")
+        && let Some(format) = def.get("Format").and_then(|v| v.as_str())
+    {
+        match format {
+            "number" | "float" => return "DOUBLE".to_string(),
+            "integer" => return "BIGINT".to_string(),
+            "boolean" => return "BOOLEAN".to_string(),
+            _ => {}
+        }
+    }
+
+    // Default to TEXT for unknown types
+    "TEXT".to_string()
+}
+
+/// Map a simple JSON-schema `type` to a DuckDB type.
+fn map_simple_type(json_type: &str, field_def: &Value) -> String {
+    match json_type {
+        "string" => {
+            // Check for special formats
+            if let Some(format) = field_def.get("format").and_then(|v| v.as_str()) {
+                match format {
+                    "datetime" => "TIMESTAMP",
+                    "date" => "DATE",
+                    _ => "TEXT",
+                }
+            } else {
+                "TEXT"
+            }
+        }
+        "number" => "DOUBLE",
+        "integer" => "BIGINT",
+        "boolean" => "BOOLEAN",
+        "array" => "TEXT", // Store as JSON text
+        "object" => "JSON",
+        _ => "TEXT",
+    }
+    .to_string()
+}
+
+pub(crate) fn to_snake_case(s: &str) -> String {
     let mut result = String::new();
     let chars: Vec<char> = s.chars().collect();
 

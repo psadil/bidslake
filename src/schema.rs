@@ -91,6 +91,7 @@
 //! values are raw, so join to `participants` with `'sub-' || s.sub = p.participant_id`.
 
 pub mod dynamic;
+pub mod tabular;
 pub use dynamic::Schema;
 
 pub const CREATE_DIFFUSION_TABLE: &str = "
