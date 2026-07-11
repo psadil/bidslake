@@ -36,7 +36,7 @@
 //! [`TableSpec`] whose columns are the union across the group.
 
 use super::dynamic::{json_type_to_sql, to_snake_case};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 
 /// One column of a tabular table, resolved from `objects.columns`.
@@ -151,15 +151,24 @@ impl Selector {
 pub struct TabularRule {
     /// Dotted id, e.g. `pet.Blood`, `derivatives.common_derivatives.Descriptions`.
     pub id: String,
+    /// Parsed selectors — used **only** for structural grouping into DDL tables
+    /// (`is_identity`/`identity_key`/`datatype`), not for matching.
     pub selectors: Vec<Selector>,
+    /// The raw selector strings, evaluated by the shared BIDS expression evaluator for *matching*.
+    pub selectors_raw: Vec<String>,
     /// Columns in a stable order: `initial_columns` first, then the rest by key.
     pub columns: Vec<ColumnSpec>,
 }
 
 impl TabularRule {
-    /// A rule matches a file iff *all* its selectors do.
+    /// A rule matches a file iff all its selectors evaluate true — delegated to the shared BIDS
+    /// expression evaluator (`bids_schema::expression`) over the raw selector strings, so the
+    /// full schema selector language is honoured (not bidslake's partial parser).
     pub fn matches(&self, ctx: &FileContext) -> bool {
-        self.selectors.iter().all(|s| s.matches(ctx))
+        let (file, dataset) = ctx.eval_bindings();
+        let null = Value::Null;
+        let eval = bids_schema::expression::EvalContext::new(&file, &dataset, &null, &null);
+        bids_schema::expression::do_selectors_select(&Some(self.selectors_raw.clone()), &eval)
     }
 
     /// The `datatype ==` selector's value, if the rule has one (used to
@@ -303,6 +312,24 @@ impl Default for FileContext<'_> {
     }
 }
 
+impl FileContext<'_> {
+    /// The `(file, dataset)` selector bindings for the shared expression evaluator. Only the
+    /// fields BIDS tabular selectors reference are populated; `schema`/`subject` are left null.
+    fn eval_bindings(&self) -> (Value, Value) {
+        let file = json!({
+            "path": self.path,
+            "suffix": self.suffix,
+            "extension": self.extension,
+            "datatype": self.datatype,
+            "sidecar": self.sidecar,
+        });
+        let dataset = json!({
+            "dataset_description": { "DatasetType": self.dataset_type },
+        });
+        (file, dataset)
+    }
+}
+
 // --- parsing helpers -------------------------------------------------------
 
 /// Recursively collect every rule (a node with both `selectors` and `columns`),
@@ -330,6 +357,18 @@ fn parse_rule(
             a.iter()
                 .filter_map(|v| v.as_str())
                 .map(Selector::parse)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // The raw selector strings, kept verbatim for the shared expression evaluator (matching).
+    let selectors_raw: Vec<String> = rule
+        .get("selectors")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str())
+                .map(String::from)
                 .collect()
         })
         .unwrap_or_default();
@@ -372,6 +411,7 @@ fn parse_rule(
     TabularRule {
         id: id.to_string(),
         selectors,
+        selectors_raw,
         columns,
     }
 }
@@ -536,7 +576,7 @@ mod tests {
     use super::*;
 
     fn schema() -> Value {
-        serde_json::from_str(include_str!("../data/schema.json")).unwrap()
+        serde_json::from_str(bids_schema::SCHEMA_JSON).unwrap()
     }
 
     #[test]

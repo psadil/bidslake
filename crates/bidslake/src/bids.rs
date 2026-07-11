@@ -166,7 +166,10 @@ impl BidsParser {
         let mut sessions_tsv: Vec<std::path::PathBuf> = Vec::new();
         let mut other_files: Vec<std::path::PathBuf> = Vec::new();
 
-        let files: Vec<std::path::PathBuf> = self.fs.walk().await?;
+        // Pseudo-file extensions (`.ds/`, `.ome.zarr/`, …) from the schema, so opaque BIDS
+        // directories are emitted as single files (and become association sources).
+        let pseudo_exts = bids_schema::pseudo_file_extensions(self.schema.raw());
+        let files: Vec<std::path::PathBuf> = self.fs.walk(&pseudo_exts).await?;
 
         for path in files {
             let file_name = path.file_name().unwrap().to_str().unwrap();
@@ -284,15 +287,24 @@ impl BidsParser {
             self.process_file(&path, db, &dataset_id).await?;
         }
 
-        // Process file associations after all files are indexed
+        // File associations: the `IntendedFor` rows collected during the walk, plus the schema's
+        // structural associations (events↔bold, bval/bvec↔dwi, channels↔eeg, …) resolved via the
+        // shared `bids_schema` resolver. Deduped on the `file_associations` primary key (cheaper
+        // than a DB `ON CONFLICT`; the table is tiny), then inserted.
         let mut associations = self.pending_associations.clone();
+        associations.extend(self.resolve_structural_associations(&dataset_id));
 
-        // Detect sbref associations
-        associations.extend(self.detect_sbref_associations()?);
-
-        // Insert all associations
+        let mut seen: HashSet<(String, String, String, String)> = HashSet::new();
         for assoc in associations {
-            if let Err(e) = db.insert_file_association(&assoc) {
+            let key = (
+                assoc.dataset_id.clone(),
+                assoc.source_file.clone(),
+                assoc.target_file.clone(),
+                assoc.assoc_type.clone(),
+            );
+            if seen.insert(key)
+                && let Err(e) = db.insert_file_association(&assoc)
+            {
                 eprintln!("Failed to insert file association {:?}: {}", assoc, e);
             }
         }
@@ -617,7 +629,7 @@ impl BidsParser {
         });
 
         // Check for IntendedFor field to create associations
-        self.process_intended_for(rel_path, &content, dataset_id, entities)?;
+        self.process_intended_for(rel_path, &content, dataset_id)?;
 
         Ok(())
     }
@@ -1165,14 +1177,19 @@ impl BidsParser {
         source_file: &str,
         sidecar_content: &str,
         dataset_id: &str,
-        entities: &HashMap<String, String>,
     ) -> Result<()> {
         // Parse JSON to extract IntendedFor
         if let Ok(json) = serde_json::from_str::<Value>(sidecar_content)
             && let Some(intended_for) = json.get("IntendedFor")
         {
-            // Determine association type from source file path
-            let assoc_type = self.infer_association_type(source_file, entities);
+            // Association type = the source file's BIDS datatype (fmap → "fieldmap"), derived from
+            // the schema rather than guessed from path substrings.
+            let assoc_type =
+                match bids_schema::datatypes::find_datatype(source_file, self.schema.raw()) {
+                    Some(dt) if dt == "fmap" => "fieldmap".to_string(),
+                    Some(dt) => dt,
+                    None => "intended_for".to_string(),
+                };
 
             match intended_for {
                 Value::String(target) => {
@@ -1205,23 +1222,6 @@ impl BidsParser {
         Ok(())
     }
 
-    /// Infer association type from file path and entities
-    fn infer_association_type(
-        &self,
-        file_path: &str,
-        entities: &HashMap<String, String>,
-    ) -> String {
-        if file_path.contains("/fmap/") || file_path.contains("\\fmap\\") {
-            "fieldmap".to_string()
-        } else if file_path.contains("mask") || entities.get("label").is_some() {
-            "mask".to_string()
-        } else if entities.get("suffix") == Some(&"sbref".to_string()) {
-            "sbref".to_string()
-        } else {
-            "derivative".to_string()
-        }
-    }
-
     /// Normalize an IntendedFor target into a full dataset-relative path so it
     /// matches `scans.file_path`.
     ///
@@ -1251,11 +1251,37 @@ impl BidsParser {
         target.to_string()
     }
 
-    /// Detect sbref associations based on naming patterns
-    fn detect_sbref_associations(&self) -> Result<Vec<FileAssociation>> {
-        // This would need database querying or tracking file list
-        // For now, return empty - we'll enhance this in a future iteration
-        Ok(Vec::new())
+    /// Schema-driven structural associations for the whole dataset: for each data file in the
+    /// tree, resolve the schema's `meta.associations` (via the shared `bids_schema` resolver)
+    /// into `(source data file → discovered associated file)` rows — events↔bold, bval/bvec↔dwi,
+    /// channels/electrodes/coordsystem↔electrophysiology, physio, … Local backend only (needs the
+    /// in-memory `FileTree`; the S3 path has none — the same limitation as sidecar inheritance).
+    fn resolve_structural_associations(&self, dataset_id: &str) -> Vec<FileAssociation> {
+        let Some(tree) = self.fs.file_tree() else {
+            return Vec::new();
+        };
+        let schema = self.schema.raw();
+        let meta_assoc = self.schema.associations();
+
+        let mut out = Vec::new();
+        for file in tree.walk_files() {
+            // Only data files (inside a datatype directory) can be association sources; skipping
+            // the rest avoids evaluating selectors on `dataset_description.json`, READMEs, etc.
+            if bids_schema::datatypes::find_datatype(&file.path, schema).is_none() {
+                continue;
+            }
+            let file_ctx = bids_schema::context::build_file_context(file, schema);
+            for h in bids_schema::associations::resolve_associations(meta_assoc, file, &tree, &file_ctx)
+            {
+                out.push(FileAssociation {
+                    dataset_id: dataset_id.to_string(),
+                    source_file: file.path.trim_start_matches('/').to_string(),
+                    target_file: h.target_file.path.trim_start_matches('/').to_string(),
+                    assoc_type: h.name,
+                });
+            }
+        }
+        out
     }
 }
 

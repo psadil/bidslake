@@ -63,13 +63,11 @@ pub struct BidsSchema {
     pub modalities: HashMap<String, ModalityDef>,
 }
 
-/// The default schema JSON, downloaded and vendored into `OUT_DIR` at build time by `build.rs`.
-const BUNDLED_SCHEMA: &str = include_str!(concat!(env!("OUT_DIR"), "/schema.json"));
-
 impl BidsSchema {
-    /// Load the bundled (build-time vendored) schema.
+    /// Load the bundled schema — the workspace's single source of truth, owned by the
+    /// `bids-schema` crate (vendored in-tree via the `third_party/bids-schema` subtree).
     pub fn bundled() -> Result<Self, SchemaError> {
-        let raw: Value = serde_json::from_str(BUNDLED_SCHEMA)?;
+        let raw: Value = serde_json::from_str(bids_schema::SCHEMA_JSON)?;
         Self::from_value(raw)
     }
 

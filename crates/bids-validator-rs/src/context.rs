@@ -5,9 +5,8 @@
 //! the `meta.context` structure defined in the BIDS schema.
 
 use crate::associations::{BidsAssociations, CoordsystemsAssociation};
-use crate::datatypes::{find_datatype, find_modality};
+use bids_schema::datatypes::{find_datatype, find_modality};
 use crate::entities::{read_entities, resolve_entities};
-use crate::expression::{EvalContext, do_selectors_select};
 use crate::files::bval::{BFileMeta, parse_bfile_meta_from_file};
 use crate::files::json::load_json;
 use crate::files::nifti::NiftiHeader;
@@ -16,7 +15,7 @@ use crate::files::tiff::{Ome, Tiff, parse_tiff};
 use crate::files::tsv::TsvColumns;
 use crate::filetree::{BidsFile, FileTree};
 use crate::inheritance::read_sidecars;
-use crate::inheritance::{SidecarOverride, find_all_associated_files, find_associated_file};
+use crate::inheritance::SidecarOverride;
 use crate::issues::DatasetIssues;
 use crate::schema::BidsSchema;
 use hed_validator_rs::schema::{SchemaCollection, load_schema_version};
@@ -197,7 +196,7 @@ impl DatasetContext {
         let mut tree_paths = Vec::new();
         for file in tree.walk_files() {
             tree_paths.push(file.path.clone());
-            if let Some(dt) = find_datatype(&file.path, schema)
+            if let Some(dt) = find_datatype(&file.path, &schema.raw)
                 && !datatypes.contains(&dt)
             {
                 datatypes.push(dt);
@@ -210,7 +209,7 @@ impl DatasetContext {
         // Determine modalities from datatypes
         let mut modalities = Vec::new();
         for dt in &datatypes {
-            if let Some(m) = find_modality(dt, schema)
+            if let Some(m) = find_modality(dt, &schema.raw)
                 && !modalities.contains(&m)
             {
                 modalities.push(m);
@@ -306,8 +305,8 @@ impl BidsContext {
     pub async fn new(file: &BidsFile, dataset: &DatasetContext, schema: &BidsSchema) -> Self {
         let file_parts = read_entities(&file.name);
         let entities = resolve_entities(&file_parts.entities, &schema.entity_name_to_key);
-        let datatype = find_datatype(&file.path, schema);
-        let modality = datatype.as_ref().and_then(|dt| find_modality(dt, schema));
+        let datatype = find_datatype(&file.path, &schema.raw);
+        let modality = datatype.as_ref().and_then(|dt| find_modality(dt, &schema.raw));
 
         // Read sidecar metadata via inheritance. A `.json` file has no sidecar of its own —
         // its contents are bound to `json`, not `sidecar`. Without this guard a sidecar's own
@@ -393,86 +392,33 @@ impl BidsContext {
             .as_ref()
             .and_then(|sd| dataset.tree.find_dir(sd));
 
-        // Create a minimal context value for selector evaluation. Association selectors only
-        // reference file-level fields, so the shared identifiers resolve to null.
-        let ctx_value = serde_json::json!({
-            "path": file.path,
-            "extension": file_parts.extension,
-            "suffix": file_parts.suffix,
-            "datatype": datatype,
-            "modality": modality,
-            "entities": entities,
-        });
-        let null = Value::Null;
-        let eval_ctx = EvalContext::file_only(&ctx_value, &null);
+        // Resolve the schema's `meta.associations` for this file via the shared, pure resolver
+        // in `bids-schema` (selector eval + tree search, no content reads), then build the typed
+        // `BidsAssociations` on top (the content reads stay here).
+        let ctx_value = bids_schema::context::build_file_context(file, &schema.raw);
+        let hits = bids_schema::associations::resolve_associations(
+            schema.associations(),
+            file,
+            &dataset.tree,
+            &ctx_value,
+        );
 
         let mut associations = BidsAssociations::default();
-
-        if let Some(assoc_obj) = schema.associations().as_object() {
-            for (assoc_name, assoc_def) in assoc_obj {
-                if let Some(selectors) = assoc_def.get("selectors").and_then(|s| s.as_array()) {
-                    let selector_strings: Vec<String> = selectors
-                        .iter()
-                        .filter_map(|s| s.as_str().map(|s| s.to_string()))
-                        .collect();
-
-                    if do_selectors_select(&Some(selector_strings), &eval_ctx)
-                        && let Some(target) = assoc_def.get("target")
-                    {
-                        let inherit = assoc_def
-                            .get("inherit")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false);
-                        let target_suffix = target.get("suffix").and_then(|v| v.as_str());
-
-                        // Target extension can be string or array of strings
-                        let mut target_extensions = Vec::new();
-                        if let Some(ext) = target.get("extension") {
-                            if let Some(s) = ext.as_str() {
-                                target_extensions.push(s);
-                            } else if let Some(arr) = ext.as_array() {
-                                for v in arr {
-                                    if let Some(s) = v.as_str() {
-                                        target_extensions.push(s);
-                                    }
-                                }
-                            }
-                        }
-
-                        // Check if target defines free entities (multi-file association)
-                        let free_entities: Vec<&str> = target
-                            .get("entities")
-                            .and_then(|e| e.as_array())
-                            .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
-                            .unwrap_or_default();
-
-                        if !free_entities.is_empty() {
-                            // Multi-file association (e.g. coordsystems)
-                            let assoc_files = find_all_associated_files(
-                                file,
-                                &dataset.tree,
-                                target_suffix,
-                                &target_extensions,
-                                &free_entities,
-                                inherit,
-                            );
-                            if !assoc_files.is_empty() && assoc_name == "coordsystems" {
-                                associations.coordsystems =
-                                    Some(CoordsystemsAssociation::from_files(&assoc_files));
-                            }
-                        } else if let Some(assoc_file) = find_associated_file(
-                            file,
-                            &dataset.tree,
-                            target_suffix,
-                            &target_extensions,
-                            inherit,
-                        ) {
-                            associations
-                                .load(assoc_name.as_str(), &assoc_file, &dataset.tree)
-                                .await;
-                        }
-                    }
-                }
+        // Multi-file associations: only `coordsystems` is wired into the typed context today
+        // (preserves prior behavior — `electrodes` is also multi-file but stays unpopulated).
+        let coordsystem_files: Vec<BidsFile> = hits
+            .iter()
+            .filter(|h| h.multi && h.name == "coordsystems")
+            .map(|h| h.target_file.clone())
+            .collect();
+        if !coordsystem_files.is_empty() {
+            associations.coordsystems = Some(CoordsystemsAssociation::from_files(&coordsystem_files));
+        }
+        // Single-file associations: first hit per name → typed load (reads file content).
+        let mut seen = std::collections::HashSet::new();
+        for h in hits.iter().filter(|h| !h.multi) {
+            if seen.insert(h.name.clone()) {
+                associations.load(&h.name, &h.target_file, &dataset.tree).await;
             }
         }
 

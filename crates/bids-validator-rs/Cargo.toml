@@ -18,20 +18,13 @@ thiserror = "2"
 tokio = { version = "1.52.3", features = ["full"] }
 futures = "0.3.32"
 flate2 = "1.1.9"
-oxc_allocator = "0.139.0"
-oxc_parser = "0.139.0"
-oxc_ast = "0.139.0"
-oxc_span = "0.139.0"
 ignore = "0.4.27"
 async-trait = "0.1"
 hed-validator-rs = { path = "../hed-validator-rs" }
 bids-core = { path = "../bids-core" }
+bids-schema = { path = "../bids-schema" }
 quick-xml = "0.37"
 ureq = { version = "2", features = ["json"] }
-
-[build-dependencies]
-ureq = { version = "2", features = ["json"] }
-serde_json = "1"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }

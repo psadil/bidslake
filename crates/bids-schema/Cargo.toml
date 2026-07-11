@@ -1,0 +1,16 @@
+[package]
+name = "bids-schema"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde_json = { workspace = true }
+regex = { workspace = true }
+bids-core = { path = "../bids-core" }
+oxc_allocator = "0.139.0"
+oxc_parser = "0.139.0"
+oxc_ast = "0.139.0"
+oxc_span = "0.139.0"
+
+[build-dependencies]
+serde_json = { workspace = true }

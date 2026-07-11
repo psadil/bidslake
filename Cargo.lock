@@ -858,21 +858,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "bids-schema"
+version = "0.1.0"
+dependencies = [
+ "bids-core",
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_parser",
+ "oxc_span",
+ "regex",
+ "serde_json",
+]
+
+[[package]]
 name = "bids-validator-rs"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "bids-core",
+ "bids-schema",
  "clap",
  "criterion",
  "flate2",
  "futures",
  "hed-validator-rs",
  "ignore",
- "oxc_allocator",
- "oxc_ast",
- "oxc_parser",
- "oxc_span",
  "quick-xml",
  "regex",
  "rlimit",
@@ -892,6 +902,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-s3",
  "bids-core",
+ "bids-schema",
  "clap",
  "criterion",
  "duckdb",

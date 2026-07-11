@@ -15,7 +15,7 @@
 //! bids-specification#2149. We follow the machine-readable cases, since they are what the
 //! reference validator is tested against.
 
-use bids_validator_rs::expression::{EvalContext, ValueExt, evaluate};
+use bids_schema::expression::{EvalContext, ValueExt, evaluate};
 use serde_json::Value;
 
 /// The bindings the conformance cases evaluate against.

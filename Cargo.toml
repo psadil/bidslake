@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/bids-core", "crates/bidslake", "crates/bids-validator-rs", "crates/hed-validator-rs"]
+members = ["crates/bids-core", "crates/bids-schema", "crates/bidslake", "crates/bids-validator-rs", "crates/hed-validator-rs"]
 resolver = "3"
 
 [workspace.package]

@@ -2,11 +2,16 @@
 
 This document records how `bids-validator-rs` compares against the reference TypeScript validator,
 [bids-standard/bids-validator](https://github.com/bids-standard/bids-validator) (tag
-`3.0.0-alpha.4`). Both are pinned to `@bids/schema` 1.2.4 (BIDS 1.11.1),
-so any difference is an implementation difference, not a schema-version difference.
+`3.0.0-alpha.4`). `bids-validator-rs` now bundles the BIDS schema **1.2.1** (BIDS 1.11.1, the
+latest released version), vendored via the shared `bids-schema` crate.
 
-**Status: 59 of 107 `bids-examples` datasets match exactly. Every difference in the remaining 48 is
-one of the four causes below** — there are no unexplained discrepancies.
+> **Note:** the figures and per-schema claims in this document were measured when the crate
+> bundled `@bids/schema` 1.2.4; after the move to the released 1.2.1 they are **pending
+> re-verification** and may shift.
+
+**Status (measured at schema 1.2.4): 59 of 107 `bids-examples` datasets match exactly. Every
+difference in the remaining 48 is one of the four causes below** — there are no unexplained
+discrepancies.
 
 ## How the diff is produced
 

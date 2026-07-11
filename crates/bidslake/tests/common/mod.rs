@@ -44,7 +44,9 @@ pub fn count(db: &BidsDb, table: &str) -> Result<i64> {
 /// from what ingest actually walks. Paths are dataset-relative, matching
 /// `tabular_files.file_path`.
 pub fn walk_tabular(root: &Path) -> Vec<String> {
-    let tree = bids_core::filetree::read_file_tree(root, &[])
+    let schema: serde_json::Value = serde_json::from_str(bids_schema::SCHEMA_JSON).unwrap();
+    let pseudo_exts = bids_schema::pseudo_file_extensions(&schema);
+    let tree = bids_core::filetree::read_file_tree(root, &pseudo_exts)
         .unwrap_or_else(|e| panic!("read_file_tree({}) failed: {e}", root.display()));
     tree.walk_files()
         .map(|f| f.path.trim_start_matches('/').to_string())

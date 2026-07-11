@@ -46,7 +46,7 @@ use std::collections::HashMap;
 
 /// The vendored BIDS schema, embedded at compile time. An instance of the BIDS
 /// metaschema; its `objects.*` and `rules.*` sections drive table generation.
-const SCHEMA_JSON: &str = include_str!("../data/schema.json");
+const SCHEMA_JSON: &str = bids_schema::SCHEMA_JSON;
 
 #[derive(Clone, Debug)]
 pub struct Schema {
@@ -102,6 +102,17 @@ impl Schema {
             .as_object()
             .map(|m| m.keys().cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// The raw parsed BIDS schema JSON — for the shared `bids_schema` helpers
+    /// (`build_file_context`, `find_datatype`, association resolution).
+    pub fn raw(&self) -> &Value {
+        &self.schema
+    }
+
+    /// The schema's `meta.associations` object (the schema-driven association definitions).
+    pub fn associations(&self) -> &Value {
+        &self.schema["meta"]["associations"]
     }
 
     /// Precompute the INSERT statement for every table once, so ingestion never

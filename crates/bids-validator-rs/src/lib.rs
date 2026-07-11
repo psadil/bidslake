@@ -20,8 +20,6 @@
 pub mod associations;
 pub mod config;
 pub mod context;
-pub mod datatypes;
-pub mod expression;
 pub mod files;
 pub mod issues;
 pub mod rules;
@@ -32,5 +30,8 @@ pub mod validator;
 // `bids-core` crate. Re-export them so `crate::{entities, filetree, inheritance}` and the public
 // `bids_validator_rs::{entities, filetree, inheritance}` paths keep resolving unchanged.
 pub use bids_core::{entities, filetree, inheritance};
+// The expression evaluator now lives in the shared `bids-schema` crate; re-export it so
+// `crate::expression::…` and the public `bids_validator_rs::expression` path keep resolving.
+pub use bids_schema::expression;
 
 pub use validator::validate;

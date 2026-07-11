@@ -339,9 +339,9 @@ mod tests {
 
     #[test]
     fn test_bids_associations_matches_schema() {
-        // Load the build-time embedded schema.
-        let schema_str = include_str!(concat!(env!("OUT_DIR"), "/schema.json"));
-        let schema: Value = serde_json::from_str(schema_str).expect("Failed to parse schema");
+        // Load the shared bundled schema.
+        let schema: Value =
+            serde_json::from_str(bids_schema::SCHEMA_JSON).expect("Failed to parse schema");
 
         // Extract associations from schema
         let schema_associations =

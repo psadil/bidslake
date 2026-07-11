@@ -59,7 +59,7 @@ impl S3Client {
 }
 
 impl BidsFileSystem for S3Client {
-    fn walk(&self) -> future::BoxFuture<'_, Result<Vec<PathBuf>>> {
+    fn walk(&self, _pseudo_exts: &[String]) -> future::BoxFuture<'_, Result<Vec<PathBuf>>> {
         let bucket = self.bucket.clone();
         let prefix = self.prefix.clone();
         let client = self.client.clone();
