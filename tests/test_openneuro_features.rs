@@ -58,20 +58,18 @@ async fn test_fieldmaps() -> Result<()> {
     Ok(())
 }
 
-/// Verify bval/bvec are stored as arrays with matching lengths.
+/// Verify bval/bvec are stored one row per volume with numeric values.
 fn verify_diffusion_arrays(conn: &Connection) -> Result<()> {
-    let bval: String = conn.query_row("SELECT bval::VARCHAR FROM diffusion LIMIT 1", [], |r| {
-        r.get(0)
-    })?;
-    assert!(bval.starts_with('['), "bval should be an array, got {bval}");
+    let rows: i64 = conn.query_row("SELECT COUNT(*) FROM diffusion", [], |r| r.get(0))?;
+    assert!(rows > 0, "diffusion table should have volume rows");
 
-    // Every diffusion row's bvec components must line up with its bval length.
-    let mismatched: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM diffusion WHERE len(bvec_x) <> len(bval) \
-         OR len(bvec_y) <> len(bval) OR len(bvec_z) <> len(bval)",
+    // bval is a scalar per volume, and every volume has a full gradient direction.
+    let missing: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM diffusion \
+         WHERE bval IS NULL OR bvec_x IS NULL OR bvec_y IS NULL OR bvec_z IS NULL",
         [],
         |r| r.get(0),
     )?;
-    assert_eq!(mismatched, 0, "bvec arrays must match bval length");
+    assert_eq!(missing, 0, "every volume has bval and a gradient direction");
     Ok(())
 }

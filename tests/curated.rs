@@ -106,24 +106,25 @@ async fn ds114_sessions() -> anyhow::Result<()> {
 async fn ds000117_diffusion_and_associations() -> anyhow::Result<()> {
     let db = ingest(common::bids_example("ds000117")).await?;
 
-    // 11 dwi acquisitions, each with 65 b-values.
-    assert_eq!(count(&db, "diffusion")?, 11);
-    let (n, min_len, max_len): (i64, i64, i64) = db.conn.query_row(
-        "SELECT COUNT(*), MIN(len(bval)), MAX(len(bval)) FROM diffusion",
+    // 11 dwi acquisitions, each 65 volumes -> one row per volume = 715 rows.
+    assert_eq!(count(&db, "diffusion")?, 11 * 65);
+    let (files, min_vols, max_vols): (i64, i64, i64) = db.conn.query_row(
+        "SELECT COUNT(*), MIN(v), MAX(v) FROM \
+         (SELECT COUNT(*) v FROM diffusion GROUP BY dataset_id, file_path)",
         [],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
-    assert_eq!(n, 11);
-    assert_eq!((min_len, max_len), (65, 65), "each dwi has 65 b-values");
+    assert_eq!(files, 11, "11 distinct dwi files");
+    assert_eq!((min_vols, max_vols), (65, 65), "each dwi has 65 volumes");
 
-    // bvec arrays must line up with bval.
-    let mismatched: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM diffusion WHERE len(bvec_x) <> len(bval) \
-         OR len(bvec_y) <> len(bval) OR len(bvec_z) <> len(bval)",
+    // Every volume has a full gradient direction alongside its b-value.
+    let missing_bvec: i64 = db.conn.query_row(
+        "SELECT COUNT(*) FROM diffusion \
+         WHERE bvec_x IS NULL OR bvec_y IS NULL OR bvec_z IS NULL",
         [],
         |r| r.get(0),
     )?;
-    assert_eq!(mismatched, 0);
+    assert_eq!(missing_bvec, 0);
 
     // fmap IntendedFor -> fieldmap associations, with targets resolved to full
     // dataset-relative paths that join back to scans.

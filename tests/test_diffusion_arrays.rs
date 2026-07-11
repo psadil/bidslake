@@ -41,54 +41,34 @@ async fn test_diffusion_numeric_arrays() -> Result<()> {
     let mut parser = BidsParser::new(fs, None, schema);
     parser.parse(&db).await?;
 
-    // Verify diffusion table has data
+    // One row per volume: the .bval had 4 values, so 4 diffusion rows.
     let count: i64 = db
         .conn
         .query_row("SELECT COUNT(*) FROM diffusion", [], |r| r.get(0))?;
-    assert_eq!(count, 1, "Should have 1 diffusion entry");
+    assert_eq!(count, 4, "should have one diffusion row per volume");
 
-    // Verify bval is numeric array
-    let bval: Option<String> =
-        db.conn
-            .query_row("SELECT bval::VARCHAR FROM diffusion", [], |r| r.get(0))?;
-
-    if let Some(bval_str) = bval {
-        println!("bval: {}", bval_str);
-        assert!(
-            bval_str.contains("0") && bval_str.contains("1000") && bval_str.contains("2000"),
-            "bval should contain numeric values"
-        );
-    } else {
-        panic!("bval should not be NULL");
-    }
-
-    // Verify bvec_x is numeric array
-    let bvec_x: Option<String> =
-        db.conn
-            .query_row("SELECT bvec_x::VARCHAR FROM diffusion", [], |r| r.get(0))?;
-
-    if let Some(bvec_x_str) = bvec_x {
-        println!("bvec_x: {}", bvec_x_str);
-        assert!(
-            bvec_x_str.contains("0.707"),
-            "bvec_x should contain numeric values"
-        );
-    } else {
-        panic!("bvec_x should not be NULL");
-    }
-
-    // Test array length access
-    let bval_len: i32 = db
+    // b-values in volume order.
+    let bvals: Vec<f64> = db
         .conn
-        .query_row("SELECT len(bval) FROM diffusion", [], |r| r.get(0))?;
-    assert_eq!(bval_len, 4, "bval should have 4 elements");
+        .prepare("SELECT bval FROM diffusion ORDER BY volume_idx")?
+        .query_map([], |r| r.get::<_, f64>(0))?
+        .collect::<Result<_, _>>()?;
+    assert_eq!(bvals, vec![0.0, 1000.0, 1000.0, 2000.0]);
 
-    // Test numeric operations on arrays
+    // Max b-value, as a plain scalar aggregate.
     let max_bval: f64 = db
         .conn
-        .query_row("SELECT list_max(bval) FROM diffusion", [], |r| r.get(0))?;
-    assert_eq!(max_bval, 2000.0, "Max b-value should be 2000");
+        .query_row("SELECT MAX(bval) FROM diffusion", [], |r| r.get(0))?;
+    assert_eq!(max_bval, 2000.0, "max b-value should be 2000");
 
-    println!("✓ Diffusion numeric arrays verified");
+    // Gradient direction of volume 1 (bvec column-major: row 0 = x components).
+    let (x, y, z): (f64, f64, f64) = db.conn.query_row(
+        "SELECT bvec_x, bvec_y, bvec_z FROM diffusion WHERE volume_idx = 1",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    assert_eq!((x, y, z), (0.707, 0.707, 0.0), "volume 1 gradient direction");
+
+    println!("✓ Diffusion row-per-volume verified");
     Ok(())
 }

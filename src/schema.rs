@@ -4,8 +4,8 @@
 //! DuckDB tables. Most are **generated dynamically** from the vendored BIDS
 //! schema — see [`dynamic`] (and [`Schema`]) for that machinery, which is the
 //! heart of how bidslake maps BIDS onto SQL. Two tables are **static** (defined
-//! in this module): `diffusion` (parsed bval/bvec arrays) and `file_associations`
-//! (derived `IntendedFor`-style cross-references).
+//! in this module): `diffusion` (one row per parsed bval/bvec volume) and
+//! `file_associations` (derived `IntendedFor`-style cross-references).
 //!
 //! Every table is keyed by `dataset_id`, so multiple datasets can coexist in one
 //! database and stay isolated while being queried together.
@@ -41,8 +41,9 @@
 //!   BIDS metadata field (`repetition_time`, `echo_time`, …) plus `other_data`.
 //! - **`events`** — task-event rows from `*_events.tsv` (`onset`, `duration`,
 //!   `other_data`); no primary key.
-//! - **`diffusion`** — parsed `.bval`/`.bvec` arrays; `bval DOUBLE[]`,
-//!   `bvec_x/_y/_z DOUBLE[]`. PK `(dataset_id, file_path)`.
+//! - **`diffusion`** — one row per diffusion volume, parsed from the sibling
+//!   `.bval`/`.bvec` files: scalar `bval`, `bvec_x/_y/_z`, keyed by
+//!   `(dataset_id, file_path, volume_idx)`.
 //! - **`file_associations`** — best-effort cross-references (chiefly an fmap's
 //!   `IntendedFor`): `source_file_path`, `target_file_path`, `association_type`
 //!   (`fieldmap`/`sbref`/`mask`/`derivative`). No foreign keys are enforced (the
@@ -79,7 +80,7 @@
 //!   │     └── sessions (dataset_id, session_id, participant_id)
 //!   └── scans (dataset_id, file_path)
 //!         ├── sidecars          (dataset_id, file_path)   FK → scans
-//!         ├── diffusion         (dataset_id, file_path)
+//!         ├── diffusion         (dataset_id, file_path, volume_idx)
 //!         ├── events            (dataset_id, file_path)
 //!         └── file_associations (target_file_path → scans.file_path, unenforced)
 //! ```
@@ -109,15 +110,20 @@ CREATE TABLE IF NOT EXISTS tabular_files (
 );
 ";
 
+// One row per diffusion volume, matching the row-per-sample shape of every other
+// tabular table. `file_path` is the diffusion NIfTI; `volume_idx` is the 0-based
+// position of the volume, and (bval, bvec_x/y/z) are that volume's scalar
+// b-value and gradient direction, parsed from the sibling `.bval`/`.bvec` files.
 pub const CREATE_DIFFUSION_TABLE: &str = "
 CREATE TABLE IF NOT EXISTS diffusion (
     dataset_id TEXT,
     file_path TEXT,
-    bval DOUBLE[],
-    bvec_x DOUBLE[],
-    bvec_y DOUBLE[],
-    bvec_z DOUBLE[],
-    PRIMARY KEY (dataset_id, file_path)
+    volume_idx BIGINT,
+    bval DOUBLE,
+    bvec_x DOUBLE,
+    bvec_y DOUBLE,
+    bvec_z DOUBLE,
+    PRIMARY KEY (dataset_id, file_path, volume_idx)
 );
 ";
 

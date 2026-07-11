@@ -89,8 +89,10 @@ impl BidsDb {
         Ok(())
     }
 
-    /// Insert one diffusion row: the parsed `.bval` / `.bvec` arrays for a
-    /// diffusion NIfTI, stored as DuckDB `DOUBLE[]` list columns.
+    /// Insert one diffusion NIfTI's parsed `.bval` / `.bvec` values, **one row per
+    /// volume**. The four arrays are aligned by index (BIDS guarantees the same
+    /// length); a shorter `.bvec` yields NULL for the missing components. Uses the
+    /// bulk Appender path.
     pub fn insert_diffusion(
         &self,
         dataset_id: &str,
@@ -100,45 +102,22 @@ impl BidsDb {
         bvec_y: &[f64],
         bvec_z: &[f64],
     ) -> Result<()> {
-        // Convert Rust vectors to DuckDB list format
-        let bval_list = format!(
-            "[{}]",
-            bval.iter()
-                .map(|v| v.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        let bvec_x_list = format!(
-            "[{}]",
-            bvec_x
-                .iter()
-                .map(|v| v.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        let bvec_y_list = format!(
-            "[{}]",
-            bvec_y
-                .iter()
-                .map(|v| v.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        let bvec_z_list = format!(
-            "[{}]",
-            bvec_z
-                .iter()
-                .map(|v| v.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
+        use duckdb::types::Value;
+        let component = |v: &[f64], i: usize| v.get(i).copied().map_or(Value::Null, Value::Double);
 
-        let sql = format!(
-            "INSERT INTO diffusion (dataset_id, file_path, bval, bvec_x, bvec_y, bvec_z) VALUES (?, ?, {}, {}, {}, {})",
-            bval_list, bvec_x_list, bvec_y_list, bvec_z_list
-        );
-
-        self.conn.execute(&sql, params![dataset_id, file_path])?;
+        let mut appender = self.conn.appender("diffusion")?;
+        for (i, &b) in bval.iter().enumerate() {
+            appender.append_row([
+                Value::Text(dataset_id.to_string()),
+                Value::Text(file_path.to_string()),
+                Value::BigInt(i as i64),
+                Value::Double(b),
+                component(bvec_x, i),
+                component(bvec_y, i),
+                component(bvec_z, i),
+            ])?;
+        }
+        appender.flush()?;
         Ok(())
     }
 }
