@@ -50,20 +50,21 @@ impl BidsDb {
         Ok(())
     }
 
-    /// Record that a tabular file was ingested (or, with `table_name` = `None`,
-    /// seen but skipped). Backs the "all tabular data is in the database"
-    /// invariant. `INSERT OR REPLACE` keeps it correct across re-indexing.
+    /// Record a tabular file's disposition (`ingested` / `on_disk` / `skipped`).
+    /// Backs the tabular-data invariant. `INSERT OR REPLACE` keeps it correct
+    /// across re-indexing.
     pub fn record_tabular_file(
         &self,
         dataset_id: &str,
         file_path: &str,
         table_name: Option<&str>,
         n_rows: i64,
+        status: &str,
     ) -> Result<()> {
         let mut stmt = self.conn.prepare_cached(
-            "INSERT OR REPLACE INTO tabular_files (dataset_id, file_path, table_name, n_rows) VALUES (?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO tabular_files (dataset_id, file_path, table_name, n_rows, status) VALUES (?, ?, ?, ?, ?)",
         )?;
-        stmt.execute(params![dataset_id, file_path, table_name, n_rows])?;
+        stmt.execute(params![dataset_id, file_path, table_name, n_rows, status])?;
         Ok(())
     }
 

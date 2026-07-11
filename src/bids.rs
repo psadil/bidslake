@@ -53,6 +53,12 @@ pub struct BidsParser {
     /// The BIDS datatype directory names, cached from the schema for classifying
     /// each file's datatype from its path.
     datatypes: HashSet<String>,
+    /// Every datatype directory in the dataset, as `(dir_path, datatype)` — e.g.
+    /// (`sub-01/ses-meg/meg`, `meg`). Used to infer the datatype of a tabular file
+    /// that sits *above* a datatype directory (a session- or subject-level
+    /// `channels.tsv` that applies to the `meg/` runs below it) so it can still be
+    /// routed.
+    datatype_dirs: HashSet<(String, String)>,
     /// Headerless recordings, ingested in the flush once all sidecars are known.
     pending_recordings: Vec<PendingRecording>,
     /// A throwaway in-memory connection used to pre-flight `read_csv` on a file
@@ -116,6 +122,7 @@ impl BidsParser {
             sidecars: Vec::new(),
             dataset_type: None,
             datatypes,
+            datatype_dirs: HashSet::new(),
             pending_recordings: Vec::new(),
             validator: Connection::open_in_memory()
                 .expect("open in-memory validator connection"),
@@ -181,6 +188,18 @@ impl BidsParser {
                 .is_ignore()
             {
                 continue;
+            }
+
+            // Record datatype directories so a tabular file sitting above one (a
+            // session- or subject-level channels.tsv) can still be routed. For a
+            // path like `sub-01/ses-meg/meg/…`, note the datatype dir
+            // (`sub-01/ses-meg/meg`, `meg`).
+            let comps: Vec<&str> = path.iter().filter_map(|c| c.to_str()).collect();
+            for (i, comp) in comps.iter().enumerate() {
+                if self.datatypes.contains(*comp) {
+                    self.datatype_dirs
+                        .insert((comps[..=i].join("/"), comp.to_string()));
+                }
             }
 
             // Categorize files
@@ -766,11 +785,22 @@ impl BidsParser {
             self.has_scans_tsv = true;
         }
 
-        // Headerless continuous recordings — gzipped physio/stim/physioevents, and
-        // the (uncompressed) motion time-series — have no header row; their column
-        // names come from the merged sidecar `Columns` or the associated channels
-        // file. Defer them to the flush, once every sidecar has been collected.
-        if extension == ".tsv.gz" || suffix == "motion" {
+        // Compressed continuous recordings (`*_physio.tsv.gz`, `*_stim.tsv.gz`,
+        // `*_physioevents.tsv.gz`) are stored one row per sample and dwarf the
+        // metadata, so as a deliberate size policy they are left on disk rather
+        // than ingested — recorded here so they are still tracked. See the README
+        // roadmap for where this line is likely to move.
+        if extension == ".tsv.gz" {
+            let table = recording_table_of(&suffix);
+            db.record_tabular_file(dataset_id, rel_path, table, 0, "on_disk")?;
+            return Ok(());
+        }
+
+        // Uncompressed headerless recordings — chiefly the motion time-series —
+        // are still ingested. They have no header row; their column names come from
+        // the merged sidecar `Columns` or the associated channels file, so they are
+        // deferred to the flush once every sidecar has been collected.
+        if is_recording_suffix(&suffix) {
             self.pending_recordings.push(PendingRecording {
                 dataset_id: dataset_id.to_string(),
                 rel_path: rel_path.to_string(),
@@ -780,7 +810,11 @@ impl BidsParser {
             return Ok(());
         }
 
-        let datatype = self.datatype_of(rel_path);
+        // Datatype from the path, or — for a file above a datatype directory, like
+        // a session-level channels.tsv — inferred from the datatype dirs beneath it.
+        let datatype = self
+            .datatype_of(rel_path)
+            .or_else(|| self.infer_datatype(rel_path, &suffix, &extension));
         // BIDS selector paths are dataset-relative with a leading slash.
         let path_with_slash = format!("/{rel_path}");
         let sidecar = Value::Null;
@@ -799,14 +833,14 @@ impl BidsParser {
                 let n = self
                     .ingest_tabular(db, &spec, rel_path, dataset_id, entities)
                     .await?;
-                db.record_tabular_file(dataset_id, rel_path, Some(&spec.table), n)?;
+                db.record_tabular_file(dataset_id, rel_path, Some(&spec.table), n, "ingested")?;
             }
             None => {
                 // A validated dataset should not reach here (all its tabular files
                 // are schema-described). Warn rather than fail so a newer BIDS
                 // extension than the vendored schema doesn't abort ingest.
                 eprintln!("Warning: no tabular_data rule for {rel_path}; skipping");
-                db.record_tabular_file(dataset_id, rel_path, None, 0)?;
+                db.record_tabular_file(dataset_id, rel_path, None, 0, "skipped")?;
             }
         }
         Ok(())
@@ -868,6 +902,52 @@ impl BidsParser {
             .map(|s| s.to_string())
     }
 
+    /// Infer the datatype of a tabular file that has no datatype directory of its
+    /// own (a session-/subject-level `channels.tsv`/`electrodes.tsv` that applies
+    /// to the runs below it). Among the datatypes appearing in directories *below*
+    /// the file, pick the one under which the file actually routes — unique or
+    /// nothing, so an ambiguous layout is left unrouted rather than guessed.
+    fn infer_datatype(&self, rel_path: &str, suffix: &str, extension: &str) -> Option<String> {
+        let dir = Path::new(rel_path)
+            .parent()
+            .and_then(|p| p.to_str())
+            .unwrap_or("");
+        // Datatype directories beneath the file's directory. A root-level file
+        // (dir empty) is above every datatype directory in the dataset.
+        let prefix = if dir.is_empty() {
+            String::new()
+        } else {
+            format!("{dir}/")
+        };
+        let mut candidates: Vec<&str> = self
+            .datatype_dirs
+            .iter()
+            .filter(|(p, _)| p.starts_with(&prefix))
+            .map(|(_, dt)| dt.as_str())
+            .collect();
+        candidates.sort_unstable();
+        candidates.dedup();
+
+        let path_with_slash = format!("/{rel_path}");
+        let sidecar = Value::Null;
+        let mut routable = candidates.into_iter().filter(|dt| {
+            let ctx = FileContext {
+                path: &path_with_slash,
+                datatype: Some(dt),
+                suffix: Some(suffix),
+                extension: Some(extension),
+                sidecar: &sidecar,
+                dataset_type: self.dataset_type.as_deref(),
+            };
+            self.schema.tabular().route(&ctx).is_some()
+        });
+        let first = routable.next()?;
+        match routable.next() {
+            None => Some(first.to_string()), // exactly one datatype routes
+            Some(_) => None,                 // ambiguous — leave unrouted
+        }
+    }
+
     /// Ingest the deferred headerless recordings. Run in the flush phase, after all
     /// sidecars are collected (physio/stim column names come from the merged
     /// sidecar `Columns`) and all channels are ingested (motion column names come
@@ -885,7 +965,8 @@ impl BidsParser {
                 eprintln!("Warning: failed to ingest recording {}: {}", rec.rel_path, e);
                 (None, 0)
             });
-            db.record_tabular_file(&rec.dataset_id, &rec.rel_path, table.as_deref(), n)?;
+            let status = if table.is_some() { "ingested" } else { "skipped" };
+            db.record_tabular_file(&rec.dataset_id, &rec.rel_path, table.as_deref(), n, status)?;
         }
         Ok(())
     }
@@ -1188,6 +1269,24 @@ fn is_tabular_file(file_name: &str) -> bool {
     file_name.ends_with(".tsv") || file_name.ends_with(".tsv.gz")
 }
 
+/// Whether a suffix names a headerless continuous recording (columns come from the
+/// sidecar `Columns` or the associated channels file, not a header row).
+fn is_recording_suffix(suffix: &str) -> bool {
+    matches!(suffix, "physio" | "physioevents" | "stim" | "motion")
+}
+
+/// The table a recording suffix maps to (for provenance), or `None` for suffixes
+/// with no dedicated table.
+fn recording_table_of(suffix: &str) -> Option<&'static str> {
+    match suffix {
+        "physio" => Some("physio"),
+        "physioevents" => Some("physio_events"),
+        "stim" => Some("stim"),
+        "motion" => Some("motion"),
+        _ => None,
+    }
+}
+
 /// Split a tabular filename into its BIDS `(suffix, extension)`. The suffix is the
 /// token after the last `_` before the extension (or the stem for `participants.tsv`
 /// / `samples.tsv`); the extension is `.tsv` or `.tsv.gz`.
@@ -1356,7 +1455,10 @@ fn is_imaging_file(filename: &str) -> bool {
 /// so an empty builder root keeps both sides in the same frame. Comments and blank
 /// lines are skipped; an individually malformed pattern is warned about and
 /// skipped rather than failing the whole load.
-fn build_bidsignore(content: &str) -> Result<Gitignore> {
+///
+/// Public so the tabular-coverage test can reproduce exactly which files ingest
+/// would ignore.
+pub fn build_bidsignore(content: &str) -> Result<Gitignore> {
     let mut builder = GitignoreBuilder::new("");
     for line in content.lines() {
         let trimmed = line.trim();

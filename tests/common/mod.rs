@@ -37,6 +37,37 @@ pub fn count(db: &BidsDb, table: &str) -> Result<i64> {
     Ok(db.conn.query_row(&sql, [], |r| r.get(0))?)
 }
 
+/// Every tabular file (`.tsv`/`.tsv.gz`) under `root` that ingest would *see* —
+/// i.e. not a dotfile and not excluded by the dataset-root `.bidsignore`. Paths
+/// are dataset-relative, matching `tabular_files.file_path`. Shares the ingest's
+/// `.bidsignore` compilation (via `build_bidsignore`) so the two cannot drift.
+pub fn walk_tabular(root: &Path) -> Vec<String> {
+    let ignore = std::fs::read_to_string(root.join(".bidsignore"))
+        .ok()
+        .and_then(|c| bidslake::bids::build_bidsignore(&c).ok());
+
+    let mut out = Vec::new();
+    for entry in walkdir::WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy();
+        if name.starts_with('.') || !(name.ends_with(".tsv") || name.ends_with(".tsv.gz")) {
+            continue;
+        }
+        let Ok(rel) = entry.path().strip_prefix(root) else {
+            continue;
+        };
+        if let Some(gi) = &ignore
+            && gi.matched_path_or_any_parents(rel, false).is_ignore()
+        {
+            continue;
+        }
+        out.push(rel.to_string_lossy().to_string());
+    }
+    out
+}
+
 /// Absolute path to the vendored `bids-examples` submodule.
 pub fn bids_examples_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/bids-examples")

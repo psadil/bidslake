@@ -49,7 +49,7 @@ cargo run --release -- index \
     --output dataset.duckdb
 ```
 
-The input may also be an S3 URI (`s3://bucket/prefix`); pass `--no-sign-request` for anonymous access to public buckets like OpenNeuro.
+The input may also be an S3 URI (`s3://bucket/prefix`); pass `--no-sign-request` for anonymous access to public buckets like OpenNeuro. (S3 datasets currently get their JSON metadata but not their `.tsv` contents — tabular ingest is local-only until the DuckDB `httpfs` extension is wired in.)
 
 Then open it and query:
 
@@ -66,6 +66,14 @@ JOIN scans s
  AND s.file_path LIKE p.participant_id || '/%'
 WHERE p.age < 30;
 ```
+
+## Tabular data is in the database
+
+BIDS keeps a surprising amount of information in `.tsv` tables — event timings, channel and electrode descriptions, physiological and motion recordings, blood curves, participant and session variables, diffusion b-values. bidslake treats **all of it as a first-class, tracked invariant**:
+
+> Every tabular file a dataset contains is accounted for. Header-bearing tables are ingested into the database; large compressed recordings (`*.tsv.gz`) are, for now, left on disk (a size policy — see the roadmap) but still recorded. Files excluded by `.bidsignore` are never read; a tabular file the BIDS schema does not describe is skipped with a warning and recorded — never silently dropped.
+
+The tables, their columns, and how each file is routed are all **derived from the BIDS schema** (`rules.tabular_data`, `objects.columns`, and — for the headerless recordings — `rules.sidecars` and `meta.associations`), not hardcoded. Each modality gets its own table (`eeg_channels`, `meg_channels`, `blood`, `physio`, …); uncompressed continuous recordings (chiefly `motion`) are stored one row per sample, with their column names taken from the sidecar `Columns` field or the associated `_channels.tsv`. A provenance table, `tabular_files`, records every tabular file with a `status` (`ingested` / `on_disk` / `skipped`) and the table it maps to, and a test asserts nothing is silently dropped.
 
 ## Documentation
 
@@ -84,4 +92,12 @@ git submodule update --init
 cargo test
 ```
 
-`cargo test` runs the curated deep tests and unit tests, along with a broad smoke test that ingests *every* dataset in the corpus
+`cargo test` runs the curated deep tests and unit tests, along with a broad smoke test that ingests *every* dataset in the corpus.
+
+## Roadmap
+
+**Where large tabular data lives.** High-rate continuous recordings do not belong in the catalog as-is: stored one row per sample, a single 500 Hz `*_physio` recording is nearly two million rows and dwarfs the metadata it accompanies. **Today bidslake draws a deliberately crude line: compressed tables (`*.tsv.gz`) are left on disk, everything else is ingested.** That is not a principled boundary — it just happens to catch the physio/stim recordings, which BIDS always compresses, while keeping ingestion fast. The files are still recorded in `tabular_files` (`status = 'on_disk'`) so they are tracked, not lost.
+
+In managed mode the likely answer is the DuckLake split applied one level down: small tabular data stays in the catalog, while large continuous recordings are written to partitioned Parquet (or [Vortex](https://vortex.dev/)) files on disk and exposed as views, so SQL still sees one table. **We do not yet know how to draw that line well.** Candidate signals — row count, byte size, sampling rate from the sidecar, or simply the file's BIDS suffix — all have failure modes, and the choice interacts with the (stubbed) `transcode` and `verify` commands. The `*.tsv.gz` rule is a placeholder until it is settled.
+
+**S3.** Reading `.tsv` contents from S3 is not yet supported — it waits on DuckDB's `httpfs` extension so `read_csv` can stream `s3://` directly. S3 datasets currently get their JSON metadata but not their tabular contents.

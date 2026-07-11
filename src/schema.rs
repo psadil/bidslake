@@ -10,6 +10,20 @@
 //! Every table is keyed by `dataset_id`, so multiple datasets can coexist in one
 //! database and stay isolated while being queried together.
 //!
+//! # The tabular-data invariant
+//!
+//! Every tabular file (`.tsv`/`.tsv.gz`) a dataset contains is accounted for —
+//! event tables, channel/electrode/optode descriptions, motion recordings, blood
+//! curves, participants, sessions, diffusion. Which table a file routes to, and
+//! that table's columns and types, are **derived from the BIDS schema**
+//! (`rules.tabular_data` + `objects.columns`; for the headerless recordings,
+//! `rules.sidecars` and `meta.associations`), never hardcoded. Large compressed
+//! recordings (`*.tsv.gz`) are left on disk for now as a size policy, but are still
+//! recorded; a file the schema does not describe is skipped with a warning. The
+//! `tabular_files` table records every tabular file with a `status`
+//! (`ingested`/`on_disk`/`skipped`) so nothing is dropped unnoticed. See
+//! [`tabular`] for the routing model.
+//!
 //! # Conventions
 //!
 //! - **`dataset_id`** — a dataset's identity, from the `Name` in its
@@ -40,7 +54,22 @@
 //!   PK `(dataset_id, file_path)` referencing `scans`. Very wide — a column per
 //!   BIDS metadata field (`repetition_time`, `echo_time`, …) plus `other_data`.
 //! - **`events`** — task-event rows from `*_events.tsv` (`onset`, `duration`,
-//!   `other_data`); no primary key.
+//!   `trial_type`, …, `other_data`); one row per line, no primary key.
+//! - **Per-modality tabular tables** — one per `rules.tabular_data` rule, named
+//!   for it: `eeg_channels`/`meg_channels`/…, `eeg_electrodes`/…, `nirs_optodes`,
+//!   `blood`, `asl_context`, `behavioral`, `samples`, `phenotype`, `descriptions`,
+//!   `segmentation_lookup`. Each has `(dataset_id, file_path, row_idx)`, the rule's
+//!   typed columns, `other_data`, and the generated virtual columns.
+//! - **Continuous recordings** — `physio`, `stim`, `physio_events`, `motion`: one
+//!   row per sample, column names from the sidecar `Columns` or the associated
+//!   `_channels.tsv`. Only *uncompressed* recordings (chiefly `motion`) are
+//!   populated; the compressed `*.tsv.gz` physio/stim files are left on disk (see
+//!   the invariant above), so those tables may be empty.
+//! - **`tabular_files`** — provenance: one row per tabular file the walk saw,
+//!   `(dataset_id, file_path, table_name, n_rows, status)`. `status` is
+//!   `ingested` (rows in `table_name`), `on_disk` (a compressed recording left on
+//!   disk), or `skipped` (a suffix the schema does not describe). Backs the
+//!   tabular-data invariant above.
 //! - **`diffusion`** — one row per diffusion volume, parsed from the sibling
 //!   `.bval`/`.bvec` files: scalar `bval`, `bvec_x/_y/_z`, keyed by
 //!   `(dataset_id, file_path, volume_idx)`.
@@ -95,17 +124,24 @@ pub mod dynamic;
 pub mod tabular;
 pub use dynamic::Schema;
 
-// Provenance for the "all tabular data is in the database" invariant: one row per
-// tabular file the walk encountered (minus `.bidsignore`d ones). `table_name` is
-// the table the file's rows landed in, or NULL when the file was seen but skipped
-// (a tabular file the schema does not describe). This is what the coverage test
-// asserts against — no tabular file is silently dropped.
+// Provenance for the tabular-data invariant: one row per tabular file the walk
+// encountered (minus `.bidsignore`d ones), so nothing is silently dropped.
+// `status` is one of:
+//   - `ingested`  — its rows are in `table_name` (`n_rows` of them).
+//   - `on_disk`   — a compressed continuous recording (`*.tsv.gz`) left on disk;
+//                   `table_name` names the table it *would* map to. This is a
+//                   deliberate, crude size policy (see the crate README roadmap):
+//                   the physio/stim recordings are row-per-sample and dwarf the
+//                   metadata, so for now they stay as files.
+//   - `skipped`   — a tabular file the BIDS schema does not describe (`table_name`
+//                   NULL).
 pub const CREATE_TABULAR_FILES_TABLE: &str = "
 CREATE TABLE IF NOT EXISTS tabular_files (
     dataset_id TEXT,
     file_path TEXT,
     table_name TEXT,
     n_rows BIGINT,
+    status TEXT,
     PRIMARY KEY (dataset_id, file_path)
 );
 ";
