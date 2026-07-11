@@ -30,8 +30,8 @@ use crate::schema::Schema;
 use crate::schema::dynamic::quote_ident;
 use crate::schema::tabular::{ColumnSpec, FileContext, RowIdentity, TableSpec};
 use anyhow::Result;
-use duckdb::Connection;
 use bids_core::entities::read_entities;
+use duckdb::Connection;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -124,8 +124,7 @@ impl BidsParser {
             datatypes,
             datatype_dirs: HashSet::new(),
             pending_recordings: Vec::new(),
-            validator: Connection::open_in_memory()
-                .expect("open in-memory validator connection"),
+            validator: Connection::open_in_memory().expect("open in-memory validator connection"),
             seen_participants: HashSet::new(),
             seen_sessions: HashSet::new(),
         }
@@ -397,8 +396,7 @@ impl BidsParser {
             let Some(bids_file) = tree.find_file(&tree_path) else {
                 continue;
             };
-            let (merged, _overrides) =
-                bids_core::inheritance::read_sidecars(bids_file, tree).await;
+            let (merged, _overrides) = bids_core::inheritance::read_sidecars(bids_file, tree).await;
             if let Value::Object(map) = merged {
                 self.insert_sidecar_row(db, &img_file.dataset_id, &img_file.file_path, map);
             }
@@ -423,7 +421,10 @@ impl BidsParser {
             "dataset_id".to_string(),
             Value::String(dataset_id.to_string()),
         );
-        sidecar_entry.insert("file_path".to_string(), Value::String(file_path.to_string()));
+        sidecar_entry.insert(
+            "file_path".to_string(),
+            Value::String(file_path.to_string()),
+        );
         sidecar_entry.insert("other_data".to_string(), Value::Object(merged.clone()));
         // Also flatten metadata into top-level fields for known columns.
         for (k, v) in &merged {
@@ -892,8 +893,15 @@ impl BidsParser {
         }
 
         let sub = entities.get("sub").map(|s| s.as_str());
-        let sql =
-            build_tabular_insert_sql(spec, &local, rel_path, dataset_id, sub, &sniffed, HEADER_READ_OPTS);
+        let sql = build_tabular_insert_sql(
+            spec,
+            &local,
+            rel_path,
+            dataset_id,
+            sub,
+            &sniffed,
+            HEADER_READ_OPTS,
+        );
         // A single malformed TSV must not abort the whole dataset's ingest — log
         // and move on (the file is still recorded in `tabular_files`, with 0 rows).
         match db.conn.execute(&sql, []) {
@@ -973,10 +981,17 @@ impl BidsParser {
         );
         for rec in &self.pending_recordings {
             let (table, n) = self.ingest_recording(db, rec).await.unwrap_or_else(|e| {
-                eprintln!("Warning: failed to ingest recording {}: {}", rec.rel_path, e);
+                eprintln!(
+                    "Warning: failed to ingest recording {}: {}",
+                    rec.rel_path, e
+                );
                 (None, 0)
             });
-            let status = if table.is_some() { "ingested" } else { "skipped" };
+            let status = if table.is_some() {
+                "ingested"
+            } else {
+                "skipped"
+            };
             db.record_tabular_file(&rec.dataset_id, &rec.rel_path, table.as_deref(), n, status)?;
         }
         Ok(())
@@ -1064,7 +1079,10 @@ impl BidsParser {
         match db.conn.execute(&sql, []) {
             Ok(n) => Ok((Some(table.to_string()), n as i64)),
             Err(e) => {
-                eprintln!("Warning: failed to ingest recording {}: {}", rec.rel_path, e);
+                eprintln!(
+                    "Warning: failed to ingest recording {}: {}",
+                    rec.rel_path, e
+                );
                 Ok((Some(table.to_string()), 0))
             }
         }
@@ -1144,7 +1162,9 @@ impl BidsParser {
         suffix: &str,
         entities: &HashMap<String, String>,
     ) -> serde_json::Map<String, Value> {
-        let file_dir = Path::new(rel_path).parent().unwrap_or_else(|| Path::new(""));
+        let file_dir = Path::new(rel_path)
+            .parent()
+            .unwrap_or_else(|| Path::new(""));
         let mut applicable: Vec<&SidecarInfo> = self
             .sidecars
             .iter()
@@ -1290,7 +1310,8 @@ impl BidsParser {
                 continue;
             }
             let file_ctx = bids_schema::context::build_file_context(file, schema);
-            for h in bids_schema::associations::resolve_associations(meta_assoc, file, &tree, &file_ctx)
+            for h in
+                bids_schema::associations::resolve_associations(meta_assoc, file, &tree, &file_ctx)
             {
                 out.push(FileAssociation {
                     dataset_id: dataset_id.to_string(),
@@ -1345,8 +1366,16 @@ fn sql_lit(s: &str) -> String {
 fn needs_try_cast(sql_type: &str) -> bool {
     matches!(
         sql_type,
-        "DOUBLE" | "BIGINT" | "FLOAT" | "REAL" | "INTEGER" | "HUGEINT" | "BOOLEAN" | "TIMESTAMP"
-            | "DATE" | "TIME"
+        "DOUBLE"
+            | "BIGINT"
+            | "FLOAT"
+            | "REAL"
+            | "INTEGER"
+            | "HUGEINT"
+            | "BOOLEAN"
+            | "TIMESTAMP"
+            | "DATE"
+            | "TIME"
     )
 }
 
@@ -1412,7 +1441,10 @@ fn build_tabular_insert_sql(
                 );
             }
             if let Some(s) = sub {
-                selects.push(format!("{} AS participant_id", sql_lit(&format!("sub-{s}"))));
+                selects.push(format!(
+                    "{} AS participant_id",
+                    sql_lit(&format!("sub-{s}"))
+                ));
             }
         }
         RowIdentity::PerRow => {
@@ -1534,7 +1566,10 @@ mod tests {
     /// `*` glob still works, and matches across directories for a bare pattern.
     #[test]
     fn glob_patterns_match() {
-        assert!(ignored("*_mixing.tsv\n", "sub-16/func/sub-16_desc-x_mixing.tsv"));
+        assert!(ignored(
+            "*_mixing.tsv\n",
+            "sub-16/func/sub-16_desc-x_mixing.tsv"
+        ));
         assert!(ignored("*.html\n", "sub-01/report.html"));
         assert!(!ignored("*_mixing.tsv\n", "sub-16/func/sub-16_bold.nii.gz"));
     }

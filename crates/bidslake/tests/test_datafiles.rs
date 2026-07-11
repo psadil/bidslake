@@ -16,7 +16,10 @@ async fn scans_includes_non_nifti_and_pseudo_datafiles() -> anyhow::Result<()> {
         [],
         |r| r.get(0),
     )?;
-    assert!(n_eeg >= 1, "an EEG .vhdr datafile should be in scans; got {n_eeg}");
+    assert!(
+        n_eeg >= 1,
+        "an EEG .vhdr datafile should be in scans; got {n_eeg}"
+    );
 
     let meg = ingest(bids_example("ds000246")).await?;
     let n_meg: i64 = meg.conn.query_row(

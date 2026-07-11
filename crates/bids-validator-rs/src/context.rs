@@ -5,7 +5,6 @@
 //! the `meta.context` structure defined in the BIDS schema.
 
 use crate::associations::{BidsAssociations, CoordsystemsAssociation};
-use bids_schema::datatypes::{find_datatype, find_modality};
 use crate::entities::{read_entities, resolve_entities};
 use crate::files::bval::{BFileMeta, parse_bfile_meta_from_file};
 use crate::files::json::load_json;
@@ -14,10 +13,11 @@ use crate::files::nifti::load_nifti_header;
 use crate::files::tiff::{Ome, Tiff, parse_tiff};
 use crate::files::tsv::TsvColumns;
 use crate::filetree::{BidsFile, FileTree};
-use crate::inheritance::read_sidecars;
 use crate::inheritance::SidecarOverride;
+use crate::inheritance::read_sidecars;
 use crate::issues::DatasetIssues;
 use crate::schema::BidsSchema;
+use bids_schema::datatypes::{find_datatype, find_modality};
 use hed_validator_rs::schema::{SchemaCollection, load_schema_version};
 use serde::Serialize;
 use serde_json::Value;
@@ -306,7 +306,9 @@ impl BidsContext {
         let file_parts = read_entities(&file.name);
         let entities = resolve_entities(&file_parts.entities, &schema.entity_name_to_key);
         let datatype = find_datatype(&file.path, &schema.raw);
-        let modality = datatype.as_ref().and_then(|dt| find_modality(dt, &schema.raw));
+        let modality = datatype
+            .as_ref()
+            .and_then(|dt| find_modality(dt, &schema.raw));
 
         // Read sidecar metadata via inheritance. A `.json` file has no sidecar of its own —
         // its contents are bound to `json`, not `sidecar`. Without this guard a sidecar's own
@@ -412,13 +414,16 @@ impl BidsContext {
             .map(|h| h.target_file.clone())
             .collect();
         if !coordsystem_files.is_empty() {
-            associations.coordsystems = Some(CoordsystemsAssociation::from_files(&coordsystem_files));
+            associations.coordsystems =
+                Some(CoordsystemsAssociation::from_files(&coordsystem_files));
         }
         // Single-file associations: first hit per name → typed load (reads file content).
         let mut seen = std::collections::HashSet::new();
         for h in hits.iter().filter(|h| !h.multi) {
             if seen.insert(h.name.clone()) {
-                associations.load(&h.name, &h.target_file, &dataset.tree).await;
+                associations
+                    .load(&h.name, &h.target_file, &dataset.tree)
+                    .await;
             }
         }
 

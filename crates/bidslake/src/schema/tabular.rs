@@ -331,11 +331,7 @@ fn collect_rules(prefix: &str, node: &Value, columns_obj: &Value, out: &mut Vec<
     }
 }
 
-fn parse_rule(
-    id: &str,
-    rule: &serde_json::Map<String, Value>,
-    columns_obj: &Value,
-) -> TabularRule {
+fn parse_rule(id: &str, rule: &serde_json::Map<String, Value>, columns_obj: &Value) -> TabularRule {
     let selectors = rule
         .get("selectors")
         .and_then(|v| v.as_array())
@@ -389,8 +385,14 @@ fn parse_rule(
                 .and_then(|v| v.as_str())
                 .unwrap_or(&key)
                 .to_string();
-            let sql_type = def.map(json_type_to_sql).unwrap_or_else(|| "TEXT".to_string());
-            ColumnSpec { key, name, sql_type }
+            let sql_type = def
+                .map(json_type_to_sql)
+                .unwrap_or_else(|| "TEXT".to_string());
+            ColumnSpec {
+                key,
+                name,
+                sql_type,
+            }
         })
         .collect();
 
@@ -433,7 +435,8 @@ fn build_tables(rules: &[TabularRule]) -> (Vec<TableSpec>, HashMap<String, usize
         // Union columns: base first, then overlays, deduped by resolved name.
         let mut columns: Vec<ColumnSpec> = Vec::new();
         let mut by_name: HashMap<String, usize> = HashMap::new();
-        let ordered_members = std::iter::once(base).chain(members.iter().copied().filter(|&i| i != base));
+        let ordered_members =
+            std::iter::once(base).chain(members.iter().copied().filter(|&i| i != base));
         let mut rule_ids = Vec::new();
         for i in ordered_members {
             rule_ids.push(rules[i].id.clone());
@@ -648,7 +651,10 @@ mod tests {
             "descriptions",
             "segmentation_lookup",
         ] {
-            assert!(names.contains(expected), "missing table {expected}; got {names:?}");
+            assert!(
+                names.contains(expected),
+                "missing table {expected}; got {names:?}"
+            );
         }
         // 23 rules → 23 tables (the 5 conditional rules overlay their bases).
         assert_eq!(t.tables().len(), 23, "tables: {names:?}");
@@ -695,7 +701,14 @@ mod tests {
         let t = Tabular::load(&schema());
         let events = t.tables().iter().find(|s| s.table == "events").unwrap();
         let names: HashSet<&str> = events.columns.iter().map(|c| c.name.as_str()).collect();
-        for c in ["onset", "duration", "trial_type", "response_time", "stim_file", "HED"] {
+        for c in [
+            "onset",
+            "duration",
+            "trial_type",
+            "response_time",
+            "stim_file",
+            "HED",
+        ] {
             assert!(names.contains(c), "events missing {c}: {names:?}");
         }
     }
@@ -719,7 +732,11 @@ mod tests {
                 "pupil_size",
             ]
         );
-        assert!(physio.rule_ids.len() >= 2, "expected overlay rules: {:?}", physio.rule_ids);
+        assert!(
+            physio.rule_ids.len() >= 2,
+            "expected overlay rules: {:?}",
+            physio.rule_ids
+        );
     }
 
     /// Blood: base + 4 conditional overlays collapse into one `blood` table.
@@ -742,7 +759,11 @@ mod tests {
         let onset = events.columns.iter().find(|c| c.name == "onset").unwrap();
         assert_eq!(onset.sql_type, "DOUBLE");
         // participants.age is a definition.Format=number column.
-        let parts = t.tables().iter().find(|s| s.table == "participants").unwrap();
+        let parts = t
+            .tables()
+            .iter()
+            .find(|s| s.table == "participants")
+            .unwrap();
         let age = parts.columns.iter().find(|c| c.name == "age").unwrap();
         assert_eq!(age.sql_type, "DOUBLE");
     }
@@ -758,7 +779,10 @@ mod tests {
             extension: Some(".tsv"),
             ..Default::default()
         };
-        assert_eq!(t.route(&participants).map(|s| s.table.as_str()), Some("participants"));
+        assert_eq!(
+            t.route(&participants).map(|s| s.table.as_str()),
+            Some("participants")
+        );
 
         let eeg_ch = FileContext {
             path: "/sub-01/eeg/sub-01_task-x_channels.tsv",
@@ -767,7 +791,10 @@ mod tests {
             extension: Some(".tsv"),
             ..Default::default()
         };
-        assert_eq!(t.route(&eeg_ch).map(|s| s.table.as_str()), Some("eeg_channels"));
+        assert_eq!(
+            t.route(&eeg_ch).map(|s| s.table.as_str()),
+            Some("eeg_channels")
+        );
 
         // A physio file without the eyetrack sidecar → physio, one matching rule.
         let physio = FileContext {

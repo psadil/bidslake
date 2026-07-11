@@ -43,9 +43,7 @@ pub fn build_file_context(file: &BidsFile, schema: &Value) -> Value {
     let name_to_key = entity_name_to_key(schema);
     let entities = resolve_entities(&parts.entities, &name_to_key);
     let datatype = find_datatype(&file.path, schema);
-    let modality = datatype
-        .as_deref()
-        .and_then(|dt| find_modality(dt, schema));
+    let modality = datatype.as_deref().and_then(|dt| find_modality(dt, schema));
 
     json!({
         "path": file.path,

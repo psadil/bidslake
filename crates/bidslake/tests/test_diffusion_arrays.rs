@@ -67,7 +67,11 @@ async fn test_diffusion_numeric_arrays() -> Result<()> {
         [],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
-    assert_eq!((x, y, z), (0.707, 0.707, 0.0), "volume 1 gradient direction");
+    assert_eq!(
+        (x, y, z),
+        (0.707, 0.707, 0.0),
+        "volume 1 gradient direction"
+    );
 
     println!("✓ Diffusion row-per-volume verified");
     Ok(())

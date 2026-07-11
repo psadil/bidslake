@@ -239,10 +239,11 @@ impl Schema {
         // Rule-column headers already represented by a structural base column.
         let mut skip: std::collections::HashSet<&str> = std::collections::HashSet::new();
 
-        let base = |columns: &mut Vec<String>, fields: &mut Vec<(String, String, String)>, name: &str| {
-            columns.push(format!("{} TEXT", name));
-            fields.push((name.to_string(), "TEXT".to_string(), name.to_string()));
-        };
+        let base =
+            |columns: &mut Vec<String>, fields: &mut Vec<(String, String, String)>, name: &str| {
+                columns.push(format!("{} TEXT", name));
+                fields.push((name.to_string(), "TEXT".to_string(), name.to_string()));
+            };
 
         match spec.identity {
             RowIdentity::PerFile => {
