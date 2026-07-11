@@ -9,6 +9,11 @@ mod common;
 
 use common::{all_datasets, count};
 
+/// Ingests every dataset in the corpus, so it takes minutes. Excluded from the
+/// default `cargo test` to keep iteration fast; run it explicitly with
+/// `cargo test --test smoke_bids_examples -- --ignored`, or in CI. The curated
+/// tests cover the common paths deeply on every run.
+#[ignore = "comprehensive: ingests the whole corpus; run with --ignored"]
 #[tokio::test]
 async fn ingest_every_bids_example() {
     let datasets = all_datasets();
