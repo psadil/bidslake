@@ -94,6 +94,21 @@ pub mod dynamic;
 pub mod tabular;
 pub use dynamic::Schema;
 
+// Provenance for the "all tabular data is in the database" invariant: one row per
+// tabular file the walk encountered (minus `.bidsignore`d ones). `table_name` is
+// the table the file's rows landed in, or NULL when the file was seen but skipped
+// (a tabular file the schema does not describe). This is what the coverage test
+// asserts against — no tabular file is silently dropped.
+pub const CREATE_TABULAR_FILES_TABLE: &str = "
+CREATE TABLE IF NOT EXISTS tabular_files (
+    dataset_id TEXT,
+    file_path TEXT,
+    table_name TEXT,
+    n_rows BIGINT,
+    PRIMARY KEY (dataset_id, file_path)
+);
+";
+
 pub const CREATE_DIFFUSION_TABLE: &str = "
 CREATE TABLE IF NOT EXISTS diffusion (
     dataset_id TEXT,

@@ -19,6 +19,12 @@ pub trait BidsFileSystem: Send + Sync {
     /// Read file content as string
     fn read_to_string(&self, path: &Path) -> BoxFuture<'_, Result<String>>;
 
+    /// Resolve a dataset-relative path to a **local filesystem path** that DuckDB's
+    /// `read_csv` can open directly. For [`LocalFileSystem`] this is a no-op join
+    /// onto the root; a remote backend must download the object to a temp file.
+    /// Used by the tabular ingest, which lets DuckDB parse TSVs natively.
+    fn materialize(&self, path: &Path) -> BoxFuture<'_, Result<PathBuf>>;
+
     /// Get the root path/URI of the dataset
     fn root(&self) -> String;
 }
@@ -66,6 +72,12 @@ impl BidsFileSystem for LocalFileSystem {
             let content = tokio::fs::read_to_string(full_path).await?;
             Ok(content)
         })
+    }
+
+    fn materialize(&self, path: &Path) -> BoxFuture<'_, Result<PathBuf>> {
+        // Already local: hand back the absolute path for DuckDB to read directly.
+        let full_path = self.root.join(path);
+        Box::pin(async move { Ok(full_path) })
     }
 
     fn root(&self) -> String {

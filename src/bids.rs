@@ -27,6 +27,8 @@
 use crate::db::{BidsDb, FileAssociation};
 use crate::fs::BidsFileSystem;
 use crate::schema::Schema;
+use crate::schema::dynamic::quote_ident;
+use crate::schema::tabular::{FileContext, RowIdentity, TableSpec};
 use anyhow::Result;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use regex::Regex;
@@ -44,6 +46,12 @@ pub struct BidsParser {
     imaging_files: Vec<ImagingFile>,
     has_scans_tsv: bool,
     sidecars: Vec<SidecarInfo>,
+    /// `dataset_description.json`'s `DatasetType` (`raw`/`derivative`), needed to
+    /// evaluate the `derivatives.*` tabular selectors (e.g. `dseg` lookups).
+    dataset_type: Option<String>,
+    /// The BIDS datatype directory names, cached from the schema for classifying
+    /// each file's datatype from its path.
+    datatypes: HashSet<String>,
     // Track which implicit participants/sessions we've already inserted so the
     // per-file loop doesn't re-issue an insert for every file of a subject.
     seen_participants: HashSet<(String, String)>, // (dataset_id, participant_id)
@@ -74,6 +82,7 @@ struct SidecarInfo {
 
 impl BidsParser {
     pub fn new(fs: Box<dyn BidsFileSystem>, dataset_id: Option<String>, schema: Schema) -> Self {
+        let datatypes = schema.datatypes().into_iter().collect();
         Self {
             fs,
             dataset_id,
@@ -84,6 +93,8 @@ impl BidsParser {
             imaging_files: Vec::new(),
             has_scans_tsv: false,
             sidecars: Vec::new(),
+            dataset_type: None,
+            datatypes,
             seen_participants: HashSet::new(),
             seen_sessions: HashSet::new(),
         }
@@ -474,35 +485,18 @@ impl BidsParser {
         if file_name == "dataset_description.json" {
             self.process_dataset_description(path, db, dataset_id)
                 .await?;
-        } else if file_name == "participants.tsv" {
-            self.process_participants_tsv(path, db, dataset_id).await?;
-        } else if file_name == "sessions.tsv" {
-            self.process_sessions_tsv(path, db, dataset_id).await?;
-        } else if file_name.ends_with("_scans.tsv") {
-            self.process_scans_tsv(
-                path,
-                db,
-                dataset_id,
-                participant_id.as_deref(),
-                session_id.as_deref(),
-            )
-            .await?;
-        } else if file_name.ends_with("_events.tsv") {
-            self.process_events_tsv(
-                path,
-                db,
-                rel_path,
-                participant_id.as_deref(),
-                session_id.as_deref(),
-                dataset_id,
-            )
-            .await?;
         } else if file_name.ends_with(".bval") || file_name.ends_with(".bvec") {
             // For bval/bvec, we need to find the corresponding NIfTI file
             self.process_diffusion_file(path, db, rel_path, file_name, dataset_id)
                 .await?;
         } else if file_name.ends_with(".json") {
             self.process_json_file(path, db, dataset_id, rel_path, &entities)
+                .await?;
+        } else if is_tabular_file(file_name) {
+            // Every .tsv/.tsv.gz is routed to a table by the schema-driven tabular
+            // model — participants, scans, events, channels, … — so all tabular
+            // data lives in the database. See `process_tabular_file`.
+            self.process_tabular_file(db, rel_path, file_name, dataset_id, &entities)
                 .await?;
         }
 
@@ -562,7 +556,7 @@ impl BidsParser {
     }
 
     async fn process_dataset_description(
-        &self,
+        &mut self,
         path: &Path,
         db: &BidsDb,
         dataset_id: &str,
@@ -579,6 +573,15 @@ impl BidsParser {
                 return Ok(());
             }
         };
+
+        // Remember DatasetType (raw/derivative) — the `derivatives.*` tabular
+        // selectors (dseg lookups) gate on it. Only the root description sets it;
+        // nested ones are processed later and must not clobber it.
+        if self.dataset_type.is_none()
+            && let Some(dt) = json_value.get("DatasetType").and_then(|v| v.as_str())
+        {
+            self.dataset_type = Some(dt.to_string());
+        }
 
         if let Value::Object(ref mut map) = json_value {
             map.insert(
@@ -690,208 +693,130 @@ impl BidsParser {
         Ok((x, y, z))
     }
 
-    async fn process_participants_tsv(
-        &self,
-        path: &Path,
-        db: &BidsDb,
-        dataset_id: &str,
-    ) -> Result<()> {
-        let content = self.fs.read_to_string(path).await?;
-        let mut rdr = csv::ReaderBuilder::new()
-            .delimiter(b'\t')
-            .from_reader(content.as_bytes());
-
-        for result in rdr.deserialize() {
-            let record: HashMap<String, String> = result?;
-            let mut value = serde_json::to_value(&record)?;
-            let value_copy = value.clone();
-
-            if let Value::Object(ref mut map) = value {
-                map.insert(
-                    "dataset_id".to_string(),
-                    Value::String(dataset_id.to_string()),
-                );
-                map.insert("other_data".to_string(), value_copy);
-
-                // Normalize participant_id
-                if let Some(pid) = map.get("participant_id").and_then(|v| v.as_str())
-                    && !pid.starts_with("sub-")
-                {
-                    map.insert(
-                        "participant_id".to_string(),
-                        Value::String(format!("sub-{}", pid)),
-                    );
-                }
-            }
-
-            db.insert(&self.schema, "participants", &value)?;
-        }
-        Ok(())
-    }
-
-    async fn process_sessions_tsv(&self, path: &Path, db: &BidsDb, dataset_id: &str) -> Result<()> {
-        let content = self.fs.read_to_string(path).await?;
-        let mut rdr = csv::ReaderBuilder::new()
-            .delimiter(b'\t')
-            .from_reader(content.as_bytes());
-
-        for result in rdr.deserialize() {
-            let record: HashMap<String, String> = result?;
-            let mut value = serde_json::to_value(&record)?;
-            let value_copy = value.clone();
-
-            if let Value::Object(ref mut map) = value {
-                map.insert(
-                    "dataset_id".to_string(),
-                    Value::String(dataset_id.to_string()),
-                );
-                map.insert("other_data".to_string(), value_copy);
-
-                // Normalize session_id
-                if let Some(sid) = map.get("session_id").and_then(|v| v.as_str())
-                    && !sid.starts_with("ses-")
-                {
-                    map.insert(
-                        "session_id".to_string(),
-                        Value::String(format!("ses-{}", sid)),
-                    );
-                }
-            }
-
-            db.insert(&self.schema, "sessions", &value)?;
-        }
-        Ok(())
-    }
-
-    async fn process_scans_tsv(
+    /// Route one tabular file to its table and ingest it with DuckDB `read_csv`.
+    ///
+    /// The file's `(path, suffix, extension, datatype, dataset_type)` are matched
+    /// against `rules.tabular_data`. Header-bearing `.tsv` files are ingested
+    /// directly; gzipped continuous recordings (`*_physio.tsv.gz`, …) are headerless
+    /// and handled separately. Every tabular file — ingested, deferred, or
+    /// unmatched — is recorded in `tabular_files` so nothing is silently dropped.
+    async fn process_tabular_file(
         &mut self,
-        path: &Path,
-        db: &BidsDb,
-        dataset_id: &str,
-        participant_id: Option<&str>,
-        session_id: Option<&str>,
-    ) -> Result<()> {
-        self.has_scans_tsv = true; // Mark that we found a scans.tsv file
-
-        let content = self.fs.read_to_string(path).await?;
-        let mut rdr = csv::ReaderBuilder::new()
-            .delimiter(b'\t')
-            .from_reader(content.as_bytes());
-
-        for result in rdr.deserialize() {
-            let record: HashMap<String, String> = result?;
-            let mut value = serde_json::to_value(&record)?;
-            let value_copy = value.clone();
-
-            if let Value::Object(ref mut map) = value {
-                map.insert(
-                    "dataset_id".to_string(),
-                    Value::String(dataset_id.to_string()),
-                );
-
-                // Map 'filename' column to 'file_path' for database
-                if let Some(filename) = record.get("filename") {
-                    // Construct full relative path
-                    let full_path = if let (Some(pid), Some(sid)) = (participant_id, session_id) {
-                        format!("{}/{}/{}", pid, sid, filename)
-                    } else if let Some(pid) = participant_id {
-                        format!("{}/{}", pid, filename)
-                    } else {
-                        filename.to_string()
-                    };
-                    map.insert("file_path".to_string(), Value::String(full_path));
-                }
-
-                // Build other_data excluding file_path and dataset_id
-                let mut other_data = value_copy.as_object().unwrap().clone();
-                other_data.remove("file_path");
-                other_data.remove("dataset_id");
-                map.insert("other_data".to_string(), Value::Object(other_data));
-            }
-
-            db.insert(&self.schema, "scans", &value)?;
-        }
-        Ok(())
-    }
-
-    async fn process_events_tsv(
-        &self,
-        path: &Path,
         db: &BidsDb,
         rel_path: &str,
-        participant_id: Option<&str>,
-        session_id: Option<&str>,
+        file_name: &str,
         dataset_id: &str,
+        entities: &HashMap<String, String>,
     ) -> Result<()> {
-        let content = self.fs.read_to_string(path).await?;
-        let mut rdr = csv::ReaderBuilder::new()
-            .delimiter(b'\t')
-            .from_reader(content.as_bytes());
+        let (suffix, extension) = split_suffix_ext(file_name);
+        if suffix == "scans" {
+            self.has_scans_tsv = true;
+        }
 
-        // Events are the dominant row source (thousands per task run) and the
-        // table is append-only with no primary key, so use DuckDB's Appender —
-        // the bulk-load path — instead of one planned INSERT per row.
-        // Column order must match the table: dataset_id, file_path, onset,
-        // duration, other_data.
-        let mut appender = db.conn.appender("events")?;
-
-        // Coerce a cell to a number the way the rest of ingestion does: parse as
-        // f64, otherwise keep it as a string.
-        let coerce = |val: &str| -> Value {
-            if let Ok(num) = val.parse::<f64>() {
-                Value::Number(
-                    serde_json::Number::from_f64(num)
-                        .unwrap_or_else(|| serde_json::Number::from(0)),
-                )
-            } else {
-                Value::String(val.to_string())
-            }
+        let datatype = self.datatype_of(rel_path);
+        // BIDS selector paths are dataset-relative with a leading slash.
+        let path_with_slash = format!("/{rel_path}");
+        let sidecar = Value::Null;
+        let ctx = FileContext {
+            path: &path_with_slash,
+            datatype: datatype.as_deref(),
+            suffix: Some(&suffix),
+            extension: Some(&extension),
+            sidecar: &sidecar,
+            dataset_type: self.dataset_type.as_deref(),
         };
 
-        for result in rdr.deserialize() {
-            let record: HashMap<String, String> = result?;
-
-            // onset/duration land in their own numeric (FLOAT) columns; a
-            // missing/non-numeric value becomes NULL.
-            let num_col = |key: &str| -> duckdb::types::Value {
-                match record.get(key).and_then(|v| v.parse::<f64>().ok()) {
-                    Some(n) => duckdb::types::Value::Float(n as f32),
-                    None => duckdb::types::Value::Null,
-                }
-            };
-            let onset = num_col("onset");
-            let duration = num_col("duration");
-
-            // other_data mirrors the generic insert path: every field except the
-            // dedicated columns (onset, duration, dataset_id), plus file_path and
-            // participant/session ids. serde_json::Map sorts keys, matching the
-            // previous output byte-for-byte.
-            let mut other = serde_json::Map::new();
-            for (key, val) in &record {
-                if key == "onset" || key == "duration" {
-                    continue;
-                }
-                other.insert(key.clone(), coerce(val));
-            }
-            other.insert("file_path".to_string(), Value::String(rel_path.to_string()));
-            if let Some(pid) = participant_id {
-                other.insert("participant_id".to_string(), Value::String(pid.to_string()));
-            }
-            if let Some(sid) = session_id {
-                other.insert("session_id".to_string(), Value::String(sid.to_string()));
-            }
-            let other_json = serde_json::to_string(&Value::Object(other))?;
-
-            appender.append_row([
-                duckdb::types::Value::Text(dataset_id.to_string()),
-                duckdb::types::Value::Text(rel_path.to_string()),
-                onset,
-                duration,
-                duckdb::types::Value::Text(other_json),
-            ])?;
+        // Gzipped recordings are headerless (columns come from the sidecar) and are
+        // ingested by a dedicated path, not read_csv-with-header. Record as seen.
+        if extension == ".tsv.gz" {
+            db.record_tabular_file(dataset_id, rel_path, None, 0)?;
+            return Ok(());
         }
-        appender.flush()?;
+
+        let table = self.schema.tabular().route(&ctx).cloned();
+        match table {
+            Some(spec) => {
+                let n = self
+                    .ingest_tabular(db, &spec, rel_path, dataset_id, entities)
+                    .await?;
+                db.record_tabular_file(dataset_id, rel_path, Some(&spec.table), n)?;
+            }
+            None => {
+                // A validated dataset should not reach here (all its tabular files
+                // are schema-described). Warn rather than fail so a newer BIDS
+                // extension than the vendored schema doesn't abort ingest.
+                eprintln!("Warning: no tabular_data rule for {rel_path}; skipping");
+                db.record_tabular_file(dataset_id, rel_path, None, 0)?;
+            }
+        }
         Ok(())
+    }
+
+    /// Ingest a header-bearing tabular file into `spec`'s table via a single
+    /// `read_csv` INSERT. Returns the number of rows written.
+    async fn ingest_tabular(
+        &self,
+        db: &BidsDb,
+        spec: &TableSpec,
+        rel_path: &str,
+        dataset_id: &str,
+        entities: &HashMap<String, String>,
+    ) -> Result<i64> {
+        let local = self.fs.materialize(Path::new(rel_path)).await?;
+        let local = local.to_string_lossy().to_string();
+
+        // Sniff the actual headers so we bind only present columns and fold the
+        // rest into other_data.
+        let sniff_sql = format!(
+            "DESCRIBE SELECT * FROM read_csv({}, delim='\\t', header=true, all_varchar=true, nullstr='n/a')",
+            sql_lit(&local)
+        );
+        let sniffed: Vec<String> = match db.conn.prepare(&sniff_sql) {
+            Ok(mut stmt) => match stmt.query_map([], |r| r.get::<_, String>(0)) {
+                Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+                Err(_) => Vec::new(),
+            },
+            Err(e) => {
+                // Empty or unreadable file: classified, but no rows to ingest.
+                eprintln!("Warning: could not read tabular file {rel_path}: {e}");
+                return Ok(0);
+            }
+        };
+        if sniffed.is_empty() {
+            return Ok(0);
+        }
+
+        // Re-index idempotency for keyless row tables: clear this file's prior rows
+        // before re-inserting. (PK tables dedup via INSERT OR IGNORE.)
+        if matches!(spec.identity, RowIdentity::PerRow) {
+            let del = format!(
+                "DELETE FROM {} WHERE dataset_id = {} AND file_path = {}",
+                spec.table,
+                sql_lit(dataset_id),
+                sql_lit(rel_path)
+            );
+            db.conn.execute(&del, [])?;
+        }
+
+        let sub = entities.get("sub").map(|s| s.as_str());
+        let sql = build_tabular_insert_sql(spec, &local, rel_path, dataset_id, sub, &sniffed);
+        // A single malformed TSV must not abort the whole dataset's ingest — log
+        // and move on (the file is still recorded in `tabular_files`, with 0 rows).
+        match db.conn.execute(&sql, []) {
+            Ok(n) => Ok(n as i64),
+            Err(e) => {
+                eprintln!("Warning: failed to ingest tabular file {rel_path}: {e}");
+                Ok(0)
+            }
+        }
+    }
+
+    /// The BIDS datatype for a file, taken from the datatype directory in its path.
+    fn datatype_of(&self, rel_path: &str) -> Option<String> {
+        rel_path
+            .split('/')
+            .find(|c| self.datatypes.contains(*c))
+            .map(|s| s.to_string())
     }
 
     /// Load the dataset-root `.bidsignore` and compile it with full gitignore
@@ -1013,6 +938,157 @@ impl BidsParser {
         // For now, return empty - we'll enhance this in a future iteration
         Ok(Vec::new())
     }
+}
+
+/// Whether a file is a BIDS tabular data file (all such data lives in the database).
+fn is_tabular_file(file_name: &str) -> bool {
+    file_name.ends_with(".tsv") || file_name.ends_with(".tsv.gz")
+}
+
+/// Split a tabular filename into its BIDS `(suffix, extension)`. The suffix is the
+/// token after the last `_` before the extension (or the stem for `participants.tsv`
+/// / `samples.tsv`); the extension is `.tsv` or `.tsv.gz`.
+fn split_suffix_ext(file_name: &str) -> (String, String) {
+    let (stem, ext) = if let Some(base) = file_name.strip_suffix(".tsv.gz") {
+        (base, ".tsv.gz")
+    } else if let Some(base) = file_name.strip_suffix(".tsv") {
+        (base, ".tsv")
+    } else {
+        let dot = file_name.find('.').unwrap_or(file_name.len());
+        (&file_name[..dot], &file_name[dot..])
+    };
+    let suffix = stem.rsplit('_').next().unwrap_or(stem).to_string();
+    (suffix, ext.to_string())
+}
+
+/// A SQL string literal: single-quoted, with embedded `'` doubled.
+fn sql_lit(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+/// Whether a DuckDB type needs a `TRY_CAST` when read from an all-varchar TSV
+/// (so a `n/a` or otherwise unparseable cell becomes NULL rather than erroring).
+fn needs_try_cast(sql_type: &str) -> bool {
+    matches!(
+        sql_type,
+        "DOUBLE" | "BIGINT" | "FLOAT" | "REAL" | "INTEGER" | "HUGEINT" | "BOOLEAN" | "TIMESTAMP"
+            | "DATE" | "TIME"
+    )
+}
+
+/// Build the `INSERT … SELECT … FROM read_csv(…)` that ingests one tabular file
+/// into its table. DuckDB does the parsing (gzip, `n/a`→NULL, typing); we shape
+/// the SELECT so that:
+/// - structural columns are filled from the file's location/identity (`dataset_id`
+///   constant; `scans.file_path` from the `filename` column + directory prefix;
+///   `participant_id`/`session_id` normalized; `row_idx` an ordinal for row tables);
+/// - each schema-declared column present in the file is `TRY_CAST` to its type;
+/// - every other column is folded into `other_data` as JSON.
+///
+/// `sniffed` is the file's actual column headers (from a `DESCRIBE`). Columns the
+/// schema declares but the file lacks are simply omitted — `INSERT … BY NAME`
+/// leaves them NULL.
+fn build_tabular_insert_sql(
+    spec: &TableSpec,
+    local_path: &str,
+    rel_path: &str,
+    dataset_id: &str,
+    sub: Option<&str>,
+    sniffed: &[String],
+) -> String {
+    let present: HashSet<&str> = sniffed.iter().map(|s| s.as_str()).collect();
+    let mut selects: Vec<String> = vec![format!("{} AS dataset_id", sql_lit(dataset_id))];
+    // TSV headers consumed structurally (become a key/path, not a data column and
+    // not `other_data`).
+    let mut structural: HashSet<&str> = HashSet::new();
+
+    match spec.identity {
+        RowIdentity::PerFile => {
+            structural.insert("filename");
+            if present.contains("filename") {
+                // scans.tsv `filename` is relative to the file's directory.
+                let prefix = rel_path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+                let expr = if prefix.is_empty() {
+                    "filename".to_string()
+                } else {
+                    format!("{} || '/' || filename", sql_lit(prefix))
+                };
+                selects.push(format!("{expr} AS file_path"));
+            }
+        }
+        RowIdentity::PerEntity if spec.table == "participants" => {
+            structural.insert("participant_id");
+            if present.contains("participant_id") {
+                selects.push(
+                    "CASE WHEN participant_id LIKE 'sub-%' THEN participant_id ELSE 'sub-' || participant_id END AS participant_id"
+                        .to_string(),
+                );
+            }
+        }
+        RowIdentity::PerEntity => {
+            // sessions: session_id from the file, participant_id from its location.
+            structural.insert("session_id");
+            if present.contains("session_id") {
+                selects.push(
+                    "CASE WHEN session_id LIKE 'ses-%' THEN session_id ELSE 'ses-' || session_id END AS session_id"
+                        .to_string(),
+                );
+            }
+            if let Some(s) = sub {
+                selects.push(format!("{} AS participant_id", sql_lit(&format!("sub-{s}"))));
+            }
+        }
+        RowIdentity::PerRow => {
+            selects.push(format!("{} AS file_path", sql_lit(rel_path)));
+            selects.push("(row_number() OVER () - 1)::BIGINT AS row_idx".to_string());
+        }
+    }
+
+    // Schema-declared data columns present in the file, TRY_CAST to their type.
+    let mut known: HashSet<&str> = HashSet::new();
+    for c in &spec.columns {
+        if structural.contains(c.name.as_str()) {
+            continue;
+        }
+        known.insert(c.name.as_str());
+        if !present.contains(c.name.as_str()) {
+            continue; // omitted → BY NAME leaves it NULL
+        }
+        let q = quote_ident(&c.name);
+        if needs_try_cast(&c.sql_type) {
+            selects.push(format!("TRY_CAST({q} AS {}) AS {q}", c.sql_type));
+        } else {
+            selects.push(format!("{q} AS {q}"));
+        }
+    }
+
+    // Everything else → other_data JSON (in file order).
+    let extras: Vec<&str> = sniffed
+        .iter()
+        .map(|s| s.as_str())
+        .filter(|c| !structural.contains(c) && !known.contains(c))
+        .collect();
+    if !extras.is_empty() {
+        let pairs: Vec<String> = extras
+            .iter()
+            .map(|c| format!("{}, {}", sql_lit(c), quote_ident(c)))
+            .collect();
+        selects.push(format!("json_object({}) AS other_data", pairs.join(", ")));
+    }
+
+    // PK tables (participants/sessions/scans) dedup by key so an explicit TSV row
+    // and an implicit one don't collide; row tables have no key (re-index dedup is
+    // a DELETE by file_path in the caller).
+    let verb = match spec.identity {
+        RowIdentity::PerRow => "INSERT",
+        _ => "INSERT OR IGNORE",
+    };
+    format!(
+        "{verb} INTO {} BY NAME SELECT {} FROM read_csv({}, delim='\\t', header=true, all_varchar=true, nullstr='n/a')",
+        spec.table,
+        selects.join(", "),
+        sql_lit(local_path),
+    )
 }
 
 /// Determine if a file is an imaging data file that should go in scans table

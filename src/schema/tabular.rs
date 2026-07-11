@@ -188,6 +188,7 @@ impl TabularRule {
 /// How a table's rows are keyed. Governs the DDL (PK, `file_path`/`row_idx`) and
 /// the idempotency strategy at ingest.
 #[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::enum_variant_names)] // Per{File,Entity,Row} reads clearly as a set
 pub enum RowIdentity {
     /// One row per imaging file; `scans` — PK `(dataset_id, file_path)`, the
     /// registry every `sidecars` row references.
@@ -209,6 +210,7 @@ pub struct TableSpec {
     /// virtual BIDS-concept columns). True for everything except entity tables.
     pub file_based: bool,
     /// The rule ids merged into this table, for provenance/debugging.
+    #[allow(dead_code)] // read by tests and forthcoming coverage tooling
     pub rule_ids: Vec<String>,
 }
 
@@ -242,6 +244,7 @@ impl Tabular {
         }
     }
 
+    #[allow(dead_code)] // used by tests; ingest routes via `route`
     pub fn rules(&self) -> &[TabularRule] {
         &self.rules
     }
@@ -251,7 +254,9 @@ impl Tabular {
     }
 
     /// Every rule whose selectors all pass for `ctx` (additive — a file can match
-    /// a base rule and its sidecar-conditional overlays).
+    /// a base rule and its sidecar-conditional overlays). Used by the headerless
+    /// recording ingest, which needs the union of matching rules' columns.
+    #[allow(dead_code)] // consumed by the headerless-recording ingest (next change)
     pub fn matching_rules(&self, ctx: &FileContext) -> Vec<&TabularRule> {
         self.rules.iter().filter(|r| r.matches(ctx)).collect()
     }

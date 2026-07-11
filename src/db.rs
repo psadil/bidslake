@@ -46,6 +46,24 @@ impl BidsDb {
         self.conn.execute(schema::CREATE_DIFFUSION_TABLE, [])?;
         self.conn
             .execute(schema::CREATE_FILE_ASSOCIATIONS_TABLE, [])?;
+        self.conn.execute(schema::CREATE_TABULAR_FILES_TABLE, [])?;
+        Ok(())
+    }
+
+    /// Record that a tabular file was ingested (or, with `table_name` = `None`,
+    /// seen but skipped). Backs the "all tabular data is in the database"
+    /// invariant. `INSERT OR REPLACE` keeps it correct across re-indexing.
+    pub fn record_tabular_file(
+        &self,
+        dataset_id: &str,
+        file_path: &str,
+        table_name: Option<&str>,
+        n_rows: i64,
+    ) -> Result<()> {
+        let mut stmt = self.conn.prepare_cached(
+            "INSERT OR REPLACE INTO tabular_files (dataset_id, file_path, table_name, n_rows) VALUES (?, ?, ?, ?)",
+        )?;
+        stmt.execute(params![dataset_id, file_path, table_name, n_rows])?;
         Ok(())
     }
 

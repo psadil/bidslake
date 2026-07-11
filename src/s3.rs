@@ -127,6 +127,18 @@ impl BidsFileSystem for S3Client {
         })
     }
 
+    fn materialize(&self, _path: &Path) -> future::BoxFuture<'_, Result<PathBuf>> {
+        // Tabular ingest reads TSVs with DuckDB's `read_csv`, which needs a local
+        // path. Downloading every S3 object to a temp file is deferred in favor of
+        // DuckDB's `httpfs` extension (which can read `s3://` directly); until that
+        // lands, S3 datasets get metadata but not TSV contents.
+        Box::pin(async move {
+            anyhow::bail!(
+                "reading tabular data from S3 is not yet supported (pending the httpfs extension)"
+            )
+        })
+    }
+
     fn root(&self) -> String {
         format!("s3://{}/{}", self.bucket, self.prefix)
     }
