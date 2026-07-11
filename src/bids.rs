@@ -28,8 +28,9 @@ use crate::db::{BidsDb, FileAssociation};
 use crate::fs::BidsFileSystem;
 use crate::schema::Schema;
 use crate::schema::dynamic::quote_ident;
-use crate::schema::tabular::{FileContext, RowIdentity, TableSpec};
+use crate::schema::tabular::{ColumnSpec, FileContext, RowIdentity, TableSpec};
 use anyhow::Result;
+use duckdb::Connection;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use regex::Regex;
 use serde_json::Value;
@@ -52,6 +53,15 @@ pub struct BidsParser {
     /// The BIDS datatype directory names, cached from the schema for classifying
     /// each file's datatype from its path.
     datatypes: HashSet<String>,
+    /// Headerless recordings, ingested in the flush once all sidecars are known.
+    pending_recordings: Vec<PendingRecording>,
+    /// A throwaway in-memory connection used to pre-flight `read_csv` on a file
+    /// before the real INSERT. A malformed TSV (empty, truncated, or a non-gzip
+    /// git-annex placeholder with a `.gz` name) makes `read_csv` error, and inside
+    /// the ingest transaction that error would poison every later statement. Testing
+    /// the read here first — off the main connection — keeps a bad file from
+    /// aborting the whole dataset's ingest.
+    validator: Connection,
     // Track which implicit participants/sessions we've already inserted so the
     // per-file loop doesn't re-issue an insert for every file of a subject.
     seen_participants: HashSet<(String, String)>, // (dataset_id, participant_id)
@@ -80,6 +90,17 @@ struct SidecarInfo {
     content: Value,
 }
 
+/// A headerless continuous recording (`*_physio.tsv.gz`, `*_stim.tsv.gz`,
+/// `*_physioevents.tsv.gz`, `*_motion.tsv`) deferred to the flush phase: its column
+/// names come from the merged sidecar's `Columns` (or, for motion, the associated
+/// `_channels.tsv`), which is only known once every sidecar has been collected.
+struct PendingRecording {
+    dataset_id: String,
+    rel_path: String,
+    suffix: String,
+    entities: HashMap<String, String>,
+}
+
 impl BidsParser {
     pub fn new(fs: Box<dyn BidsFileSystem>, dataset_id: Option<String>, schema: Schema) -> Self {
         let datatypes = schema.datatypes().into_iter().collect();
@@ -95,9 +116,37 @@ impl BidsParser {
             sidecars: Vec::new(),
             dataset_type: None,
             datatypes,
+            pending_recordings: Vec::new(),
+            validator: Connection::open_in_memory()
+                .expect("open in-memory validator connection"),
             seen_participants: HashSet::new(),
             seen_sessions: HashSet::new(),
         }
+    }
+
+    /// Whether DuckDB can read this `read_csv(...)` call — tested on the throwaway
+    /// [`Self::validator`] connection so a parse error can't poison the main ingest
+    /// transaction. A readable-but-empty file returns `true` (it just yields no
+    /// rows); an unreadable one (bad gzip, malformed) returns `false`.
+    fn read_csv_ok(&self, read_csv_from: &str) -> bool {
+        let sql = format!("SELECT 1 FROM {read_csv_from} LIMIT 1");
+        match self.validator.prepare(&sql) {
+            Ok(mut stmt) => stmt.query([]).map(|_| ()).is_ok(),
+            Err(_) => false,
+        }
+    }
+
+    /// Column names of a header-bearing file, sniffed on the validator connection.
+    /// `None` if the file can't be read (so it is skipped, not ingested).
+    fn sniff_columns(&self, read_csv_from: &str) -> Option<Vec<String>> {
+        let sql = format!("DESCRIBE SELECT * FROM {read_csv_from}");
+        let mut stmt = self.validator.prepare(&sql).ok()?;
+        let cols = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .ok()?
+            .filter_map(|r| r.ok())
+            .collect();
+        Some(cols)
     }
 
     pub async fn parse(&mut self, db: &BidsDb) -> Result<()> {
@@ -412,6 +461,10 @@ impl BidsParser {
             }
         }
 
+        // Ingest the deferred headerless recordings now that every sidecar and
+        // channels file is available (their columns come from those).
+        self.flush_recordings(db).await?;
+
         Ok(())
     }
 
@@ -713,6 +766,20 @@ impl BidsParser {
             self.has_scans_tsv = true;
         }
 
+        // Headerless continuous recordings — gzipped physio/stim/physioevents, and
+        // the (uncompressed) motion time-series — have no header row; their column
+        // names come from the merged sidecar `Columns` or the associated channels
+        // file. Defer them to the flush, once every sidecar has been collected.
+        if extension == ".tsv.gz" || suffix == "motion" {
+            self.pending_recordings.push(PendingRecording {
+                dataset_id: dataset_id.to_string(),
+                rel_path: rel_path.to_string(),
+                suffix,
+                entities: entities.clone(),
+            });
+            return Ok(());
+        }
+
         let datatype = self.datatype_of(rel_path);
         // BIDS selector paths are dataset-relative with a leading slash.
         let path_with_slash = format!("/{rel_path}");
@@ -725,13 +792,6 @@ impl BidsParser {
             sidecar: &sidecar,
             dataset_type: self.dataset_type.as_deref(),
         };
-
-        // Gzipped recordings are headerless (columns come from the sidecar) and are
-        // ingested by a dedicated path, not read_csv-with-header. Record as seen.
-        if extension == ".tsv.gz" {
-            db.record_tabular_file(dataset_id, rel_path, None, 0)?;
-            return Ok(());
-        }
 
         let table = self.schema.tabular().route(&ctx).cloned();
         match table {
@@ -765,23 +825,11 @@ impl BidsParser {
         let local = self.fs.materialize(Path::new(rel_path)).await?;
         let local = local.to_string_lossy().to_string();
 
-        // Sniff the actual headers so we bind only present columns and fold the
-        // rest into other_data.
-        let sniff_sql = format!(
-            "DESCRIBE SELECT * FROM read_csv({}, delim='\\t', header=true, all_varchar=true, nullstr='n/a')",
-            sql_lit(&local)
-        );
-        let sniffed: Vec<String> = match db.conn.prepare(&sniff_sql) {
-            Ok(mut stmt) => match stmt.query_map([], |r| r.get::<_, String>(0)) {
-                Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
-                Err(_) => Vec::new(),
-            },
-            Err(e) => {
-                // Empty or unreadable file: classified, but no rows to ingest.
-                eprintln!("Warning: could not read tabular file {rel_path}: {e}");
-                return Ok(0);
-            }
-        };
+        // Sniff the actual headers on the validator connection (so a parse error
+        // can't poison the ingest transaction). An unreadable or column-less file
+        // is classified but contributes no rows.
+        let read_from = format!("read_csv({}, {HEADER_READ_OPTS})", sql_lit(&local));
+        let sniffed = self.sniff_columns(&read_from).unwrap_or_default();
         if sniffed.is_empty() {
             return Ok(0);
         }
@@ -799,7 +847,8 @@ impl BidsParser {
         }
 
         let sub = entities.get("sub").map(|s| s.as_str());
-        let sql = build_tabular_insert_sql(spec, &local, rel_path, dataset_id, sub, &sniffed);
+        let sql =
+            build_tabular_insert_sql(spec, &local, rel_path, dataset_id, sub, &sniffed, HEADER_READ_OPTS);
         // A single malformed TSV must not abort the whole dataset's ingest — log
         // and move on (the file is still recorded in `tabular_files`, with 0 rows).
         match db.conn.execute(&sql, []) {
@@ -817,6 +866,200 @@ impl BidsParser {
             .split('/')
             .find(|c| self.datatypes.contains(*c))
             .map(|s| s.to_string())
+    }
+
+    /// Ingest the deferred headerless recordings. Run in the flush phase, after all
+    /// sidecars are collected (physio/stim column names come from the merged
+    /// sidecar `Columns`) and all channels are ingested (motion column names come
+    /// from the associated `_channels.tsv`).
+    async fn flush_recordings(&self, db: &BidsDb) -> Result<()> {
+        if self.pending_recordings.is_empty() {
+            return Ok(());
+        }
+        println!(
+            "Ingesting {} continuous recordings (physio/stim/motion)...",
+            self.pending_recordings.len()
+        );
+        for rec in &self.pending_recordings {
+            let (table, n) = self.ingest_recording(db, rec).await.unwrap_or_else(|e| {
+                eprintln!("Warning: failed to ingest recording {}: {}", rec.rel_path, e);
+                (None, 0)
+            });
+            db.record_tabular_file(&rec.dataset_id, &rec.rel_path, table.as_deref(), n)?;
+        }
+        Ok(())
+    }
+
+    /// Ingest one headerless recording. Returns `(table, rows)`, or `(None, 0)` if
+    /// its column names could not be resolved (so it is recorded as skipped).
+    async fn ingest_recording(
+        &self,
+        db: &BidsDb,
+        rec: &PendingRecording,
+    ) -> Result<(Option<String>, i64)> {
+        // Map suffix → target table and the table's schema-declared columns.
+        let (table, columns): (&str, Vec<ColumnSpec>) = match rec.suffix.as_str() {
+            "physio" => ("physio", self.recording_columns("physio")),
+            "physioevents" => ("physio_events", self.recording_columns("physio_events")),
+            "stim" => ("stim", Vec::new()),
+            "motion" => ("motion", Vec::new()),
+            _ => return Ok((None, 0)),
+        };
+
+        // Column names, in file order: from the associated channels file (motion) or
+        // the merged sidecar `Columns` (physio/stim/physioevents).
+        let colnames = if rec.suffix == "motion" {
+            self.motion_columns(db, rec)?
+        } else {
+            self.sidecar_columns(rec)
+        };
+        if colnames.is_empty() {
+            return Ok((None, 0)); // headerless file with no column names → skip
+        }
+
+        let local = self.fs.materialize(Path::new(&rec.rel_path)).await?;
+        let local = local.to_string_lossy().to_string();
+
+        let spec = TableSpec {
+            table: table.to_string(),
+            columns,
+            identity: RowIdentity::PerRow,
+            file_based: true,
+            rule_ids: Vec::new(),
+        };
+
+        // Headerless read: supply the column names explicitly, all as VARCHAR (the
+        // SELECT TRY_CASTs the schema-typed ones). `auto_detect=false` skips the
+        // dialect sniffer — it trusts our explicit spec, and (crucially) an empty
+        // or truncated file then yields zero rows instead of a sniff error that
+        // would poison the whole ingest transaction.
+        let cols_spec: Vec<String> = colnames
+            .iter()
+            .map(|c| format!("{}: 'VARCHAR'", sql_lit(c)))
+            .collect();
+        let read_opts = format!(
+            "delim='\\t', header=false, auto_detect=false, all_varchar=true, nullstr='n/a', columns={{{}}}",
+            cols_spec.join(", ")
+        );
+
+        // Pre-flight on the validator connection: many recordings are non-gzip
+        // git-annex placeholders whose read errors would otherwise poison the
+        // transaction. A readable-but-empty file passes and simply yields 0 rows.
+        let read_from = format!("read_csv({}, {read_opts})", sql_lit(&local));
+        if !self.read_csv_ok(&read_from) {
+            return Ok((Some(table.to_string()), 0));
+        }
+
+        // Re-index idempotency.
+        let del = format!(
+            "DELETE FROM {} WHERE dataset_id = {} AND file_path = {}",
+            table,
+            sql_lit(&rec.dataset_id),
+            sql_lit(&rec.rel_path)
+        );
+        db.conn.execute(&del, [])?;
+
+        let sub = rec.entities.get("sub").map(|s| s.as_str());
+        let sql = build_tabular_insert_sql(
+            &spec,
+            &local,
+            &rec.rel_path,
+            &rec.dataset_id,
+            sub,
+            &colnames,
+            &read_opts,
+        );
+        match db.conn.execute(&sql, []) {
+            Ok(n) => Ok((Some(table.to_string()), n as i64)),
+            Err(e) => {
+                eprintln!("Warning: failed to ingest recording {}: {}", rec.rel_path, e);
+                Ok((Some(table.to_string()), 0))
+            }
+        }
+    }
+
+    /// The schema-declared columns of a rule-based recording table (`physio`,
+    /// `physio_events`).
+    fn recording_columns(&self, table: &str) -> Vec<ColumnSpec> {
+        self.schema
+            .tabular()
+            .tables()
+            .iter()
+            .find(|t| t.table == table)
+            .map(|t| t.columns.clone())
+            .unwrap_or_default()
+    }
+
+    /// Column names for a physio/stim/physioevents recording, from the merged
+    /// sidecar's `Columns` array (BIDS requires it for these files).
+    fn sidecar_columns(&self, rec: &PendingRecording) -> Vec<String> {
+        let merged =
+            self.merged_sidecar_map(&rec.dataset_id, &rec.rel_path, &rec.suffix, &rec.entities);
+        merged
+            .get("Columns")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Column names for a motion recording: the `name` column of its associated
+    /// `_channels.tsv` (per `meta.associations.channels`), already ingested into
+    /// `motion_channels`.
+    fn motion_columns(&self, db: &BidsDb, rec: &PendingRecording) -> Result<Vec<String>> {
+        let Some(base) = rec.rel_path.strip_suffix("_motion.tsv") else {
+            return Ok(Vec::new());
+        };
+        let channels_path = format!("{base}_channels.tsv");
+        let sql = format!(
+            "SELECT name FROM motion_channels WHERE dataset_id = {} AND file_path = {} ORDER BY row_idx",
+            sql_lit(&rec.dataset_id),
+            sql_lit(&channels_path)
+        );
+        let mut stmt = db.conn.prepare(&sql)?;
+        let names = stmt
+            .query_map([], |r| r.get::<_, Option<String>>(0))?
+            .filter_map(|r| r.ok().flatten())
+            .collect();
+        Ok(names)
+    }
+
+    /// The merged sidecar for a file via BIDS inheritance: every collected `*.json`
+    /// sidecar of the same dataset and suffix whose directory is a prefix of the
+    /// file's and whose entities are a subset, merged least-specific-first.
+    fn merged_sidecar_map(
+        &self,
+        dataset_id: &str,
+        rel_path: &str,
+        suffix: &str,
+        entities: &HashMap<String, String>,
+    ) -> serde_json::Map<String, Value> {
+        let file_dir = Path::new(rel_path).parent().unwrap_or_else(|| Path::new(""));
+        let mut applicable: Vec<&SidecarInfo> = self
+            .sidecars
+            .iter()
+            .filter(|s| s.dataset_id == dataset_id && s.suffix == suffix)
+            .filter(|s| {
+                let sdir = Path::new(&s.file_path)
+                    .parent()
+                    .unwrap_or_else(|| Path::new(""));
+                file_dir.starts_with(sdir)
+                    && s.entities.iter().all(|(k, v)| entities.get(k) == Some(v))
+            })
+            .collect();
+        applicable.sort_by_key(|s| s.entities.len());
+        let mut merged = serde_json::Map::new();
+        for s in applicable {
+            if let Value::Object(m) = &s.content {
+                for (k, v) in m {
+                    merged.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        merged
     }
 
     /// Load the dataset-root `.bidsignore` and compile it with full gitignore
@@ -985,9 +1228,11 @@ fn needs_try_cast(sql_type: &str) -> bool {
 /// - each schema-declared column present in the file is `TRY_CAST` to its type;
 /// - every other column is folded into `other_data` as JSON.
 ///
-/// `sniffed` is the file's actual column headers (from a `DESCRIBE`). Columns the
-/// schema declares but the file lacks are simply omitted — `INSERT … BY NAME`
-/// leaves them NULL.
+/// `sniffed` is the file's column names — from a `DESCRIBE` for a header-bearing
+/// file, or the sidecar `Columns` / associated channels for a headerless one.
+/// Columns the schema declares but the file lacks are simply omitted — `INSERT …
+/// BY NAME` leaves them NULL. `read_opts` is the `read_csv` argument list after the
+/// path (it differs only by `header=`/`columns=` between the two cases).
 fn build_tabular_insert_sql(
     spec: &TableSpec,
     local_path: &str,
@@ -995,6 +1240,7 @@ fn build_tabular_insert_sql(
     dataset_id: &str,
     sub: Option<&str>,
     sniffed: &[String],
+    read_opts: &str,
 ) -> String {
     let present: HashSet<&str> = sniffed.iter().map(|s| s.as_str()).collect();
     let mut selects: Vec<String> = vec![format!("{} AS dataset_id", sql_lit(dataset_id))];
@@ -1084,12 +1330,15 @@ fn build_tabular_insert_sql(
         _ => "INSERT OR IGNORE",
     };
     format!(
-        "{verb} INTO {} BY NAME SELECT {} FROM read_csv({}, delim='\\t', header=true, all_varchar=true, nullstr='n/a')",
+        "{verb} INTO {} BY NAME SELECT {} FROM read_csv({}, {read_opts})",
         spec.table,
         selects.join(", "),
         sql_lit(local_path),
     )
 }
+
+/// The `read_csv` options for a header-bearing tabular file.
+const HEADER_READ_OPTS: &str = "delim='\\t', header=true, all_varchar=true, nullstr='n/a'";
 
 /// Determine if a file is an imaging data file that should go in scans table
 fn is_imaging_file(filename: &str) -> bool {

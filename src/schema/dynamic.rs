@@ -187,6 +187,22 @@ impl Schema {
             self.generate_tabular_table(spec);
         }
 
+        // `motion` and `stim` are continuous recordings the schema declares
+        // (`rules.files`) but gives no `tabular_data` column rule: their columns
+        // are data-defined (from the sidecar `Columns` array, or the associated
+        // `_channels.tsv`). So they are bare row tables — everything lands in
+        // `other_data`, alongside the generated virtual BIDS columns. (`physio` and
+        // `physio_events` do have column rules and are generated above.)
+        for name in ["motion", "stim"] {
+            self.generate_tabular_table(&TableSpec {
+                table: name.to_string(),
+                columns: Vec::new(),
+                identity: RowIdentity::PerRow,
+                file_based: true,
+                rule_ids: Vec::new(),
+            });
+        }
+
         // `sidecars` is not a tabular file — it is the merged JSON-sidecar
         // metadata, generated from `objects.metadata`.
         self.generate_sidecars_table();

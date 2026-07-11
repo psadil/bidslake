@@ -14,6 +14,10 @@ use std::path::{Path, PathBuf};
 /// Ingest a BIDS dataset from `dataset_path` into a fresh in-memory DuckDB and
 /// return the connection. Using `:memory:` avoids temp-file lifetime juggling
 /// and keeps each test fully isolated.
+///
+/// The whole parse runs inside one transaction, exactly as `main.rs` does — so
+/// tests exercise the production path, including its failure mode where a single
+/// erroring statement poisons the transaction for the rest of the ingest.
 pub async fn ingest(dataset_path: impl AsRef<Path>) -> Result<BidsDb> {
     let db = BidsDb::new(":memory:")?;
     let schema = Schema::load(None);
@@ -21,7 +25,9 @@ pub async fn ingest(dataset_path: impl AsRef<Path>) -> Result<BidsDb> {
 
     let fs = Box::new(LocalFileSystem::new(dataset_path.as_ref().to_path_buf()));
     let mut parser = BidsParser::new(fs, None, schema);
+    let txn = db.conn.unchecked_transaction()?;
     parser.parse(&db).await?;
+    txn.commit()?;
     Ok(db)
 }
 
