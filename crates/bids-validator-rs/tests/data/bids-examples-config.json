@@ -1,0 +1,16 @@
+{
+    "ignore": [
+        {
+            "code": "EMPTY_FILE"
+        },
+        {
+            "code": "NIFTI_HEADER_UNREADABLE"
+        },
+        {
+            "code": "GZ_NOT_GZIPPED"
+        },
+        {
+            "code": "NIFTI_TOO_SMALL"
+        }
+    ]
+}

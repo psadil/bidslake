@@ -6,9 +6,10 @@
 //! dataset root.
 
 use anyhow::Result;
+use bids_core::filetree::FileTree;
 use futures::future::BoxFuture;
 use std::path::{Path, PathBuf};
-use walkdir::WalkDir;
+use std::sync::{Arc, OnceLock};
 
 /// Trait for abstracting file system access (Local vs S3)
 pub trait BidsFileSystem: Send + Sync {
@@ -27,15 +28,29 @@ pub trait BidsFileSystem: Send + Sync {
 
     /// Get the root path/URI of the dataset
     fn root(&self) -> String;
+
+    /// The in-memory BIDS [`FileTree`] for this backend, if one exists on local
+    /// disk (populated once [`walk`](Self::walk) has run). Lets callers reuse the
+    /// `bids_core` inheritance helpers, which need the whole tree. Backends without
+    /// a local tree (S3) return `None`, and the caller falls back to its own path.
+    fn file_tree(&self) -> Option<Arc<FileTree>> {
+        None
+    }
 }
 
 pub struct LocalFileSystem {
     root: PathBuf,
+    /// The tree produced by the last [`walk`](BidsFileSystem::walk), cached so
+    /// [`file_tree`](BidsFileSystem::file_tree) can hand it to bids-core inheritance.
+    tree: OnceLock<Arc<FileTree>>,
 }
 
 impl LocalFileSystem {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            tree: OnceLock::new(),
+        }
     }
 }
 
@@ -43,26 +58,26 @@ impl BidsFileSystem for LocalFileSystem {
     fn walk(&self) -> BoxFuture<'_, Result<Vec<PathBuf>>> {
         let root = self.root.clone();
         Box::pin(async move {
-            let mut files = Vec::new();
-            // WalkDir is synchronous, but that's okay for local FS
-            // We could use tokio::fs::read_dir recursively for true async,
-            // but blocking a thread for local FS walk is usually acceptable.
-            // For strict async correctness we can wrap in spawn_blocking.
-            let walk_res = tokio::task::spawn_blocking(move || {
-                let mut paths = Vec::new();
-                for entry in WalkDir::new(&root).into_iter().filter_map(|e| e.ok()) {
-                    if entry.file_type().is_file()
-                        && let Ok(rel_path) = entry.path().strip_prefix(&root)
-                    {
-                        paths.push(rel_path.to_path_buf());
-                    }
-                }
-                paths
+            // Delegate to the shared `bids-core` walker: it applies `.bidsignore`
+            // (including nested ones), hidden-file, and always-ignore (`.git`,
+            // `.datalad`, …) rules during the walk. `read_file_tree` is synchronous,
+            // so run it on a blocking thread. `pseudo_exts` is empty here — no
+            // schema-driven opaque-directory handling. The returned paths are
+            // root-relative with a leading `/`, which we strip to match the
+            // dataset-relative frame the rest of the pipeline expects.
+            let tree = tokio::task::spawn_blocking(move || {
+                bids_core::filetree::read_file_tree(&root, &[])
             })
-            .await?;
-
-            files.extend(walk_res);
-            Ok(files)
+            .await??;
+            // Flatten to the dataset-relative paths the pipeline expects (strip the
+            // leading `/` each tree path carries).
+            let paths: Vec<PathBuf> = tree
+                .walk_files()
+                .map(|f| PathBuf::from(f.path.trim_start_matches('/')))
+                .collect();
+            // Cache the tree so `file_tree()` can share it with bids-core inheritance.
+            let _ = self.tree.set(Arc::new(tree));
+            Ok(paths)
         })
     }
 
@@ -87,5 +102,9 @@ impl BidsFileSystem for LocalFileSystem {
             .canonicalize()
             .unwrap_or_else(|_| self.root.clone());
         format!("file://{}", canonical.display())
+    }
+
+    fn file_tree(&self) -> Option<Arc<FileTree>> {
+        self.tree.get().cloned()
     }
 }

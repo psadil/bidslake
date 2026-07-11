@@ -31,8 +31,8 @@ use crate::schema::dynamic::quote_ident;
 use crate::schema::tabular::{ColumnSpec, FileContext, RowIdentity, TableSpec};
 use anyhow::Result;
 use duckdb::Connection;
+use bids_core::entities::read_entities;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
-use regex::Regex;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -160,9 +160,6 @@ impl BidsParser {
         // Load .bidsignore patterns before parsing
         self.load_bidsignore().await?;
 
-        // Pre-compile regex for extracting entities
-        let entity_re: Regex = Regex::new(r"([a-zA-Z0-9]+)-([a-zA-Z0-9]+)")?;
-
         // Collect all file paths first
         let mut dataset_description: Vec<std::path::PathBuf> = Vec::new();
         let mut participants_tsv: Vec<std::path::PathBuf> = Vec::new();
@@ -269,26 +266,22 @@ impl BidsParser {
 
         // Process dataset_description.json again to insert it
         for path in dataset_description {
-            self.process_file(&path, db, &entity_re, &dataset_id)
-                .await?;
+            self.process_file(&path, db, &dataset_id).await?;
         }
 
         // Pass 1: Process participants.tsv files
         for path in participants_tsv {
-            self.process_file(&path, db, &entity_re, &dataset_id)
-                .await?;
+            self.process_file(&path, db, &dataset_id).await?;
         }
 
         // Pass 2: Process sessions.tsv files
         for path in sessions_tsv {
-            self.process_file(&path, db, &entity_re, &dataset_id)
-                .await?;
+            self.process_file(&path, db, &dataset_id).await?;
         }
 
         // Pass 3: Process all other files
         for path in other_files {
-            self.process_file(&path, db, &entity_re, &dataset_id)
-                .await?;
+            self.process_file(&path, db, &dataset_id).await?;
         }
 
         // Process file associations after all files are indexed
@@ -360,13 +353,80 @@ impl BidsParser {
             }
         }
 
-        // Apply BIDS inheritance to populate sidecars table
+        // Apply BIDS inheritance to populate the `sidecars` table. On local disk we
+        // reuse bids-core's tree-based resolver (nearest-wins, matching the BIDS spec
+        // / reference validator); other backends (S3) fall back to the in-memory
+        // resolver over the sidecars collected during the walk.
         println!(
             "Applying BIDS inheritance for {} imaging files...",
             self.imaging_files.len()
         );
-        let entity_re = Regex::new(r"([a-zA-Z0-9]+)-([a-zA-Z0-9]+)")?;
+        if let Some(tree) = self.fs.file_tree() {
+            self.apply_inheritance_tree(db, &tree).await;
+        } else {
+            self.apply_inheritance_collected(db);
+        }
 
+        // Ingest the deferred headerless recordings now that every sidecar and
+        // channels file is available (their columns come from those).
+        self.flush_recordings(db).await?;
+
+        Ok(())
+    }
+
+    /// BIDS inheritance for the `sidecars` table using the local [`bids_core`]
+    /// `FileTree` and `read_sidecars` (nearest-wins, matching the BIDS spec /
+    /// reference validator). Local-disk backends only — it needs the tree and reads
+    /// each applicable sidecar from disk.
+    async fn apply_inheritance_tree(&self, db: &BidsDb, tree: &bids_core::filetree::FileTree) {
+        for img_file in &self.imaging_files {
+            // Tree paths carry a leading `/`; our `file_path` does not.
+            let tree_path = format!("/{}", img_file.file_path);
+            let Some(bids_file) = tree.find_file(&tree_path) else {
+                continue;
+            };
+            let (merged, _overrides) =
+                bids_core::inheritance::read_sidecars(bids_file, tree).await;
+            if let Value::Object(map) = merged {
+                self.insert_sidecar_row(db, &img_file.dataset_id, &img_file.file_path, map);
+            }
+        }
+    }
+
+    /// Insert one merged-sidecar row: the merged metadata as `other_data`, plus each
+    /// field also flattened to its own column (schema-known fields get typed
+    /// columns). A no-op when `merged` is empty.
+    fn insert_sidecar_row(
+        &self,
+        db: &BidsDb,
+        dataset_id: &str,
+        file_path: &str,
+        merged: serde_json::Map<String, Value>,
+    ) {
+        if merged.is_empty() {
+            return;
+        }
+        let mut sidecar_entry = serde_json::Map::new();
+        sidecar_entry.insert(
+            "dataset_id".to_string(),
+            Value::String(dataset_id.to_string()),
+        );
+        sidecar_entry.insert("file_path".to_string(), Value::String(file_path.to_string()));
+        sidecar_entry.insert("other_data".to_string(), Value::Object(merged.clone()));
+        // Also flatten metadata into top-level fields for known columns.
+        for (k, v) in &merged {
+            sidecar_entry.insert(k.clone(), v.clone());
+        }
+        if let Err(e) = db.insert(&self.schema, "sidecars", &Value::Object(sidecar_entry)) {
+            eprintln!("Failed to insert sidecar entry for {}: {}", file_path, e);
+        }
+    }
+
+    /// In-memory BIDS inheritance for the `sidecars` table over the JSON sidecars
+    /// collected during the walk, keyed by `(dataset_id, suffix)` with a
+    /// directory-prefix + entity-subset match. Used by non-local backends (S3),
+    /// which have no `FileTree`.
+    fn apply_inheritance_collected(&self, db: &BidsDb) {
         // A sidecar can only apply to an imaging file of the same dataset and
         // suffix, so index sidecars by (dataset_id, suffix) and precompute each
         // one's parent directory. This turns inheritance matching from
@@ -394,23 +454,9 @@ impl BidsParser {
 
             // Extract entities and suffix from imaging file
             let file_name = img_file.file_path.split('/').next_back().unwrap();
-            let mut img_entities = HashMap::new();
-            for cap in entity_re.captures_iter(file_name) {
-                img_entities.insert(cap[1].to_string(), cap[2].to_string());
-            }
-
-            let img_suffix = if let Some(last_underscore) = file_name.rfind('_') {
-                if let Some(first_dot) = file_name[last_underscore..].find('.') {
-                    file_name[last_underscore + 1..last_underscore + first_dot].to_string()
-                } else {
-                    file_name[last_underscore + 1..].to_string()
-                }
-            } else if let Some(first_dot) = file_name.find('.') {
-                // Should have a suffix if it's BIDS, but fallback
-                file_name[..first_dot].to_string()
-            } else {
-                file_name.to_string()
-            };
+            let img_parts = read_entities(file_name);
+            let img_entities = img_parts.entities;
+            let img_suffix = img_parts.suffix;
 
             // Candidates already share dataset_id + suffix; keep those whose
             // directory is a prefix of the image's and whose entities are a
@@ -450,50 +496,16 @@ impl BidsParser {
                 }
             }
 
-            // Insert into sidecars table if we have metadata
-            if !merged_metadata.is_empty() {
-                let mut sidecar_entry = serde_json::Map::new();
-                sidecar_entry.insert(
-                    "dataset_id".to_string(),
-                    Value::String(img_file.dataset_id.clone()),
-                );
-                sidecar_entry.insert(
-                    "file_path".to_string(),
-                    Value::String(img_file.file_path.clone()),
-                );
-                sidecar_entry.insert(
-                    "other_data".to_string(),
-                    Value::Object(merged_metadata.clone()),
-                );
-
-                // Also flatten metadata into top-level fields for known columns
-                for (k, v) in &merged_metadata {
-                    sidecar_entry.insert(k.clone(), v.clone());
-                }
-
-                if let Err(e) = db.insert(&self.schema, "sidecars", &Value::Object(sidecar_entry)) {
-                    eprintln!(
-                        "Failed to insert sidecar entry for {}: {}",
-                        img_file.file_path, e
-                    );
-                }
-            }
+            self.insert_sidecar_row(
+                db,
+                &img_file.dataset_id,
+                &img_file.file_path,
+                merged_metadata,
+            );
         }
-
-        // Ingest the deferred headerless recordings now that every sidecar and
-        // channels file is available (their columns come from those).
-        self.flush_recordings(db).await?;
-
-        Ok(())
     }
 
-    async fn process_file(
-        &mut self,
-        path: &Path,
-        db: &BidsDb,
-        entity_re: &Regex,
-        dataset_id: &str,
-    ) -> Result<()> {
+    async fn process_file(&mut self, path: &Path, db: &BidsDb, dataset_id: &str) -> Result<()> {
         let file_name = path.file_name().unwrap().to_str().unwrap();
 
         // path from walk() is already relative to dataset root
@@ -503,11 +515,8 @@ impl BidsParser {
             return Ok(());
         }
 
-        // Extract entities from filename
-        let mut entities = HashMap::new();
-        for cap in entity_re.captures_iter(file_name) {
-            entities.insert(cap[1].to_string(), cap[2].to_string());
-        }
+        // Parse BIDS filename entities via the shared bids-core parser.
+        let entities = read_entities(file_name).entities;
 
         let participant_id = entities.get("sub").map(|s| format!("sub-{}", s));
         let session_id = entities.get("ses").map(|s| format!("ses-{}", s));
@@ -594,23 +603,9 @@ impl BidsParser {
         let content = self.fs.read_to_string(path).await?;
         let json_value: Value = serde_json::from_str(&content).unwrap_or(Value::Null);
 
-        // Extract suffix from filename (part after last underscore, before extension)
+        // Extract the BIDS suffix from the filename via the shared bids-core parser.
         let file_name = path.file_name().unwrap().to_str().unwrap();
-        let suffix = if let Some(last_underscore) = file_name.rfind('_') {
-            if let Some(first_dot) = file_name[last_underscore..].find('.') {
-                file_name[last_underscore + 1..last_underscore + first_dot].to_string()
-            } else {
-                // No extension?
-                file_name[last_underscore + 1..].to_string()
-            }
-        } else {
-            // No underscore, maybe top level like "dwi.json"?
-            if let Some(first_dot) = file_name.find('.') {
-                file_name[..first_dot].to_string()
-            } else {
-                file_name.to_string()
-            }
-        };
+        let suffix = read_entities(file_name).suffix;
 
         // Store sidecar info for later inheritance processing
         self.sidecars.push(SidecarInfo {
@@ -1287,20 +1282,12 @@ fn recording_table_of(suffix: &str) -> Option<&'static str> {
     }
 }
 
-/// Split a tabular filename into its BIDS `(suffix, extension)`. The suffix is the
-/// token after the last `_` before the extension (or the stem for `participants.tsv`
-/// / `samples.tsv`); the extension is `.tsv` or `.tsv.gz`.
+/// Split a tabular filename into its BIDS `(suffix, extension)` via the shared
+/// bids-core parser. The suffix is the trailing token (or the stem for
+/// `participants.tsv` / `samples.tsv`); the extension is `.tsv` or `.tsv.gz`.
 fn split_suffix_ext(file_name: &str) -> (String, String) {
-    let (stem, ext) = if let Some(base) = file_name.strip_suffix(".tsv.gz") {
-        (base, ".tsv.gz")
-    } else if let Some(base) = file_name.strip_suffix(".tsv") {
-        (base, ".tsv")
-    } else {
-        let dot = file_name.find('.').unwrap_or(file_name.len());
-        (&file_name[..dot], &file_name[dot..])
-    };
-    let suffix = stem.rsplit('_').next().unwrap_or(stem).to_string();
-    (suffix, ext.to_string())
+    let parts = read_entities(file_name);
+    (parts.suffix, parts.extension)
 }
 
 /// A SQL string literal: single-quoted, with embedded `'` doubled.

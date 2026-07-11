@@ -1,3 +1,9 @@
 [submodule "tests/bids-examples"]
-	path = tests/bids-examples
+	path = third_party/bids-examples
 	url = https://github.com/bids-standard/bids-examples.git
+[submodule "crates/hed-validator-rs/tests/hed-tests"]
+	path = crates/hed-validator-rs/tests/hed-tests
+	url = https://github.com/hed-standard/hed-tests.git
+[submodule "crates/hed-validator-rs/tests/hed-schemas"]
+	path = crates/hed-validator-rs/tests/hed-schemas
+	url = https://github.com/hed-standard/hed-schemas.git

@@ -1,0 +1,38 @@
+{
+  "Delay": {
+    "maxNonDefSubgroups": 1,
+    "minNonDefSubgroups": 0,
+    "requiresDef": false,
+    "otherAllowedNonDefTags": ["Duration", "Onset", "Offset", "Inset"]
+  },
+  "Duration": {
+    "maxNonDefSubgroups": 1,
+    "minNonDefSubgroups": 1,
+    "requiresDef": false,
+    "otherAllowedNonDefTags": ["Delay"]
+  },
+  "Event-context": {
+    "maxNonDefSubgroups": null,
+    "minNonDefSubgroups": 0,
+    "requiresDef": false,
+    "otherAllowedNonDefTags": []
+  },
+  "Inset": {
+    "maxNonDefSubgroups": 1,
+    "minNonDefSubgroups": 0,
+    "requiresDef": true,
+    "otherAllowedNonDefTags": ["Delay"]
+  },
+  "Offset": {
+    "maxNonDefSubgroups": 0,
+    "minNonDefSubgroups": 0,
+    "requiresDef": true,
+    "otherAllowedNonDefTags": ["Delay"]
+  },
+  "Onset": {
+    "maxNonDefSubgroups": 1,
+    "minNonDefSubgroups": 0,
+    "requiresDef": true,
+    "otherAllowedNonDefTags": ["Delay"]
+  }
+}

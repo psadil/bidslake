@@ -53,6 +53,39 @@ async fn null_session_for_sessionless_dataset() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The ingest path derives implicit participants/sessions from filename entities —
+/// this now goes through the shared `bids_core::entities::read_entities` parser
+/// instead of the old ad-hoc regex, so pin that the derivation is still correct on a
+/// multi-session dataset (`sub-XX`, `ses-mri`/`ses-meg`).
+#[tokio::test]
+async fn implicit_sessions_from_filename_entities() -> anyhow::Result<()> {
+    let db = ingest(bids_example("ds000117")).await?;
+
+    // Every derived id must be well-formed (`sub-…` / `ses-…`).
+    let malformed: i64 = db.conn.query_row(
+        "SELECT COUNT(*) FROM sessions \
+         WHERE session_id NOT LIKE 'ses-%' OR participant_id NOT LIKE 'sub-%'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(
+        malformed, 0,
+        "session/participant ids must be derived from filename entities"
+    );
+
+    // The `ses-mri` sessions are implied purely by `ses-mri` in filenames.
+    let mri_sessions: i64 = db.conn.query_row(
+        "SELECT COUNT(*) FROM sessions WHERE session_id = 'ses-mri'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert!(
+        mri_sessions > 0,
+        "ds000117 should derive ses-mri sessions from filename entities"
+    );
+    Ok(())
+}
+
 /// Querying by concept reaches datasets with AND without sessions in one shot.
 #[tokio::test]
 async fn query_by_concept_across_mixed_pool() -> anyhow::Result<()> {

@@ -1,32 +1,17 @@
-[package]
-name = "bidslake"
-version = "0.1.0"
+[workspace]
+members = ["crates/bids-core", "crates/bidslake", "crates/bids-validator-rs", "crates/hed-validator-rs"]
+resolver = "3"
+
+[workspace.package]
 edition = "2024"
+version = "0.1.0"
 
-[dependencies]
-clap = { version = "4.4", features = ["derive"] }
-duckdb = { version = "1.0", features = ["bundled"] }
-walkdir = "2.5"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-anyhow = "1.0"
-regex = "1.10"
-tokio = { version = "1.48", features = ["full"] }
-aws-sdk-s3 = { version = "1.15" }
-aws-config = { version = "1.1" }
-futures = "0.3"
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.52", features = ["full"] }
+regex = "1"
 ignore = "0.4.28"
-
-[dev-dependencies]
-tokio = { version = "1.48", features = ["full"] }
+clap = { version = "4.6", features = ["derive"] }
+thiserror = "2"
 futures = "0.3"
-walkdir = "2.5"
-tempfile = "3.8"
-criterion = "0.5"
-
-[[bench]]
-name = "ingest"
-harness = false
-
-[features]
-default = []
