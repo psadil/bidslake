@@ -213,6 +213,7 @@ pub struct TableSpec {
 }
 
 /// The parsed tabular model: every rule, and the tables they roll up into.
+#[derive(Clone, Debug)]
 pub struct Tabular {
     rules: Vec<TabularRule>,
     tables: Vec<TableSpec>,
