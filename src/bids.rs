@@ -28,7 +28,7 @@ use crate::db::{BidsDb, FileAssociation};
 use crate::fs::BidsFileSystem;
 use crate::schema::Schema;
 use anyhow::Result;
-use globset::{Glob, GlobSet, GlobSetBuilder};
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use regex::Regex;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -37,7 +37,7 @@ use std::path::Path;
 pub struct BidsParser {
     fs: Box<dyn BidsFileSystem>,
     dataset_id: Option<String>,
-    ignore_set: GlobSet,
+    ignore_set: Gitignore,
     pending_associations: Vec<FileAssociation>,
     pending_diffusion: HashMap<String, PendingDiffusion>,
     schema: Schema,
@@ -77,7 +77,7 @@ impl BidsParser {
         Self {
             fs,
             dataset_id,
-            ignore_set: GlobSet::empty(),
+            ignore_set: Gitignore::empty(),
             pending_associations: Vec::new(),
             pending_diffusion: HashMap::new(),
             schema,
@@ -112,8 +112,14 @@ impl BidsParser {
                 continue;
             }
 
-            // Skip files matching .bidsignore patterns
-            if self.ignore_set.is_match(&path) {
+            // Skip files matching .bidsignore patterns. `matched_path_or_any_parents`
+            // applies gitignore semantics — crucially it also tests parent dirs, so a
+            // directory pattern like `logs/` excludes everything beneath it.
+            if self
+                .ignore_set
+                .matched_path_or_any_parents(&path, false)
+                .is_ignore()
+            {
                 continue;
             }
 
@@ -888,42 +894,24 @@ impl BidsParser {
         Ok(())
     }
 
-    /// Load .bidsignore file and build GlobSet for pattern matching
-    /// .bidsignore follows gitignore-style patterns
+    /// Load the dataset-root `.bidsignore` and compile it with full gitignore
+    /// semantics.
+    ///
+    /// BIDS specifies that `.bidsignore` follows gitignore rules, so we use the
+    /// `ignore` crate rather than a bare glob set. This is what makes directory
+    /// patterns (`logs/`, `figures/`), anchoring (`/derivatives`), and negation
+    /// (`!keep.tsv`) behave correctly — a plain `GlobSet` silently mishandled all
+    /// three. Only the root `.bidsignore` is consulted, per spec (nested datasets'
+    /// ignore files are not applied when walking a parent).
     async fn load_bidsignore(&mut self) -> Result<()> {
-        use std::path::PathBuf;
+        let bidsignore_path = Path::new(".bidsignore");
 
-        let bidsignore_path = PathBuf::from(".bidsignore");
-
-        // Try to read .bidsignore file
-        let content = match self.fs.read_to_string(&bidsignore_path).await {
+        let content = match self.fs.read_to_string(bidsignore_path).await {
             Ok(c) => c,
-            Err(_) => {
-                // .bidsignore doesn't exist, use empty GlobSet
-                return Ok(());
-            }
+            Err(_) => return Ok(()), // no .bidsignore → nothing ignored
         };
 
-        let mut builder = GlobSetBuilder::new();
-        for line in content.lines() {
-            let line = line.trim();
-            // Skip empty lines and comments
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-
-            // Add glob pattern to builder
-            match Glob::new(line) {
-                Ok(glob) => {
-                    builder.add(glob);
-                }
-                Err(e) => {
-                    eprintln!("Warning: Invalid .bidsignore pattern '{}': {}", line, e);
-                }
-            }
-        }
-
-        self.ignore_set = builder.build()?;
+        self.ignore_set = build_bidsignore(&content)?;
         Ok(())
     }
 
@@ -1035,4 +1023,71 @@ fn is_imaging_file(filename: &str) -> bool {
     ];
 
     imaging_extensions.iter().any(|ext| filename.ends_with(ext))
+}
+
+/// Compile `.bidsignore` file content into a [`Gitignore`] matcher.
+///
+/// Patterns are relative to the dataset root; `walk()` yields root-relative paths,
+/// so an empty builder root keeps both sides in the same frame. Comments and blank
+/// lines are skipped; an individually malformed pattern is warned about and
+/// skipped rather than failing the whole load.
+fn build_bidsignore(content: &str) -> Result<Gitignore> {
+    let mut builder = GitignoreBuilder::new("");
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Err(e) = builder.add_line(None, trimmed) {
+            eprintln!("Warning: invalid .bidsignore pattern '{}': {}", trimmed, e);
+        }
+    }
+    Ok(builder.build()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_bidsignore;
+    use std::path::Path;
+
+    fn ignored(content: &str, path: &str) -> bool {
+        build_bidsignore(content)
+            .unwrap()
+            .matched_path_or_any_parents(Path::new(path), false)
+            .is_ignore()
+    }
+
+    /// A directory pattern must exclude everything beneath it — the case the old
+    /// bare-GlobSet handling silently got wrong.
+    #[test]
+    fn directory_pattern_excludes_contents() {
+        assert!(ignored("logs/\n", "logs/run-01.log"));
+        assert!(ignored("logs/\n", "sub-01/logs/x.txt"));
+        assert!(ignored("figures/\n", "derivatives/figures/a.svg"));
+        assert!(!ignored("logs/\n", "sub-01/func/sub-01_bold.nii.gz"));
+    }
+
+    /// `*` glob still works, and matches across directories for a bare pattern.
+    #[test]
+    fn glob_patterns_match() {
+        assert!(ignored("*_mixing.tsv\n", "sub-16/func/sub-16_desc-x_mixing.tsv"));
+        assert!(ignored("*.html\n", "sub-01/report.html"));
+        assert!(!ignored("*_mixing.tsv\n", "sub-16/func/sub-16_bold.nii.gz"));
+    }
+
+    /// A leading slash anchors a pattern to the dataset root.
+    #[test]
+    fn anchored_pattern_matches_only_at_root() {
+        assert!(ignored("/derivatives\n", "derivatives/sub-01/x.nii.gz"));
+        // Anchored at root, so a nested `derivatives` is NOT matched.
+        assert!(!ignored("/derivatives\n", "sub-01/derivatives/x.nii.gz"));
+    }
+
+    /// Negation re-includes a file excluded by an earlier pattern.
+    #[test]
+    fn negation_reincludes() {
+        let content = "*.tsv\n!keep.tsv\n";
+        assert!(ignored(content, "sub-01/drop.tsv"));
+        assert!(!ignored(content, "sub-01/keep.tsv"));
+    }
 }
