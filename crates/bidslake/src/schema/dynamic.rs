@@ -425,6 +425,23 @@ impl Schema {
                 .to_string(),
         );
 
+        // pseudofile: TRUE when the file is a BIDS "pseudo-file" — an opaque directory (`.ds`,
+        // `.mefd`, `.ome.zarr`, …) that tools treat as a single file. Derived from the schema's
+        // pseudo-file extensions. (Components inside such a directory are never indexed: the walk
+        // emits the directory as one file and does not descend into it.)
+        let pseudo_alt: Vec<String> = bids_schema::pseudo_file_extensions(&self.schema)
+            .iter()
+            .filter_map(|e| e.strip_suffix('/'))
+            .filter(|e| !e.is_empty())
+            .map(|e| e.replace('.', "\\."))
+            .collect();
+        if !pseudo_alt.is_empty() {
+            cols.push(format!(
+                "pseudofile BOOLEAN GENERATED ALWAYS AS (regexp_matches(file_path, '({})$')) VIRTUAL",
+                pseudo_alt.join("|")
+            ));
+        }
+
         // modality (mri/eeg/...) mapped from the datatype dir via rules.modalities.
         if let Some(mods) = self.schema["rules"]["modalities"].as_object() {
             let mut keys: Vec<&str> = mods.keys().map(|k| k.as_str()).collect();

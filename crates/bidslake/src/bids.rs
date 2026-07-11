@@ -527,8 +527,10 @@ impl BidsParser {
             return Ok(());
         }
 
-        // Parse BIDS filename entities via the shared bids-core parser.
-        let entities = read_entities(file_name).entities;
+        // Parse BIDS filename entities + extension via the shared bids-core parser.
+        let parts = read_entities(file_name);
+        let extension = parts.extension;
+        let entities = parts.entities;
 
         let participant_id = entities.get("sub").map(|s| format!("sub-{}", s));
         let session_id = entities.get("ses").map(|s| format!("ses-{}", s));
@@ -593,8 +595,10 @@ impl BidsParser {
                 .await?;
         }
 
-        // Track imaging files for auto-populating scans table if needed
-        if is_imaging_file(file_name) {
+        // Track primary data files for the `scans` table — imaging plus non-NIfTI datafiles
+        // (EEG/MEG/iEEG/NIRS/microscopy/…, including pseudo-files like `.ds`), so they are
+        // queryable by concept.
+        if is_datafile(rel_path, &extension, self.schema.raw()) {
             self.imaging_files.push(ImagingFile {
                 dataset_id: dataset_id.to_string(),
                 file_path: rel_path.to_string(), // Use rel_path not file_name
@@ -999,7 +1003,7 @@ impl BidsParser {
         let colnames = if rec.suffix == "motion" {
             self.motion_columns(db, rec)?
         } else {
-            self.sidecar_columns(rec)
+            self.sidecar_columns(rec).await
         };
         if colnames.is_empty() {
             return Ok((None, 0)); // headerless file with no column names → skip
@@ -1078,11 +1082,26 @@ impl BidsParser {
             .unwrap_or_default()
     }
 
-    /// Column names for a physio/stim/physioevents recording, from the merged
-    /// sidecar's `Columns` array (BIDS requires it for these files).
-    fn sidecar_columns(&self, rec: &PendingRecording) -> Vec<String> {
-        let merged =
-            self.merged_sidecar_map(&rec.dataset_id, &rec.rel_path, &rec.suffix, &rec.entities);
+    /// Column names for a physio/stim/physioevents recording, from the merged sidecar's
+    /// `Columns` array (BIDS requires it for these files). On local disk the merge reuses the
+    /// shared `bids_core::inheritance::read_sidecars`; other backends (S3, no tree) fall back to
+    /// the in-memory `merged_sidecar_map` over sidecars collected during the walk.
+    async fn sidecar_columns(&self, rec: &PendingRecording) -> Vec<String> {
+        let merged = match self.fs.file_tree() {
+            Some(tree) => match tree.find_file(&format!("/{}", rec.rel_path)) {
+                Some(bids_file) => match bids_core::inheritance::read_sidecars(bids_file, &tree)
+                    .await
+                    .0
+                {
+                    Value::Object(m) => m,
+                    _ => serde_json::Map::new(),
+                },
+                None => serde_json::Map::new(),
+            },
+            None => {
+                self.merged_sidecar_map(&rec.dataset_id, &rec.rel_path, &rec.suffix, &rec.entities)
+            }
+        };
         merged
             .get("Columns")
             .and_then(|v| v.as_array())
@@ -1453,13 +1472,18 @@ fn build_tabular_insert_sql(
 const HEADER_READ_OPTS: &str = "delim='\\t', header=true, all_varchar=true, nullstr='n/a'";
 
 /// Determine if a file is an imaging data file that should go in scans table
-fn is_imaging_file(filename: &str) -> bool {
-    let imaging_extensions = [
-        ".nii.gz", ".nii", ".img", ".hdr", // Analyze format
-        ".img.gz", ".hdr.gz",
-    ];
-
-    imaging_extensions.iter().any(|ext| filename.ends_with(ext))
+/// Whether a file is a primary BIDS **data file** (→ one `scans` row): it sits in a datatype
+/// directory and is not a sidecar/tabular/gradient companion (`.json` / `.tsv` / `.tsv.gz` /
+/// `.bval` / `.bvec`). Covers NIfTI plus electrophysiology (`.edf`/`.vhdr`/`.set`/…), MEG
+/// (`.ds`/`.fif`/…), NIRS (`.snirf`), microscopy, etc., so every modality's datafiles are
+/// queryable by concept. Datatype is derived from the path via the schema.
+///
+/// Note: for multi-file recordings (e.g. BrainVision `.vhdr`+`.vmrk`+`.eeg`) each component is a
+/// separate data file and gets its own `scans` row; filter by extension for the primary header.
+fn is_datafile(rel_path: &str, extension: &str, schema: &Value) -> bool {
+    const COMPANION_EXTS: &[&str] = &[".json", ".tsv", ".tsv.gz", ".bval", ".bvec"];
+    bids_schema::datatypes::find_datatype(rel_path, schema).is_some()
+        && !COMPANION_EXTS.contains(&extension)
 }
 
 /// Compile `.bidsignore` file content into a [`Gitignore`] matcher.

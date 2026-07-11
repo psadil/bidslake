@@ -130,20 +130,6 @@ impl Selector {
                 | Selector::Datatype(_)
         )
     }
-
-    /// Evaluate against a file's context.
-    pub fn matches(&self, ctx: &FileContext) -> bool {
-        match self {
-            Selector::Path(p) => ctx.path == p,
-            Selector::Suffix(s) => ctx.suffix == Some(s.as_str()),
-            Selector::SuffixIn(set) => ctx.suffix.is_some_and(|s| set.iter().any(|x| x == s)),
-            Selector::Extension(e) => ctx.extension == Some(e.as_str()),
-            Selector::Datatype(d) => ctx.datatype == Some(d.as_str()),
-            Selector::Sidecar { key, value } => ctx.sidecar.get(key) == Some(value),
-            Selector::DatasetType(d) => ctx.dataset_type == Some(d.as_str()),
-            Selector::Unsupported(_) => false,
-        }
-    }
 }
 
 /// One leaf rule of `rules.tabular_data`.
@@ -623,25 +609,13 @@ mod tests {
     }
 
     #[test]
-    fn unknown_selector_is_unsupported_and_never_matches() {
-        let sel = Selector::parse("entities.subject == \"01\"");
-        assert!(matches!(sel, Selector::Unsupported(_)));
-        assert!(!sel.matches(&FileContext::default()));
-    }
-
-    #[test]
-    fn selector_matching() {
-        let ctx = FileContext {
-            path: "/sub-01/func/sub-01_task-x_events.tsv",
-            datatype: Some("func"),
-            suffix: Some("events"),
-            extension: Some(".tsv"),
-            sidecar: &Value::Null,
-            dataset_type: None,
-        };
-        assert!(Selector::parse("suffix == \"events\"").matches(&ctx));
-        assert!(!Selector::parse("suffix == \"channels\"").matches(&ctx));
-        assert!(Selector::parse("extension == \".tsv\"").matches(&ctx));
+    fn unknown_selector_is_unsupported() {
+        // Unsupported forms parse to `Unsupported` so they never count as an *identity*
+        // selector (grouping); matching itself is delegated to the shared expression evaluator.
+        assert!(matches!(
+            Selector::parse("entities.subject == \"01\""),
+            Selector::Unsupported(_)
+        ));
     }
 
     /// Every rule name maps to the intended table name.

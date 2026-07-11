@@ -46,9 +46,15 @@
 //!   From `participants.tsv` and implicit `sub-` entities.
 //! - **`sessions`** — one row per subject-session. PK
 //!   `(dataset_id, session_id, participant_id)`.
-//! - **`scans`** — one row per imaging file. PK `(dataset_id, file_path)`.
-//!   Every discovered imaging file gets a row (including ones a `scans.tsv`
-//!   omits). It also carries **generated columns** (see below).
+//! - **`scans`** — one row per primary **data file**, across modalities: NIfTI plus
+//!   electrophysiology (`.edf`/`.vhdr`/`.set`/…), MEG (`.ds`/`.fif`/…), NIRS (`.snirf`),
+//!   microscopy, etc. — a file in a datatype directory that is not a sidecar/tabular/gradient
+//!   companion (`.json`/`.tsv`/`.bval`/`.bvec`). PK `(dataset_id, file_path)`. Every discovered
+//!   data file gets a row (including ones a `scans.tsv` omits). It also carries **generated
+//!   columns** (see below), including a boolean **`pseudofile`** flag for opaque *directory*
+//!   datafiles (`.ds`/`.mefd`/`.ome.zarr`): these are indexed as a **single** row and never
+//!   descended into, so their internal components are not indexed. (Recordings that are genuinely
+//!   several files — e.g. BrainVision `.vhdr`+`.vmrk`+`.eeg` — still get a row each.)
 //! - **`sidecars`** — the JSON-sidecar metadata for each imaging file after BIDS
 //!   inheritance (dataset-/subject-level sidecars merged, more-specific wins).
 //!   PK `(dataset_id, file_path)` referencing `scans`. Very wide — a column per
@@ -89,7 +95,8 @@
 //!   `ses` is `NULL` for datasets without sessions, and one query spans a mixed
 //!   pool);
 //! - **`datatype`** (`func`/`anat`/…), **`suffix`** (`bold`/`T1w`/…),
-//!   **`extension`** (`.nii.gz`), and **`modality`** (`mri`/`eeg`/…).
+//!   **`extension`** (`.nii.gz`), **`modality`** (`mri`/`eeg`/…), and **`pseudofile`**
+//!   (boolean — an opaque directory datafile like `.ds`/`.ome.zarr`).
 //!
 //! They are generated from the BIDS schema itself (`objects.entities`,
 //! `objects.datatypes`, `rules.modalities`) and computed on read, costing nothing

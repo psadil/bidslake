@@ -5,13 +5,24 @@ This document records how `bids-validator-rs` compares against the reference Typ
 `3.0.0-alpha.4`). `bids-validator-rs` now bundles the BIDS schema **1.2.1** (BIDS 1.11.1, the
 latest released version), vendored via the shared `bids-schema` crate.
 
-> **Note:** the figures and per-schema claims in this document were measured when the crate
-> bundled `@bids/schema` 1.2.4; after the move to the released 1.2.1 they are **pending
-> re-verification** and may shift.
+> **Re-measured 2026-07 at the bundled schema 1.2.1.** A fresh automated multiset diff
+> (`bids-validator-rs` @ 1.2.1 vs `deno run -A jsr:@bids/validator` @ *latest*, filtering the four
+> `bids-examples`-artifact codes from both sides) gives **76 of 107 datasets matching exactly**.
+> The remaining 31 differences cluster into a small set of recurring causes:
+>
+> - **`B0_FIELD_SOURCE_RECOMMENDED` / `B0FieldSource`** (Rust-only) — e.g. `7t_trt`, `ds000117`, `eyetracking_fmri`, `ieeg_visual_multimodal`.
+> - **`MISSING_SESSION`** (Rust-only) — e.g. `ds000117`, `ds000247`, `ds000248`, `eeg_rishikesh` (a message-only rule the reference never fires; cause 3 below).
+> - **`TSV_COLUMN_TYPE_REDEFINED`** (TS-only) — EEG/eyetracking/iEEG datasets; the reference's TSV value-signature layer.
+> - **Derivative datasets** (`ds000001-fmriprep`, `atlas-suit`) — large two-way `SIDECAR_KEY_RECOMMENDED` diffs from datatype/modality gating (cause 1).
+> - **`SIDECAR_KEY_RECOMMENDED` `AnatomicalLandmarkCoordinates`/`AnatomicalImage`** (Rust-only) — MEG/MRS datasets.
+> - **`SIDECAR_KEY_REQUIRED` `NonlinearGradientCorrection`** (Rust-only) — PET datasets.
+>
+> Caveat: this run compares against the *latest* TS validator, not the pinned `3.0.0-alpha.4`, so
+> it is a fresh basis. The detailed cause-by-cause analysis below was written at schema 1.2.4 and
+> should be refreshed against a pinned reference before its exact figures are relied on.
 
-**Status (measured at schema 1.2.4): 59 of 107 `bids-examples` datasets match exactly. Every
-difference in the remaining 48 is one of the four causes below** — there are no unexplained
-discrepancies.
+**Status (historical — schema 1.2.4 vs TS `3.0.0-alpha.4`): 59 of 107 `bids-examples` datasets
+matched exactly; every remaining difference was one of the four causes below.**
 
 ## How the diff is produced
 
