@@ -665,6 +665,33 @@ impl Schema {
     }
 
     pub fn insert(&self, conn: &Connection, table_name: &str, data: &Value) -> Result<()> {
+        // Use the statement built once at load time.
+        let sql = self.insert_sql.get(table_name).ok_or_else(|| {
+            duckdb::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("No insert statement for table {}", table_name),
+            )))
+        })?;
+        let params = self.row_values(table_name, data)?;
+        // Convert Option<Value> to &dyn ToSql
+        let params_refs: Vec<&dyn duckdb::ToSql> =
+            params.iter().map(|p| p as &dyn duckdb::ToSql).collect();
+        // prepare_cached reuses the compiled plan across every row of this table.
+        let mut stmt = conn.prepare_cached(sql)?;
+        stmt.execute(params_refs.as_slice())?;
+        Ok(())
+    }
+
+    /// Build the ordered bind values for one row of `table_name` — the write columns
+    /// in `table_columns` order, with the same type coercion the insert path uses.
+    /// Shared by the prepared-statement `insert` and the bulk Appender path
+    /// ([`crate::db::BidsDb::append_rows`]), so bulk inserts stay identical to
+    /// single-row ones.
+    pub fn row_values(
+        &self,
+        table_name: &str,
+        data: &Value,
+    ) -> Result<Vec<Option<duckdb::types::Value>>> {
         let fields = self.table_columns.get(table_name).ok_or_else(|| {
             duckdb::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
@@ -678,16 +705,8 @@ impl Schema {
             .map(|(_, _, json_key)| json_key.as_str())
             .collect();
 
-        // Use the statement built once at load time.
-        let sql = self.insert_sql.get(table_name).ok_or_else(|| {
-            duckdb::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("No insert statement for table {}", table_name),
-            )))
-        })?;
-
-        let mut params = Vec::new();
-        // We need to keep the values alive until the end of the function
+        let mut params: Vec<Option<duckdb::types::Value>> = Vec::new();
+        // Owns JSON strings until they're cloned into `Value::Text` just below.
         let mut string_values: Vec<String> = Vec::new();
 
         for (col_name, col_type, json_key) in fields {
@@ -810,14 +829,7 @@ impl Schema {
             }
         }
 
-        // Convert Option<Value> to &dyn ToSql
-        let params_refs: Vec<&dyn duckdb::ToSql> =
-            params.iter().map(|p| p as &dyn duckdb::ToSql).collect();
-
-        // prepare_cached reuses the compiled plan across every row of this table.
-        let mut stmt = conn.prepare_cached(sql)?;
-        stmt.execute(params_refs.as_slice())?;
-        Ok(())
+        Ok(params)
     }
 }
 

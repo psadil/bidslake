@@ -11,9 +11,12 @@ use std::path::{Path, PathBuf};
 use bidslake::{bids::BidsParser, db::BidsDb, fs::LocalFileSystem, schema::Schema};
 use criterion::{Criterion, criterion_group, criterion_main};
 
-/// Small, stable datasets that exercise the common paths (anat/func, sessions,
-/// events, inheritance) without dominating the benchmark with one huge dataset.
-const DATASETS: &[&str] = &["ds001", "ds002", "ds114"];
+/// Datasets chosen to exercise the cost drivers: `ds001`/`ds002`/`ds114` cover
+/// the common paths (anat/func, sessions, events, inheritance); `ds108` is
+/// insert-heavy (≈238 scans, ≈200 `_events.tsv`), so it guards the bulk-Appender
+/// path for `scans`/`sidecars` and the per-file tabular `read_csv` cost against
+/// regressions.
+const DATASETS: &[&str] = &["ds001", "ds002", "ds114", "ds108"];
 
 fn bids_example(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

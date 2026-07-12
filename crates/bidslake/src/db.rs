@@ -105,6 +105,30 @@ impl BidsDb {
         Ok(())
     }
 
+    /// Bulk-insert many rows into a schema-generated table via the DuckDB
+    /// **Appender**. This bypasses SQL planning entirely — crucial for the tables
+    /// that carry the generated (virtual) BIDS-concept columns (`scans`,
+    /// `sidecars`): a row-by-row `INSERT` re-parses all ~40 of those column regexes
+    /// per statement (~10 ms/row), whereas the Appender writes the physical columns
+    /// directly (measured ~300× faster). Each row's values are shaped exactly like
+    /// [`Schema::insert`] via [`Schema::row_values`], so the result is identical to
+    /// inserting them one at a time. The caller is responsible for primary-key
+    /// dedup (the Appender does not run the insert-if-not-exists guard).
+    pub fn append_rows(&self, schema: &Schema, table_name: &str, rows: &[Value]) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let mut appender = self.conn.appender(table_name)?;
+        for row in rows {
+            let values = schema.row_values(table_name, row)?;
+            let refs: Vec<&dyn duckdb::ToSql> =
+                values.iter().map(|v| v as &dyn duckdb::ToSql).collect();
+            appender.append_row(refs.as_slice())?;
+        }
+        appender.flush()?;
+        Ok(())
+    }
+
     /// Insert one derived file association into `file_associations`.
     pub fn insert_file_association(&self, assoc: &FileAssociation) -> Result<()> {
         // Static SQL — prepare_cached reuses the plan across all associations.
