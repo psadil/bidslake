@@ -188,5 +188,19 @@ async fn xeeg_mixed_line_endings_batch_correctly() -> anyhow::Result<()> {
     let db = ingest(&root).await?;
     let n = check_events(&db, &root)?;
     assert!(n > 0, "expected xeeg_hed_score events files");
+
+    // sub-ieegModulator's electrodes.tsv has mixed line endings *within* the file
+    // (166 CRLF rows + a final bare-LF row) — valid per bids-validator-rs, but
+    // rejected by DuckDB's strict CSV parser. `strict_mode=false` ingests it; guard
+    // that it stays ingested (all 166 rows), not silently skipped.
+    let electrodes: i64 = db.conn.query_row(
+        "SELECT count(*) FROM ieeg_electrodes WHERE file_path LIKE '%sub-ieegModulator%electrodes.tsv'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(
+        electrodes, 166,
+        "mixed-line-ending electrodes.tsv must ingest under strict_mode=false"
+    );
     Ok(())
 }

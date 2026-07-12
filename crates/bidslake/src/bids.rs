@@ -1476,8 +1476,10 @@ impl BidsParser {
             .iter()
             .map(|c| format!("{}: 'VARCHAR'", sql_lit(c)))
             .collect();
+        // `strict_mode=false` for the same reason as `HEADER_READ_OPTS`: tolerate
+        // CSV-standard quirks (e.g. mixed line endings) in otherwise-valid files.
         let read_opts = format!(
-            "delim='\\t', header=false, auto_detect=false, all_varchar=true, nullstr='n/a', columns={{{}}}",
+            "delim='\\t', header=false, auto_detect=false, all_varchar=true, nullstr='n/a', strict_mode=false, columns={{{}}}",
             cols_spec.join(", ")
         );
 
@@ -2070,7 +2072,22 @@ fn tsv_header_from_line(line: &str) -> Option<(String, Vec<String>)> {
 }
 
 /// The `read_csv` options for a header-bearing tabular file.
-const HEADER_READ_OPTS: &str = "delim='\\t', header=true, all_varchar=true, nullstr='n/a'";
+///
+/// `strict_mode=false` relaxes DuckDB's CSV-standard enforcement. Real BIDS
+/// datasets contain files that are perfectly valid per the BIDS spec yet violate
+/// strict CSV — most concretely, inconsistent line endings *within* a file (mixed
+/// CRLF/LF), which the reference validator does not flag (its newline check only
+/// catches CR-only files). Strict mode rejects those at sniff time; relaxing it
+/// ingests them correctly.
+///
+/// The trade-off is a deliberate division of labour: with strict mode off,
+/// DuckDB no longer errors on a genuinely malformed row (e.g. a wrong field count
+/// is padded/truncated rather than failing the read). bidslake is a catalog, not
+/// a validator, so it leans permissive and **relies on `bids-validator-rs` to be
+/// the authority on tabular malformation** — it ingests what it can rather than
+/// refusing a dataset over a row-level defect.
+const HEADER_READ_OPTS: &str =
+    "delim='\\t', header=true, all_varchar=true, nullstr='n/a', strict_mode=false";
 
 /// Determine if a file is an imaging data file that should go in scans table
 /// Whether a file is a primary BIDS **data file** (→ one `scans` row): it sits in a datatype
