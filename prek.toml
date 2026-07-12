@@ -24,6 +24,6 @@ hooks = [
 repo = "local"
 hooks = [
     { id = "cargo-fmt", name = "cargo fmt", language = "system", entry = "cargo fmt --all -- --check", files = '\.rs$', pass_filenames = false },
-    { id = "cargo-clippy", name = "cargo clippy", language = "system", entry = "cargo clippy --all-targets -- -D warnings", pass_filenames = false },
+    { id = "cargo-clippy", name = "cargo clippy", language = "system", entry = "cargo clippy --all-targets -- -D warnings", files = '\.rs$', pass_filenames = false },
     { id = "ty", name = "ty (bidslake-py)", language = "system", entry = "bash -c 'cd crates/bidslake-py && ./.venv/bin/ty check python/bidslake'", files = '^crates/bidslake-py/python/.*\.py$', pass_filenames = false },
 ]
