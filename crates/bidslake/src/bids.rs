@@ -1258,91 +1258,66 @@ impl BidsParser {
             );
             db.conn.execute(&del, [])?;
 
-            // Dry-run the batch read on the throwaway validator connection first.
-            // The read is byte-identical to the one the INSERT runs, and (because
-            // the group shares one dialect) it cannot hit a schema mismatch — so if
-            // it reads cleanly here, the INSERT's read will too. Counting per file
-            // forces a full parse (surfacing any deep structural error) and yields
-            // the `tabular_files` row counts for free, all off the main transaction
-            // (which DuckDB can't roll back). Only once it passes do we write.
-            if let Some(counts) = self.batch_read_counts(&files) {
-                let preserve_order = !is_order_insensitive(&spec.table);
-                let select =
-                    build_tabular_batch_select(spec, &dataset_id, &files, columns, preserve_order);
-                let sql = format!("INSERT INTO {} BY NAME {select}", spec.table);
-                if let Err(e) = db.conn.execute(&sql, []) {
-                    // Unreachable for validated data (the identical read just passed
-                    // on the validator); surface it rather than fail the ingest.
-                    eprintln!(
-                        "Warning: batched tabular insert into {} failed: {e}",
-                        spec.table
-                    );
-                }
-                for m in &members {
-                    let n = counts.get(&m.rel_path).copied().unwrap_or(0);
-                    db.record_tabular_file(
-                        &dataset_id,
-                        &m.rel_path,
-                        Some(&spec.table),
-                        n,
-                        "ingested",
-                    )?;
-                }
-            } else {
-                // A file in the group fails a full read; ingest per-file so the
-                // bad one is isolated and the rest still land.
-                let empty = HashMap::new();
-                for m in &members {
-                    let n = self
-                        .ingest_tabular(db, &m.spec, &m.rel_path, &dataset_id, &empty)
-                        .await
-                        .unwrap_or(0);
-                    db.record_tabular_file(
-                        &dataset_id,
-                        &m.rel_path,
-                        Some(&m.spec.table),
-                        n,
-                        "ingested",
-                    )?;
-                }
+            // Write the batch directly — no throwaway dry-run read first. With
+            // `ignore_errors`/`null_padding` (see `HEADER_READ_OPTS`) `read_csv` no
+            // longer aborts on a malformed row, so it can't poison the ingest
+            // transaction; the dry-run existed only to catch that off to the side,
+            // and dropping it halves the reads (the dominant cost on a network
+            // filesystem — the dry-run and the insert each downloaded every file).
+            // The trade-off: a genuinely malformed row is padded/dropped by DuckDB
+            // rather than isolating its file, so `bids-validator-rs` — not
+            // bidslake — is the authority on tabular malformation.
+            let preserve_order = !is_order_insensitive(&spec.table);
+            let select =
+                build_tabular_batch_select(spec, &dataset_id, &files, columns, preserve_order);
+            let sql = format!("INSERT INTO {} BY NAME {select}", spec.table);
+            if let Err(e) = db.conn.execute(&sql, []) {
+                eprintln!(
+                    "Warning: batched tabular insert into {} failed: {e}",
+                    spec.table
+                );
+            }
+            // Counts come from the table itself (a cheap local query, not a re-read
+            // of the source files), so `tabular_files` reflects exactly what landed
+            // — including any rows `ignore_errors` dropped.
+            let counts = self.table_row_counts(db, spec, &dataset_id, &members);
+            for m in &members {
+                let n = counts.get(&m.rel_path).copied().unwrap_or(0);
+                db.record_tabular_file(&dataset_id, &m.rel_path, Some(&spec.table), n, "ingested")?;
             }
         }
         Ok(())
     }
 
-    /// Read the batch on the throwaway validator connection and return each file's
-    /// row count, keyed by dataset-relative path. `Some` means every file read
-    /// cleanly (safe to run the identical read on the ingest connection); `None`
-    /// means one failed, and the caller falls back to the per-file path. Counting
-    /// per `filename` forces the full parse that surfaces a malformed file here
-    /// rather than poisoning the ingest transaction. Reads `parallel=true`
-    /// regardless of the table (a row count is order-independent), so over a
-    /// network filesystem the validator downloads the batch's files concurrently.
-    fn batch_read_counts(&self, files: &[(&str, &str)]) -> Option<HashMap<String, i64>> {
-        let locals = files
+    /// Per-file row counts for a just-inserted batch, read back from the table (a
+    /// cheap local query — not a re-read of the source files). Keyed by
+    /// dataset-relative path; a file that landed no rows is absent (recorded as 0).
+    fn table_row_counts(
+        &self,
+        db: &BidsDb,
+        spec: &TableSpec,
+        dataset_id: &str,
+        members: &[&PendingTabular],
+    ) -> HashMap<String, i64> {
+        let rel_list = members
             .iter()
-            .map(|(l, _)| sql_lit(l))
+            .map(|m| sql_lit(&m.rel_path))
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
-            "SELECT filename, count(*) FROM \
-             read_csv([{locals}], {HEADER_READ_OPTS}, filename=true) \
-             GROUP BY filename"
+            "SELECT file_path, count(*) FROM {} WHERE dataset_id = {} AND file_path IN ({rel_list}) \
+             GROUP BY file_path",
+            spec.table,
+            sql_lit(dataset_id),
         );
-        let mut stmt = self.validator.prepare(&sql).ok()?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
-            .ok()?;
-        // `filename` is the absolute local path; remap to the dataset-relative one.
-        let rel_of: HashMap<&str, &str> = files.iter().map(|&(l, r)| (l, r)).collect();
         let mut counts = HashMap::new();
-        for row in rows {
-            let (local, n) = row.ok()?;
-            if let Some(rel) = rel_of.get(local.as_str()) {
-                counts.insert((*rel).to_string(), n);
-            }
+        if let Ok(mut stmt) = db.conn.prepare(&sql)
+            && let Ok(rows) =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+        {
+            counts.extend(rows.flatten());
         }
-        Some(counts)
+        counts
     }
 
     /// The BIDS datatype for a file, taken from the datatype directory in its path.
@@ -1476,10 +1451,12 @@ impl BidsParser {
             .iter()
             .map(|c| format!("{}: 'VARCHAR'", sql_lit(c)))
             .collect();
-        // `strict_mode=false` for the same reason as `HEADER_READ_OPTS`: tolerate
-        // CSV-standard quirks (e.g. mixed line endings) in otherwise-valid files.
+        // Same non-erroring relaxations as `HEADER_READ_OPTS` (see there): tolerate
+        // CSV-standard quirks and malformed rows so a bad recording can't poison
+        // the ingest transaction.
         let read_opts = format!(
-            "delim='\\t', header=false, auto_detect=false, all_varchar=true, nullstr='n/a', strict_mode=false, columns={{{}}}",
+            "delim='\\t', header=false, auto_detect=false, all_varchar=true, nullstr='n/a', \
+             strict_mode=false, null_padding=true, ignore_errors=true, columns={{{}}}",
             cols_spec.join(", ")
         );
 
@@ -2073,21 +2050,28 @@ fn tsv_header_from_line(line: &str) -> Option<(String, Vec<String>)> {
 
 /// The `read_csv` options for a header-bearing tabular file.
 ///
-/// `strict_mode=false` relaxes DuckDB's CSV-standard enforcement. Real BIDS
-/// datasets contain files that are perfectly valid per the BIDS spec yet violate
-/// strict CSV — most concretely, inconsistent line endings *within* a file (mixed
-/// CRLF/LF), which the reference validator does not flag (its newline check only
-/// catches CR-only files). Strict mode rejects those at sniff time; relaxing it
-/// ingests them correctly.
+/// Three relaxations make `read_csv` **non-erroring** on real-world-but-imperfect
+/// TSVs, so a bad file can never abort (poison) the ingest transaction:
+/// - `strict_mode=false` accepts CSV-standard violations that are still valid
+///   BIDS — most concretely inconsistent line endings *within* a file (mixed
+///   CRLF/LF), which the reference validator doesn't even flag (its newline check
+///   only catches CR-only files). Strict mode rejects these at sniff time.
+/// - `null_padding=true` pads a short row (too few fields) with NULLs instead of
+///   erroring.
+/// - `ignore_errors=true` skips any row that still can't be parsed rather than
+///   failing the whole read.
 ///
-/// The trade-off is a deliberate division of labour: with strict mode off,
-/// DuckDB no longer errors on a genuinely malformed row (e.g. a wrong field count
-/// is padded/truncated rather than failing the read). bidslake is a catalog, not
-/// a validator, so it leans permissive and **relies on `bids-validator-rs` to be
-/// the authority on tabular malformation** — it ingests what it can rather than
-/// refusing a dataset over a row-level defect.
-const HEADER_READ_OPTS: &str =
-    "delim='\\t', header=true, all_varchar=true, nullstr='n/a', strict_mode=false";
+/// This is a deliberate division of labour. Because these never error, bidslake
+/// ingests every good row and **relies on `bids-validator-rs` — not itself — to
+/// be the authority on tabular malformation**: a genuinely malformed row is
+/// padded/dropped rather than refusing the dataset. It's a catalog, not a
+/// validator. The `tabular_files` row count reflects exactly what landed, so a
+/// file that lost rows is still observable; DuckDB's reject-table can surface the
+/// specifics if a hard accounting is ever needed. Not erroring is also what lets
+/// the batched flush skip its validator dry-run — halving the reads over a
+/// network filesystem.
+const HEADER_READ_OPTS: &str = "delim='\\t', header=true, all_varchar=true, nullstr='n/a', \
+     strict_mode=false, null_padding=true, ignore_errors=true";
 
 /// Determine if a file is an imaging data file that should go in scans table
 /// Whether a file is a primary BIDS **data file** (→ one `scans` row): it sits in a datatype
