@@ -1,5 +1,9 @@
 //! S3-backed [`BidsFileSystem`] for ingesting datasets straight from object
 //! storage (e.g. OpenNeuro's public bucket). Supports anonymous access.
+//!
+//! Object *listing* and *reads* go through the `aws-sdk-s3` client here; tabular
+//! files are read by DuckDB directly over `s3://` via the **httpfs** extension
+//! ([`configure_httpfs`]), since `read_csv` needs to open the path itself.
 
 use crate::fs::BidsFileSystem;
 use anyhow::{Context, Result};
@@ -12,6 +16,10 @@ pub struct S3Client {
     client: aws_sdk_s3::Client,
     bucket: String,
     prefix: String,
+    /// Resolved AWS region, reused to configure DuckDB's httpfs.
+    region: String,
+    /// Anonymous (unsigned) access — public buckets like OpenNeuro's.
+    anonymous: bool,
 }
 
 impl S3Client {
@@ -22,16 +30,10 @@ impl S3Client {
     /// * `prefix` - Object prefix (directory path)
     /// * `no_sign_request` - If true, use anonymous access (no AWS credentials)
     pub async fn new(bucket: &str, prefix: &str, no_sign_request: bool) -> Result<Self> {
-        let region_provider = aws_config::meta::region::RegionProviderChain::first_try(
-            env::var("AWS_REGION")
-                .ok()
-                .map(aws_sdk_s3::config::Region::new),
-        )
-        .or_default_provider()
-        .or_else(aws_sdk_s3::config::Region::new("us-east-1"));
+        let region = env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_string());
 
-        let config_loader =
-            aws_config::defaults(aws_config::BehaviorVersion::latest()).region(region_provider);
+        let config_loader = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(aws_sdk_s3::config::Region::new(region.clone()));
 
         // For public buckets or when explicitly requested, use anonymous access
         let config_loader = if no_sign_request {
@@ -54,8 +56,48 @@ impl S3Client {
             client,
             bucket: bucket.to_string(),
             prefix,
+            region,
+            anonymous: no_sign_request,
         })
     }
+
+    /// The AWS region httpfs should use.
+    pub fn region(&self) -> &str {
+        &self.region
+    }
+
+    /// Whether reads are anonymous (unsigned).
+    pub fn anonymous(&self) -> bool {
+        self.anonymous
+    }
+}
+
+/// Enable DuckDB's httpfs extension on `conn` and point it at S3, so `read_csv`
+/// can open `s3://` paths directly.
+///
+/// **Path-style addressing is required**: a dotted bucket name (e.g.
+/// `openneuro.org`) produces a virtual-hosted URL (`openneuro.org.s3.…`) whose
+/// host doesn't match the TLS wildcard cert, so reads fail with an SSL error.
+/// With `anonymous`, an empty-credential secret makes every request unsigned (for
+/// public buckets); otherwise DuckDB's default credential chain applies.
+///
+/// httpfs is a loadable extension — the first `INSTALL` fetches it from DuckDB's
+/// extension repository, so this needs network access the first time.
+pub fn configure_httpfs(conn: &duckdb::Connection, region: &str, anonymous: bool) -> Result<()> {
+    conn.execute_batch("INSTALL httpfs; LOAD httpfs;")
+        .context("install/load the DuckDB httpfs extension")?;
+    conn.execute_batch(&format!(
+        "SET s3_region='{region}'; SET s3_url_style='path'; SET s3_use_ssl=true;"
+    ))
+    .context("configure httpfs S3 settings")?;
+    if anonymous {
+        conn.execute_batch(&format!(
+            "CREATE OR REPLACE SECRET bidslake_s3 \
+             (TYPE S3, PROVIDER config, KEY_ID '', SECRET '', REGION '{region}');"
+        ))
+        .context("create anonymous S3 secret")?;
+    }
+    Ok(())
 }
 
 impl BidsFileSystem for S3Client {
@@ -127,16 +169,16 @@ impl BidsFileSystem for S3Client {
         })
     }
 
-    fn materialize(&self, _path: &Path) -> future::BoxFuture<'_, Result<PathBuf>> {
-        // Tabular ingest reads TSVs with DuckDB's `read_csv`, which needs a local
-        // path. Downloading every S3 object to a temp file is deferred in favor of
-        // DuckDB's `httpfs` extension (which can read `s3://` directly); until that
-        // lands, S3 datasets get metadata but not TSV contents.
-        Box::pin(async move {
-            anyhow::bail!(
-                "reading tabular data from S3 is not yet supported (pending the httpfs extension)"
-            )
-        })
+    fn materialize(&self, path: &Path) -> future::BoxFuture<'_, Result<PathBuf>> {
+        // DuckDB's httpfs reads `s3://` directly (see `configure_httpfs`), so hand
+        // back the fully-qualified S3 URL for `read_csv` to open — no download.
+        let url = format!(
+            "s3://{}/{}{}",
+            self.bucket,
+            self.prefix,
+            path.to_string_lossy()
+        );
+        Box::pin(async move { Ok(PathBuf::from(url)) })
     }
 
     fn root(&self) -> String {

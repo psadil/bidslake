@@ -113,6 +113,8 @@ async fn run_indexer(
     let db = BidsDb::new(&output)?;
     db.create_tables(&schema)?;
 
+    // Region/anonymous settings for httpfs, when the input is S3.
+    let mut s3_httpfs: Option<(String, bool)> = None;
     let fs: Box<dyn BidsFileSystem> = if input.starts_with("s3://") {
         {
             // Parse bucket and prefix from s3://bucket/prefix
@@ -121,14 +123,25 @@ async fn run_indexer(
             let prefix = if parts.len() > 1 { parts[1] } else { "" };
 
             println!("Using S3 backend: bucket={}, prefix={}", bucket, prefix);
-            Box::new(s3::S3Client::new(bucket, prefix, no_sign_request).await?)
+            let client = s3::S3Client::new(bucket, prefix, no_sign_request).await?;
+            s3_httpfs = Some((client.region().to_string(), client.anonymous()));
+            Box::new(client)
         }
     } else {
         println!("Using local filesystem backend");
         Box::new(LocalFileSystem::new(PathBuf::from(&input)))
     };
 
+    // Teach DuckDB to read `s3://` TSVs directly (both the write connection and the
+    // parser's read-preflight connection run `read_csv` over them).
+    if let Some((region, anonymous)) = &s3_httpfs {
+        s3::configure_httpfs(&db.conn, region, *anonymous)?;
+    }
+
     let mut parser: BidsParser = BidsParser::new(fs, dataset_id, schema);
+    if let Some((region, anonymous)) = &s3_httpfs {
+        parser.configure_s3_httpfs(region, *anonymous)?;
+    }
 
     // Wrap the whole ingest in one transaction. DuckDB otherwise autocommits
     // every statement, fsyncing per row on a file-backed database — the single

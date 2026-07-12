@@ -194,6 +194,13 @@ impl BidsParser {
         }
     }
 
+    /// Enable httpfs on the read-preflight [`Self::validator`] connection so its
+    /// `read_csv` sniff/dry-run can open `s3://` tabular files, mirroring the write
+    /// connection. Call when ingesting from S3.
+    pub fn configure_s3_httpfs(&self, region: &str, anonymous: bool) -> Result<()> {
+        crate::s3::configure_httpfs(&self.validator, region, anonymous)
+    }
+
     /// Whether DuckDB can read this `read_csv(...)` call — tested on the throwaway
     /// [`Self::validator`] connection so a parse error can't poison the main ingest
     /// transaction. A readable-but-empty file returns `true` (it just yields no
@@ -973,12 +980,25 @@ impl BidsParser {
                 // a Rust/DuckDB header mismatch can only trigger a per-file
                 // fallback, never wrong data.
                 let t = self.phase_timer.mark();
-                let local = self.fs.materialize(Path::new(rel_path)).await?;
-                let local = std::fs::canonicalize(&local)
-                    .unwrap_or(local)
-                    .to_string_lossy()
-                    .to_string();
-                let header = read_tsv_header(&local);
+                let materialized = self.fs.materialize(Path::new(rel_path)).await?;
+                let materialized = materialized.to_string_lossy().to_string();
+                let (local, header) = if materialized.starts_with("s3://") {
+                    // httpfs opens the `s3://` URL directly for `read_csv`; the
+                    // header comes from the S3 client (no local file to sniff).
+                    let header = self
+                        .fs
+                        .read_to_string(Path::new(rel_path))
+                        .await
+                        .ok()
+                        .and_then(|c| tsv_header_from_line(c.split('\n').next().unwrap_or("")));
+                    (materialized, header)
+                } else {
+                    let local = std::fs::canonicalize(&materialized)
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or(materialized);
+                    let header = read_tsv_header(&local);
+                    (local, header)
+                };
                 self.phase_timer.add_tabular(t);
 
                 match header {
@@ -1952,7 +1972,15 @@ fn read_tsv_header(path: &str) -> Option<(String, Vec<String>)> {
     let file = std::fs::File::open(path).ok()?;
     let mut line = String::new();
     std::io::BufReader::new(file).read_line(&mut line).ok()?;
-    let group_key = line.strip_suffix('\n').unwrap_or(&line).to_string();
+    tsv_header_from_line(&line)
+}
+
+/// Parse a TSV header from its first line (see [`read_tsv_header`] for the
+/// `(group_key, column_names)` contract). Accepts the line with or without a
+/// trailing newline, so it serves both the local (file) and S3 (downloaded
+/// content) header reads.
+fn tsv_header_from_line(line: &str) -> Option<(String, Vec<String>)> {
+    let group_key = line.strip_suffix('\n').unwrap_or(line).to_string();
     let names_line = group_key.strip_suffix('\r').unwrap_or(&group_key);
     let names_line = names_line.strip_prefix('\u{feff}').unwrap_or(names_line);
     if names_line.is_empty() {
