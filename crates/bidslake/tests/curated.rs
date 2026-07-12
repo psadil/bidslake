@@ -20,7 +20,7 @@ async fn ds001_structure_and_inheritance() -> anyhow::Result<()> {
 
     // dataset_description fields.
     let (name, bids_version): (String, String) = db.conn.query_row(
-        "SELECT name, bids_version FROM dataset_description",
+        "SELECT \"Name\", \"BIDSVersion\" FROM dataset_description",
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
@@ -38,7 +38,7 @@ async fn ds001_structure_and_inheritance() -> anyhow::Result<()> {
     // BIDS inheritance: the dataset-level task-balloonanalogrisktask_bold.json
     // carries RepetitionTime=2.0, which must land on every bold sidecar.
     let (n_bold, distinct_tr): (i64, i64) = db.conn.query_row(
-        "SELECT COUNT(*), COUNT(DISTINCT repetition_time) \
+        "SELECT COUNT(*), COUNT(DISTINCT \"RepetitionTime\") \
          FROM sidecars WHERE file_path LIKE '%bold.nii.gz'",
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
@@ -46,7 +46,7 @@ async fn ds001_structure_and_inheritance() -> anyhow::Result<()> {
     assert!(n_bold > 0, "expected bold sidecars");
     assert_eq!(distinct_tr, 1, "all bold sidecars share the inherited TR");
     let tr: f64 = db.conn.query_row(
-        "SELECT DISTINCT repetition_time FROM sidecars WHERE file_path LIKE '%bold.nii.gz'",
+        "SELECT DISTINCT \"RepetitionTime\" FROM sidecars WHERE file_path LIKE '%bold.nii.gz'",
         [],
         |r| r.get(0),
     )?;
@@ -178,7 +178,7 @@ async fn multi_dataset_coexistence() -> anyhow::Result<()> {
         .conn
         .query_row(
             "SELECT COUNT(*) FROM participants p JOIN dataset_description d USING (dataset_id) \
-         WHERE d.name = 'A test of retest reliability of resting-state connectivity'",
+         WHERE d.\"Name\" = 'A test of retest reliability of resting-state connectivity'",
             [],
             |r| r.get(0),
         )

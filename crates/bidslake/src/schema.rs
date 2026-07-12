@@ -39,7 +39,8 @@
 //! # Tables
 //!
 //! - **`dataset_description`** — one row per dataset. PK `dataset_id`. Mirrors
-//!   `dataset_description.json` (`name`, `bids_version`, `license`, …) plus
+//!   `dataset_description.json`, whose fields keep their verbatim BIDS names
+//!   (`Name`, `BIDSVersion`, `License`, …), plus the bidslake-internal
 //!   `root_uri` (the `file://`/`s3://` origin) and `other_data`.
 //! - **`participants`** — one row per subject. PK `(dataset_id, participant_id)`.
 //!   Columns from the BIDS participants schema (`age`, `sex`, `handedness`, …).
@@ -58,7 +59,8 @@
 //! - **`sidecars`** — the JSON-sidecar metadata for each imaging file after BIDS
 //!   inheritance (dataset-/subject-level sidecars merged, more-specific wins).
 //!   PK `(dataset_id, file_path)` referencing `scans`. Very wide — a column per
-//!   BIDS metadata field (`repetition_time`, `echo_time`, …) plus `other_data`.
+//!   BIDS metadata field, verbatim-named (`RepetitionTime`, `EchoTime`, …), plus
+//!   `other_data`.
 //! - **`events`** — task-event rows from `*_events.tsv` (`onset`, `duration`,
 //!   `trial_type`, …, `other_data`); one row per line, no primary key.
 //! - **Per-modality tabular tables** — one per `rules.tabular_data` rule, named

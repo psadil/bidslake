@@ -1,5 +1,10 @@
 [workspace]
-members = ["crates/bids-core", "crates/bids-schema", "crates/bidslake", "crates/bids-validator-rs", "crates/hed-validator-rs"]
+members = ["crates/bids-core", "crates/bids-schema", "crates/bidslake", "crates/bids-validator-rs", "crates/hed-validator-rs", "crates/bidslake-py"]
+# The pyo3 extension crate builds via maturin, not plain `cargo build`/`test`.
+# Excluding it from default-members keeps the existing `cargo test` workflow
+# (and CI) untouched; it is still a workspace member so path deps and the lock
+# file resolve together.
+default-members = ["crates/bids-core", "crates/bids-schema", "crates/bidslake", "crates/bids-validator-rs", "crates/hed-validator-rs"]
 resolver = "3"
 
 [workspace.package]

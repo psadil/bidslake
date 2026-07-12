@@ -505,15 +505,19 @@ impl Schema {
         sorted_fields.sort_by(|a, b| a.0.cmp(&b.0));
 
         for (field_name, (sql_type, _nullable)) in sorted_fields {
-            let col_name = to_snake_case(&field_name);
-
-            if seen_lowercase_names.contains(&col_name) {
+            // Keep the verbatim BIDS field name as the column (only bidslake-internal
+            // columns are snake_case), so the DB column, the `metadata` dict key, and
+            // the BIDS spec all agree. Dedup case-insensitively because DuckDB folds
+            // identifier case — e.g. `MISCChannelCount`/`MiscChannelCount` are distinct
+            // strings but a duplicate-column error unless one is dropped.
+            let key = field_name.to_lowercase();
+            if seen_lowercase_names.contains(&key) {
                 continue;
             }
 
-            sidecar_columns.push(format!("{} {}", col_name, sql_type));
-            sidecar_fields.push((col_name.clone(), sql_type, field_name));
-            seen_lowercase_names.insert(col_name);
+            sidecar_columns.push(format!("{} {}", quote_ident(&field_name), sql_type));
+            sidecar_fields.push((field_name.clone(), sql_type, field_name));
+            seen_lowercase_names.insert(key);
         }
 
         // Add other_data for custom fields in sidecars
@@ -587,17 +591,19 @@ impl Schema {
             "DatasetLinks",
         ];
 
-        // Extract these fields from the metadata object
+        // Extract these fields from the metadata object. Keep the verbatim BIDS
+        // field name as the column (`Name`, `BIDSVersion`, …); only the
+        // bidslake-internal columns (`dataset_id`, `root_uri`) are snake_case.
+        // Dedup case-insensitively (DuckDB folds identifier case).
         if let Some(metadata) = self.schema["objects"]["metadata"].as_object() {
             for field_name in dataset_description_field_names {
                 if let Some(field_def) = metadata.get(field_name) {
                     let sql_type = json_type_to_sql(field_def);
-                    let col_name = to_snake_case(field_name);
-                    let lowercase_name = col_name.to_lowercase();
+                    let lowercase_name = field_name.to_lowercase();
 
                     if !seen_lowercase_names.contains(&lowercase_name) {
-                        columns.push(format!("{} {}", col_name, sql_type));
-                        fields.push((col_name.clone(), sql_type, field_name.to_string()));
+                        columns.push(format!("{} {}", quote_ident(field_name), sql_type));
+                        fields.push((field_name.to_string(), sql_type, field_name.to_string()));
                         seen_lowercase_names.insert(lowercase_name);
                     }
                 }

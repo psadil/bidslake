@@ -1,0 +1,38 @@
+[package]
+name = "bidslake-py"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lib]
+name = "_bidslake"
+# cdylib: the Python extension module. rlib: so a future `emit-types` bin and
+# unit tests can link the crate as a normal Rust library.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# Enabled only by maturin (see pyproject) when building the Python extension.
+# Kept off for plain `cargo build`/`run`/`test` so the cdylib links normally and
+# the `emit-types` bin builds without maturin's dynamic-lookup linker args.
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+pyo3 = { version = "0.26" }
+# Bundled DuckDB engine — same crate/version as `bidslake`, so cargo builds the
+# vendored engine once and the Arrow types line up across crates.
+duckdb = { version = "1.0", features = ["bundled"] }
+# `ipc` augments the arrow instance duckdb already pulls (version 58); we use it
+# to serialize query results to an Arrow IPC stream for Polars on the Python side.
+arrow = { version = "58", features = ["ipc"] }
+anyhow = "1.0"
+# Used by the `emit-types` bin to reuse the exact schema/DDL model (no Python
+# port of the naming/type logic).
+bidslake = { path = "../bidslake" }
+bids-schema = { path = "../bids-schema" }
+serde_json = { workspace = true }
+
+# `emit-types` renders python/bidslake/schema/_generated.py from the bidslake
+# schema model. Plain Rust bin (no pyo3) — run via `cargo run -p bidslake-py --bin emit-types`.
+[[bin]]
+name = "emit-types"
+path = "src/bin/emit_types.rs"

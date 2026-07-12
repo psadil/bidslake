@@ -67,17 +67,17 @@ async fn test_bids_inheritance() -> Result<()> {
 
     // Verify sub-01 (Inheritance)
     // Should have TR=2.0, Manufacturer=Siemens
-    // Note: RepetitionTime is a standard BIDS field, so it's extracted to 'repetition_time' column
-    // and removed from 'other_data'.
+    // Note: RepetitionTime is a standard BIDS field, so it's extracted to its own
+    // (verbatim BIDS-named) "RepetitionTime" column and removed from 'other_data'.
     let tr1: f64 = db.conn.query_row(
-        "SELECT repetition_time FROM sidecars WHERE file_path LIKE '%sub-01%'",
+        "SELECT \"RepetitionTime\" FROM sidecars WHERE file_path LIKE '%sub-01%'",
         [],
         |r| r.get(0),
     )?;
     assert_eq!(tr1, 2.0, "sub-01 should inherit TR=2.0");
 
     let manuf1: String = db.conn.query_row(
-        "SELECT manufacturer FROM sidecars WHERE file_path LIKE '%sub-01%'",
+        "SELECT \"Manufacturer\" FROM sidecars WHERE file_path LIKE '%sub-01%'",
         [],
         |r| r.get(0),
     )?;
@@ -89,14 +89,14 @@ async fn test_bids_inheritance() -> Result<()> {
     // Verify sub-02 (Override)
     // Should have TR=1.5 (override), Manufacturer=Siemens (inherited)
     let tr2: f64 = db.conn.query_row(
-        "SELECT repetition_time FROM sidecars WHERE file_path LIKE '%sub-02%'",
+        "SELECT \"RepetitionTime\" FROM sidecars WHERE file_path LIKE '%sub-02%'",
         [],
         |r| r.get(0),
     )?;
     assert_eq!(tr2, 1.5, "sub-02 should override TR=1.5");
 
     let manuf2: String = db.conn.query_row(
-        "SELECT manufacturer FROM sidecars WHERE file_path LIKE '%sub-02%'",
+        "SELECT \"Manufacturer\" FROM sidecars WHERE file_path LIKE '%sub-02%'",
         [],
         |r| r.get(0),
     )?;

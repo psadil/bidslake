@@ -1,0 +1,29 @@
+# Pre-commit hooks for the bidslake workspace, run by prek (https://prek.j178.dev).
+#
+#   prek install            # install the git hook
+#   prek run --all-files    # run every hook against the whole tree
+#
+# Only fast checks run here — ruff, `cargo fmt --check`, and ty. Anything that
+# compiles or runs a test suite (cargo clippy, cargo test, pytest) belongs in CI,
+# so commits and pushes stay quick.
+#
+# ruff comes from the maintained upstream mirror. The cargo and ty hooks are
+# `local` (system cargo / the crate's uv venv): the published Rust mirror
+# (doublify/pre-commit-rust) is unmaintained, and astral-sh/ty-pre-commit checks
+# a repo-root project and can't target our crates/bidslake-py subdirectory.
+
+[[repos]]
+repo = "https://github.com/astral-sh/ruff-pre-commit"
+rev = "v0.15.21"
+hooks = [
+    { id = "ruff-check", args = ["--fix"], files = '^crates/bidslake-py/.*\.py$' },
+    { id = "ruff-format", files = '^crates/bidslake-py/.*\.py$' },
+]
+
+[[repos]]
+repo = "local"
+hooks = [
+    { id = "cargo-fmt", name = "cargo fmt", language = "system", entry = "cargo fmt --all -- --check", files = '\.rs$', pass_filenames = false },
+    { id = "cargo-clippy", name = "cargo clippy", language = "system", entry = "cargo clippy --all-targets -- -D warnings", pass_filenames = false },
+    { id = "ty", name = "ty (bidslake-py)", language = "system", entry = "bash -c 'cd crates/bidslake-py && ./.venv/bin/ty check python/bidslake'", files = '^crates/bidslake-py/python/.*\.py$', pass_filenames = false },
+]

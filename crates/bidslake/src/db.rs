@@ -47,6 +47,36 @@ impl BidsDb {
         self.conn
             .execute(schema::CREATE_FILE_ASSOCIATIONS_TABLE, [])?;
         self.conn.execute(schema::CREATE_TABULAR_FILES_TABLE, [])?;
+        self.stamp_meta(schema)?;
+        Ok(())
+    }
+
+    /// Record which BIDS schema version (and bidslake build) produced this
+    /// catalog, in a one-row `bidslake_meta` table. Downstream readers (notably
+    /// the Python query package) compare this to what they were generated
+    /// against, so a version mismatch is *detectable* rather than guessed —
+    /// they then fall back to runtime column introspection. Idempotent across
+    /// re-indexing: the row is inserted only if the table is empty.
+    fn stamp_meta(&self, schema: &Schema) -> Result<()> {
+        let raw = schema.raw();
+        let schema_version = raw
+            .get("schema_version")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let bids_version = raw
+            .get("bids_version")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS bidslake_meta (\
+             schema_version TEXT, bids_version TEXT, bidslake_version TEXT)",
+            [],
+        )?;
+        self.conn.execute(
+            "INSERT INTO bidslake_meta (schema_version, bids_version, bidslake_version) \
+             SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM bidslake_meta)",
+            params![schema_version, bids_version, env!("CARGO_PKG_VERSION")],
+        )?;
         Ok(())
     }
 

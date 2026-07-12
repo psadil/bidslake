@@ -1,0 +1,39 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "bidslake"
+version = "0.1.0"
+description = "Typed querying of bidslake (BIDS-in-DuckDB) datasets"
+readme = "README.md"
+requires-python = ">=3.14"
+license = { text = "MIT" }
+dependencies = [
+    "polars>=1.9",
+    "universal_pathlib",
+    "pydantic>=2",
+]
+
+[project.optional-dependencies]
+s3 = ["s3fs"]
+
+[dependency-groups]
+dev = ["pytest>=8", "ty", "ruff", "prek"]
+
+[tool.maturin]
+module-name = "bidslake._bidslake"
+python-source = "python"
+bindings = "pyo3"
+# Enable the extension-module feature only under maturin; plain cargo builds
+# keep it off so the `emit-types` bin (and cargo test) link normally.
+features = ["extension-module"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+# `_generated.py` is machine-emitted (its own formatting); don't lint/format it.
+extend-exclude = ["python/bidslake/schema/_generated.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4", "RUF"]
