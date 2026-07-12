@@ -1097,9 +1097,9 @@ impl BidsParser {
     /// Ingest every deferred per-row tabular file (Lever 1b), grouped by
     /// `(table, header signature)` so each group is one `read_csv([f1,…,fN])`
     /// INSERT instead of N. Grouping by exact header keeps `other_data` precise
-    /// (no `union_by_name` NULL fillers), and a global row number minus each
-    /// file's first (under `parallel=false`) reproduces per-file `row_idx` in TSV
-    /// line order — both validated before this landed.
+    /// (no `union_by_name` NULL fillers); `row_idx` reproduces TSV line order for
+    /// positional tables and is an arbitrary unique key for order-insensitive ones
+    /// (see [`build_tabular_batch_select`]).
     ///
     /// Safety: the whole batch is dry-run on the throwaway validator connection
     /// first. A file that sniffed OK could still fail a full read, and inside the
@@ -1157,7 +1157,9 @@ impl BidsParser {
             // the `tabular_files` row counts for free, all off the main transaction
             // (which DuckDB can't roll back). Only once it passes do we write.
             if let Some(counts) = self.batch_read_counts(&files) {
-                let select = build_tabular_batch_select(spec, &dataset_id, &files, columns);
+                let preserve_order = !is_order_insensitive(&spec.table);
+                let select =
+                    build_tabular_batch_select(spec, &dataset_id, &files, columns, preserve_order);
                 let sql = format!("INSERT INTO {} BY NAME {select}", spec.table);
                 if let Err(e) = db.conn.execute(&sql, []) {
                     // Unreachable for validated data (the identical read just passed
@@ -1826,9 +1828,13 @@ fn build_tabular_insert_sql(
 /// - `file_path` comes from `read_csv`'s emitted `filename` column, joined back to
 ///   the dataset-relative path through a `VALUES` map (the abs path is unique per
 ///   file, so the join is 1:1 and never changes row multiplicity);
-/// - `row_idx` is a **global** `row_number()` (assigned in physical read order —
-///   `parallel=false` makes that TSV line order) minus each file's first, so it is
-///   the same 0-based per-file index the single-file path produces;
+/// - `row_idx`: when `preserve_order`, a **global** `row_number()` (assigned in
+///   physical read order — `parallel=false` makes that TSV line order) minus each
+///   file's first, so it is the same 0-based per-file line index the single-file
+///   path produces. When not (order-insensitive tables — see
+///   [`is_order_insensitive`]), a per-file `row_number()` under the default
+///   parallel read: still a unique 0-based key, but in arbitrary order, which lets
+///   DuckDB read the batch's files concurrently (a network-FS win).
 /// - data columns `TRY_CAST` to their declared type; every remaining header column
 ///   folds into `other_data`. Because the group shares one header, `other_data`
 ///   carries exactly each file's real columns — no `union_by_name` NULL fillers.
@@ -1840,14 +1846,19 @@ fn build_tabular_batch_select(
     dataset_id: &str,
     files: &[(&str, &str)],
     columns: &[String],
+    preserve_order: bool,
 ) -> String {
     let present: HashSet<&str> = columns.iter().map(|s| s.as_str()).collect();
 
+    let row_idx = if preserve_order {
+        "(raw.__grn - MIN(raw.__grn) OVER (PARTITION BY raw.filename))::BIGINT AS row_idx"
+    } else {
+        "(row_number() OVER (PARTITION BY raw.filename) - 1)::BIGINT AS row_idx"
+    };
     let mut selects: Vec<String> = vec![
         format!("{} AS dataset_id", sql_lit(dataset_id)),
         "m.rel AS file_path".to_string(),
-        "(raw.__grn - MIN(raw.__grn) OVER (PARTITION BY raw.filename))::BIGINT AS row_idx"
-            .to_string(),
+        row_idx.to_string(),
     ];
 
     // Schema-declared data columns present in the file, TRY_CAST to their type.
@@ -1891,13 +1902,33 @@ fn build_tabular_batch_select(
         .collect::<Vec<_>>()
         .join(", ");
 
+    // Order-preserving read needs a sequential scan (`parallel=false`) plus the
+    // global row number; the order-insensitive read drops both so DuckDB can read
+    // files concurrently.
+    let from = if preserve_order {
+        format!(
+            "(SELECT *, row_number() OVER () AS __grn \
+             FROM read_csv([{locals}], {HEADER_READ_OPTS}, filename=true, parallel=false)) AS raw"
+        )
+    } else {
+        format!("read_csv([{locals}], {HEADER_READ_OPTS}, filename=true) AS raw")
+    };
+
     format!(
-        "SELECT {selects} \
-         FROM (SELECT *, row_number() OVER () AS __grn \
-           FROM read_csv([{locals}], {HEADER_READ_OPTS}, filename=true, parallel=false)) AS raw \
+        "SELECT {selects} FROM {from} \
          JOIN (VALUES {map_values}) AS m(abs, rel) ON raw.filename = m.abs",
         selects = selects.join(", "),
     )
+}
+
+/// Whether a per-row tabular table's `row_idx` need not track TSV line order, so
+/// its batch may be read in parallel (a network-FS win). True only where rows are
+/// an unordered set with a real ordering column — `events` are sorted by `onset`,
+/// not by position. Positional tables (`*_channels`/`*_electrodes`/`*_optodes`,
+/// whose row order maps to a recording's columns/sensors) must preserve line
+/// order, so they are deliberately excluded.
+fn is_order_insensitive(table: &str) -> bool {
+    table == "events"
 }
 
 /// Read a TSV file's header in Rust — the first line — instead of a per-file

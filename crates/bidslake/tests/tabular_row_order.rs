@@ -8,9 +8,11 @@
 //!
 //! 1. **No rows dropped.** Each file's DB row count equals its raw data-line count
 //!    (a `filename`↔path join that failed to match would silently drop rows).
-//! 2. **`row_idx` is TSV line order.** The DB's `ORDER BY row_idx` onset sequence
-//!    equals the file's physical line order, or tables whose consumers reconstruct
-//!    sequence via `ORDER BY row_idx` (channels, electrodes, motion) would scramble.
+//! 2. **`row_idx` order policy.** `events` are read in parallel, so `row_idx` is a
+//!    unique-but-arbitrary key (onset values must still match as a multiset).
+//!    Positional tables (`*_channels`/…) are read `parallel=false`, so their
+//!    `row_idx` must reproduce TSV line order — consumers reconstruct channel order
+//!    via `ORDER BY row_idx`.
 //! 3. **`other_data` is exact.** Grouping by header (not `union_by_name`) folds in
 //!    exactly each file's non-schema columns — no NULL fillers from siblings.
 //!
@@ -50,7 +52,7 @@ fn rel_of(root: &Path, file: &Path) -> String {
 }
 
 /// For every `_events.tsv` in `root`, assert the batched ingest reproduced the raw
-/// file exactly: same row count, and `onset` in the same physical order.
+/// file: same row count, same `onset` multiset, and `row_idx` a unique 0..n key.
 fn check_events(db: &BidsDb, root: &Path) -> anyhow::Result<usize> {
     let files: Vec<std::path::PathBuf> = walk_tabular(root)
         .into_iter()
@@ -71,7 +73,7 @@ fn check_events(db: &BidsDb, root: &Path) -> anyhow::Result<usize> {
             })
             .collect();
 
-        let db_onset: Vec<Option<f64>> = db
+        let mut db_onset: Vec<Option<f64>> = db
             .conn
             .prepare("SELECT onset FROM events WHERE file_path = ? ORDER BY row_idx")?
             .query_map([&rel], |r| r.get::<_, Option<f64>>(0))?
@@ -82,20 +84,30 @@ fn check_events(db: &BidsDb, root: &Path) -> anyhow::Result<usize> {
             rows.len(),
             "row count must match raw file for {rel} (no rows dropped)"
         );
+        // events read in parallel, so row_idx is arbitrary — compare the onset
+        // *multiset*, not the sequence.
+        let mut raw_sorted = raw.clone();
+        let cmp = |a: &Option<f64>, b: &Option<f64>| {
+            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+        };
+        db_onset.sort_by(cmp);
+        raw_sorted.sort_by(cmp);
         assert_eq!(
-            db_onset, raw,
-            "row_idx order must match TSV line order for {rel}"
+            db_onset, raw_sorted,
+            "onset values must match raw for {rel}"
         );
 
-        let idxs: Vec<i64> = db
+        // row_idx is a unique 0..n key (regardless of order).
+        let mut idxs: Vec<i64> = db
             .conn
-            .prepare("SELECT row_idx FROM events WHERE file_path = ? ORDER BY row_idx")?
+            .prepare("SELECT row_idx FROM events WHERE file_path = ?")?
             .query_map([&rel], |r| r.get(0))?
             .collect::<Result<_, _>>()?;
+        idxs.sort_unstable();
         assert_eq!(
             idxs,
             (0..rows.len() as i64).collect::<Vec<_>>(),
-            "row_idx must be contiguous 0..n for {rel}"
+            "row_idx must be a unique 0..n key for {rel}"
         );
     }
     Ok(files.len())
@@ -124,6 +136,46 @@ async fn ds001_batched_events_and_other_data() -> anyhow::Result<()> {
     )?;
     assert!(has_extra, "non-schema column must be in other_data");
     assert!(!has_onset, "schema column must not be in other_data");
+    Ok(())
+}
+
+/// Positional tables (`*_channels`/`*_electrodes`/`*_optodes`) must keep TSV line
+/// order in `row_idx` — the channel/sensor order maps to a recording's columns, so
+/// these are read with `parallel=false` (unlike events). `eeg_matchingpennies` has
+/// a `_channels.tsv` per subject; each `name` column, read back `ORDER BY row_idx`,
+/// must equal the file's physical line order.
+#[tokio::test]
+async fn channels_preserve_line_order() -> anyhow::Result<()> {
+    let root = bids_example("eeg_matchingpennies");
+    let db = ingest(&root).await?;
+
+    let files: Vec<std::path::PathBuf> = walk_tabular(&root)
+        .into_iter()
+        .filter(|p| p.ends_with("_channels.tsv"))
+        .map(|p| root.join(p))
+        .collect();
+    assert!(
+        !files.is_empty(),
+        "expected the eeg_matchingpennies submodule"
+    );
+
+    for file in &files {
+        let rel = rel_of(&root, file);
+        let (header, rows) = read_tsv(file);
+        let name_col = header.iter().position(|c| c == "name").unwrap();
+        let raw: Vec<String> = rows.iter().map(|r| r[name_col].clone()).collect();
+
+        let db_names: Vec<String> = db
+            .conn
+            .prepare("SELECT name FROM eeg_channels WHERE file_path = ? ORDER BY row_idx")?
+            .query_map([&rel], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+
+        assert_eq!(
+            db_names, raw,
+            "channel order (row_idx) must match TSV line order for {rel}"
+        );
+    }
     Ok(())
 }
 
