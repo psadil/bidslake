@@ -464,11 +464,13 @@ impl BidsParser {
             "Applying BIDS inheritance for {} imaging files...",
             self.imaging_files.len()
         );
-        if let Some(tree) = self.fs.file_tree() {
-            self.apply_inheritance_tree(db, &tree).await;
-        } else {
-            self.apply_inheritance_collected(db);
-        }
+        // Inheritance merges the JSON sidecars already collected in memory during
+        // the walk (`process_json_file`) — it never re-reads them from disk. This
+        // matches the tree-based reference resolver exactly (verified row-for-row
+        // across the whole `bids-examples` corpus) and is the single path for every
+        // backend, so a shared sidecar is read once regardless of how many imaging
+        // files inherit it.
+        self.apply_inheritance_collected(db);
 
         let d_inherit = t_inherit.map(|t| t.elapsed());
         let t_flush = self.phase_timer.mark();
@@ -513,31 +515,6 @@ impl BidsParser {
         );
     }
 
-    /// BIDS inheritance for the `sidecars` table using the local [`bids_core`]
-    /// `FileTree` and `read_sidecars` (nearest-wins, matching the BIDS spec /
-    /// reference validator). Local-disk backends only — it needs the tree and reads
-    /// each applicable sidecar from disk.
-    async fn apply_inheritance_tree(&self, db: &BidsDb, tree: &bids_core::filetree::FileTree) {
-        let mut rows: Vec<Value> = Vec::new();
-        for img_file in &self.imaging_files {
-            // Tree paths carry a leading `/`; our `file_path` does not.
-            let tree_path = format!("/{}", img_file.file_path);
-            let Some(bids_file) = tree.find_file(&tree_path) else {
-                continue;
-            };
-            let (merged, _overrides) = bids_core::inheritance::read_sidecars(bids_file, tree).await;
-            if let Value::Object(map) = merged
-                && let Some(row) =
-                    self.build_sidecar_row(&img_file.dataset_id, &img_file.file_path, map)
-            {
-                rows.push(row);
-            }
-        }
-        if let Err(e) = db.append_rows(&self.schema, "sidecars", &rows) {
-            eprintln!("Failed to bulk-insert sidecars: {e}");
-        }
-    }
-
     /// Build one merged-sidecar row: the merged metadata as `other_data`, plus each
     /// field also flattened to its own column (schema-known fields get typed
     /// columns). `None` when `merged` is empty. Collected and bulk-inserted via the
@@ -569,10 +546,12 @@ impl BidsParser {
         Some(Value::Object(sidecar_entry))
     }
 
-    /// In-memory BIDS inheritance for the `sidecars` table over the JSON sidecars
-    /// collected during the walk, keyed by `(dataset_id, suffix)` with a
-    /// directory-prefix + entity-subset match. Used by non-local backends (S3),
-    /// which have no `FileTree`.
+    /// BIDS inheritance for the `sidecars` table, merging the JSON sidecars already
+    /// collected in memory during the walk — no disk re-read. Sidecars are keyed by
+    /// `(dataset_id, suffix)` with a directory-prefix + entity-subset match, and
+    /// merged shallowest-first so a nearer (deeper) sidecar overrides. This is the
+    /// sole inheritance path (local and S3); it reproduces the tree-based reference
+    /// resolver row-for-row across the corpus.
     fn apply_inheritance_collected(&self, db: &BidsDb) {
         // A sidecar can only apply to an imaging file of the same dataset and
         // suffix, so index sidecars by (dataset_id, suffix) and precompute each
@@ -630,10 +609,17 @@ impl BidsParser {
                 }
             }
 
-            // Sort by specificity (number of entities) - least specific first for merging
-            // BIDS Principle of Inheritance: values from more specific files override less specific ones.
-            // So we want to merge from top (least specific) to bottom (most specific).
-            applicable.sort_by_key(|&i| self.sidecars[i].entities.len());
+            // BIDS inheritance: the *nearer* sidecar wins, where nearness is
+            // directory depth (a sidecar deeper in the tree overrides a shallower
+            // one), matching the tree-based reference. Merge shallowest-first so
+            // deeper values overwrite; entity count breaks the (invalid-BIDS) tie of
+            // two sidecars at the same depth.
+            applicable.sort_by_key(|&i| {
+                (
+                    sidecar_dirs[i].components().count(),
+                    self.sidecars[i].entities.len(),
+                )
+            });
 
             // Merge metadata
             for &i in &applicable {
@@ -1352,7 +1338,7 @@ impl BidsParser {
         let colnames = if rec.suffix == "motion" {
             self.motion_columns(db, rec)?
         } else {
-            self.sidecar_columns(rec).await
+            self.sidecar_columns(rec)
         };
         if colnames.is_empty() {
             return Ok((None, 0)); // headerless file with no column names → skip
@@ -1435,25 +1421,11 @@ impl BidsParser {
     }
 
     /// Column names for a physio/stim/physioevents recording, from the merged sidecar's
-    /// `Columns` array (BIDS requires it for these files). On local disk the merge reuses the
-    /// shared `bids_core::inheritance::read_sidecars`; other backends (S3, no tree) fall back to
-    /// the in-memory `merged_sidecar_map` over sidecars collected during the walk.
-    async fn sidecar_columns(&self, rec: &PendingRecording) -> Vec<String> {
-        let merged = match self.fs.file_tree() {
-            Some(tree) => match tree.find_file(&format!("/{}", rec.rel_path)) {
-                Some(bids_file) => match bids_core::inheritance::read_sidecars(bids_file, &tree)
-                    .await
-                    .0
-                {
-                    Value::Object(m) => m,
-                    _ => serde_json::Map::new(),
-                },
-                None => serde_json::Map::new(),
-            },
-            None => {
-                self.merged_sidecar_map(&rec.dataset_id, &rec.rel_path, &rec.suffix, &rec.entities)
-            }
-        };
+    /// `Columns` array (BIDS requires it for these files). Merged from the sidecars
+    /// collected in memory during the walk — no disk re-read.
+    fn sidecar_columns(&self, rec: &PendingRecording) -> Vec<String> {
+        let merged =
+            self.merged_sidecar_map(&rec.dataset_id, &rec.rel_path, &rec.suffix, &rec.entities);
         merged
             .get("Columns")
             .and_then(|v| v.as_array())
@@ -1511,7 +1483,16 @@ impl BidsParser {
                     && s.entities.iter().all(|(k, v)| entities.get(k) == Some(v))
             })
             .collect();
-        applicable.sort_by_key(|s| s.entities.len());
+        // Depth-first (shallowest merged first, deeper overrides), matching the
+        // tree-based reference; entity count breaks same-depth ties.
+        applicable.sort_by_key(|s| {
+            (
+                Path::new(&s.file_path)
+                    .parent()
+                    .map_or(0, |p| p.components().count()),
+                s.entities.len(),
+            )
+        });
         let mut merged = serde_json::Map::new();
         for s in applicable {
             if let Value::Object(m) = &s.content {
