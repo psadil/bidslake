@@ -169,6 +169,37 @@ impl BidsFileSystem for S3Client {
         })
     }
 
+    fn read_head(&self, path: &Path, max_bytes: usize) -> future::BoxFuture<'_, Result<String>> {
+        let bucket = self.bucket.clone();
+        let key = format!("{}{}", self.prefix, path.to_string_lossy());
+        let client = self.client.clone();
+
+        Box::pin(async move {
+            // Ranged GET: fetch only the first `max_bytes`, so sniffing a TSV
+            // header is a tiny request rather than a full object download.
+            let range = format!("bytes=0-{}", max_bytes.saturating_sub(1));
+            let response = client
+                .get_object()
+                .bucket(&bucket)
+                .key(&key)
+                .range(range)
+                .send()
+                .await
+                .context(format!("Failed to range-download {}", key))?;
+
+            let data = response
+                .body
+                .collect()
+                .await
+                .context("Failed to read response body")?
+                .into_bytes();
+
+            // The range can split a multi-byte char at the tail; lossy is fine
+            // since only complete leading lines (the header) are used.
+            Ok(String::from_utf8_lossy(&data).into_owned())
+        })
+    }
+
     fn materialize(&self, path: &Path) -> future::BoxFuture<'_, Result<PathBuf>> {
         // DuckDB's httpfs reads `s3://` directly (see `configure_httpfs`), so hand
         // back the fully-qualified S3 URL for `read_csv` to open — no download.

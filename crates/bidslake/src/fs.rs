@@ -21,6 +21,16 @@ pub trait BidsFileSystem: Send + Sync {
     /// Read file content as string
     fn read_to_string(&self, path: &Path) -> BoxFuture<'_, Result<String>>;
 
+    /// Read up to `max_bytes` from the start of a file — enough for a header line
+    /// without downloading the whole thing. The default reads the entire file
+    /// (fine for local disk); remote backends override it with a ranged fetch so
+    /// sniffing a header over the network is a small request, not a full download.
+    /// The returned prefix may end mid-line and, for byte-ranged reads, mid-UTF-8;
+    /// callers must only rely on complete leading lines.
+    fn read_head(&self, path: &Path, _max_bytes: usize) -> BoxFuture<'_, Result<String>> {
+        self.read_to_string(path)
+    }
+
     /// Resolve a dataset-relative path to a **local filesystem path** that DuckDB's
     /// `read_csv` can open directly. For [`LocalFileSystem`] this is a no-op join
     /// onto the root; a remote backend must download the object to a temp file.

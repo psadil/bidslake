@@ -984,10 +984,10 @@ impl BidsParser {
                 let materialized = materialized.to_string_lossy().to_string();
                 let (local, header) = if materialized.starts_with("s3://") {
                     // httpfs opens the `s3://` URL directly for `read_csv`; the
-                    // header comes from the S3 client (no local file to sniff).
+                    // header comes from a small ranged read (not a full download).
                     let header = self
                         .fs
-                        .read_to_string(Path::new(rel_path))
+                        .read_head(Path::new(rel_path), 64 * 1024)
                         .await
                         .ok()
                         .and_then(|c| tsv_header_from_line(c.split('\n').next().unwrap_or("")));
@@ -1224,10 +1224,11 @@ impl BidsParser {
     /// Read the batch on the throwaway validator connection and return each file's
     /// row count, keyed by dataset-relative path. `Some` means every file read
     /// cleanly (safe to run the identical read on the ingest connection); `None`
-    /// means one failed, and the caller falls back to the per-file path. The
-    /// `read_csv` options match [`build_tabular_batch_select`]'s exactly, so this
-    /// is a true dry run; counting per `filename` forces the full parse that
-    /// surfaces a malformed file here rather than poisoning the ingest transaction.
+    /// means one failed, and the caller falls back to the per-file path. Counting
+    /// per `filename` forces the full parse that surfaces a malformed file here
+    /// rather than poisoning the ingest transaction. Reads `parallel=true`
+    /// regardless of the table (a row count is order-independent), so over a
+    /// network filesystem the validator downloads the batch's files concurrently.
     fn batch_read_counts(&self, files: &[(&str, &str)]) -> Option<HashMap<String, i64>> {
         let locals = files
             .iter()
@@ -1236,7 +1237,7 @@ impl BidsParser {
             .join(", ");
         let sql = format!(
             "SELECT filename, count(*) FROM \
-             read_csv([{locals}], {HEADER_READ_OPTS}, filename=true, parallel=false) \
+             read_csv([{locals}], {HEADER_READ_OPTS}, filename=true) \
              GROUP BY filename"
         );
         let mut stmt = self.validator.prepare(&sql).ok()?;
