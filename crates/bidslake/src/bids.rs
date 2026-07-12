@@ -110,6 +110,12 @@ pub struct BidsParser {
     seen_sessions: HashSet<(String, String, String)>, // (dataset_id, participant_id, session_id)
     /// Opt-in wall-time accountant (`BIDSLAKE_TIMING`); zero-overhead otherwise.
     phase_timer: PhaseTimer,
+    /// Prefetched JSON file contents (rel path → content), filled concurrently
+    /// before the serial passes so each read isn't a separate round-trip on a
+    /// network filesystem.
+    json_content: HashMap<String, String>,
+    /// Prefetched TSV headers (rel path → parsed header), same rationale.
+    tabular_header: HashMap<String, Option<(String, Vec<String>)>>,
 }
 
 #[derive(Clone)]
@@ -191,6 +197,8 @@ impl BidsParser {
             seen_participants: HashSet::new(),
             seen_sessions: HashSet::new(),
             phase_timer: PhaseTimer::new(),
+            json_content: HashMap::new(),
+            tabular_header: HashMap::new(),
         }
     }
 
@@ -291,6 +299,14 @@ impl BidsParser {
         let d_walk = t_walk.map(|t| t.elapsed());
         let t_process = self.phase_timer.mark();
 
+        // Concurrently prefetch the file contents the serial passes will read —
+        // JSON sidecars (full) and TSV headers (first 64 KiB). On a network
+        // filesystem these are per-file round-trips; reading them with bounded
+        // concurrency overlaps the latency instead of paying it one file at a time.
+        // Warm local disk sees a negligible change.
+        self.prefetch_contents(&dataset_description, &other_files)
+            .await;
+
         // Datasets can carry nested dataset_description.json files (e.g. under
         // derivatives/). Sort shallowest-first so the dataset root wins when we
         // resolve the dataset_id and insert the description.
@@ -299,7 +315,7 @@ impl BidsParser {
         // Pass 0: Process dataset_description.json first to resolve dataset_id
         for path in &dataset_description {
             if self.dataset_id.is_none() {
-                let content = self.fs.read_to_string(path).await?;
+                let content = self.read_cached(path, &path.to_string_lossy()).await?;
                 match serde_json::from_str::<Value>(&content) {
                     Ok(dataset_desc) => {
                         if let Some(name) = dataset_desc.get("Name").and_then(|v| v.as_str()) {
@@ -648,6 +664,76 @@ impl BidsParser {
         }
     }
 
+    /// Read, with bounded concurrency, the JSON contents and TSV headers the
+    /// serial passes will consume, into [`Self::json_content`] /
+    /// [`Self::tabular_header`]. Failed reads are simply left uncached — the
+    /// consuming pass falls back to a direct read (and handles the error there).
+    async fn prefetch_contents(
+        &mut self,
+        dataset_description: &[std::path::PathBuf],
+        other_files: &[std::path::PathBuf],
+    ) {
+        use futures::stream::StreamExt;
+        /// Bounded so a huge dataset can't open thousands of sockets at once.
+        const CONCURRENCY: usize = 16;
+
+        let rel = |p: &std::path::PathBuf| p.to_string_lossy().to_string();
+        let json_paths: Vec<String> = dataset_description
+            .iter()
+            .chain(other_files.iter())
+            .filter(|p| p.extension().is_some_and(|e| e == "json"))
+            .map(rel)
+            .collect();
+        // Header candidates: uncompressed `.tsv` (per-row files sniff a header;
+        // `.tsv.gz` is never read here).
+        let tsv_paths: Vec<String> = other_files
+            .iter()
+            .filter(|p| p.to_string_lossy().ends_with(".tsv"))
+            .map(rel)
+            .collect();
+
+        let (json_res, hdr_res) = {
+            let fs = &self.fs;
+            let json_fut = futures::stream::iter(json_paths)
+                .map(|p| async move {
+                    let c = fs.read_to_string(Path::new(&p)).await.ok();
+                    (p, c)
+                })
+                .buffer_unordered(CONCURRENCY)
+                .collect::<Vec<_>>();
+            let hdr_fut = futures::stream::iter(tsv_paths)
+                .map(|p| async move {
+                    let h = fs
+                        .read_head(Path::new(&p), 64 * 1024)
+                        .await
+                        .ok()
+                        .and_then(|c| tsv_header_from_line(c.split('\n').next().unwrap_or("")));
+                    (p, h)
+                })
+                .buffer_unordered(CONCURRENCY)
+                .collect::<Vec<_>>();
+            futures::join!(json_fut, hdr_fut)
+        };
+
+        for (p, c) in json_res {
+            if let Some(c) = c {
+                self.json_content.insert(p, c);
+            }
+        }
+        for (p, h) in hdr_res {
+            self.tabular_header.insert(p, h);
+        }
+    }
+
+    /// The file's content from the concurrent prefetch, or a direct read if it
+    /// wasn't prefetched. `rel` is the dataset-relative key the prefetch used.
+    async fn read_cached(&self, path: &Path, rel: &str) -> Result<String> {
+        match self.json_content.get(rel) {
+            Some(c) => Ok(c.clone()),
+            None => Ok(self.fs.read_to_string(path).await?),
+        }
+    }
+
     async fn process_file(&mut self, path: &Path, db: &BidsDb, dataset_id: &str) -> Result<()> {
         let file_name = path.file_name().unwrap().to_str().unwrap();
 
@@ -747,7 +833,7 @@ impl BidsParser {
         rel_path: &str,
         entities: &HashMap<String, String>,
     ) -> Result<()> {
-        let content = self.fs.read_to_string(path).await?;
+        let content = self.read_cached(path, rel_path).await?;
         let json_value: Value = serde_json::from_str(&content).unwrap_or(Value::Null);
 
         // Extract the BIDS suffix from the filename via the shared bids-core parser.
@@ -775,7 +861,7 @@ impl BidsParser {
         db: &BidsDb,
         dataset_id: &str,
     ) -> Result<()> {
-        let content = self.fs.read_to_string(path).await?;
+        let content = self.read_cached(path, &path.to_string_lossy()).await?;
         let mut json_value: Value = match serde_json::from_str(&content) {
             Ok(v) => v,
             Err(e) => {
@@ -982,22 +1068,25 @@ impl BidsParser {
                 let t = self.phase_timer.mark();
                 let materialized = self.fs.materialize(Path::new(rel_path)).await?;
                 let materialized = materialized.to_string_lossy().to_string();
-                let (local, header) = if materialized.starts_with("s3://") {
-                    // httpfs opens the `s3://` URL directly for `read_csv`; the
-                    // header comes from a small ranged read (not a full download).
-                    let header = self
+                // Header from the concurrent prefetch; fall back to a direct read
+                // if it wasn't prefetched (shouldn't happen for a per-row `.tsv`).
+                let header = match self.tabular_header.get(rel_path) {
+                    Some(h) => h.clone(),
+                    None => self
                         .fs
                         .read_head(Path::new(rel_path), 64 * 1024)
                         .await
                         .ok()
-                        .and_then(|c| tsv_header_from_line(c.split('\n').next().unwrap_or("")));
-                    (materialized, header)
+                        .and_then(|c| tsv_header_from_line(c.split('\n').next().unwrap_or(""))),
+                };
+                // `read_csv` opens the `s3://` URL directly (httpfs) or the
+                // canonical local path.
+                let local = if materialized.starts_with("s3://") {
+                    materialized
                 } else {
-                    let local = std::fs::canonicalize(&materialized)
+                    std::fs::canonicalize(&materialized)
                         .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or(materialized);
-                    let header = read_tsv_header(&local);
-                    (local, header)
+                        .unwrap_or(materialized)
                 };
                 self.phase_timer.add_tabular(t);
 
@@ -1952,9 +2041,10 @@ fn is_order_insensitive(table: &str) -> bool {
     table == "events"
 }
 
-/// Read a TSV file's header in Rust — the first line — instead of a per-file
-/// DuckDB `read_csv` sniff (whose ~4 ms fixed cost is exactly what Lever 1b
-/// removes). Returns `(group_key, column_names)`:
+/// Parse a TSV file's header from its first line — read in Rust (via
+/// [`BidsFileSystem::read_head`]) instead of a per-file DuckDB `read_csv` sniff,
+/// whose ~4 ms fixed cost is what Lever 1b's batching removes. Returns
+/// `(group_key, column_names)`:
 ///
 /// - `group_key` is the raw header line with only the trailing `\n` removed, so a
 ///   `\r` (CRLF) or a UTF-8 BOM is **kept**. Batches key on it, which quarantines
@@ -1966,20 +2056,8 @@ fn is_order_insensitive(table: &str) -> bool {
 ///   split on the fixed tab) to match the names DuckDB emits once it has detected
 ///   the dialect, so the batch SQL's column references resolve.
 ///
-/// `None` if the file can't be opened or the header is empty. Only called on
-/// uncompressed `.tsv` — `.tsv.gz` never reaches the tabular path.
-fn read_tsv_header(path: &str) -> Option<(String, Vec<String>)> {
-    use std::io::BufRead;
-    let file = std::fs::File::open(path).ok()?;
-    let mut line = String::new();
-    std::io::BufReader::new(file).read_line(&mut line).ok()?;
-    tsv_header_from_line(&line)
-}
-
-/// Parse a TSV header from its first line (see [`read_tsv_header`] for the
-/// `(group_key, column_names)` contract). Accepts the line with or without a
-/// trailing newline, so it serves both the local (file) and S3 (downloaded
-/// content) header reads.
+/// Accepts the line with or without a trailing newline, so it serves both the
+/// local and remote header reads. `None` if the header is empty.
 fn tsv_header_from_line(line: &str) -> Option<(String, Vec<String>)> {
     let group_key = line.strip_suffix('\n').unwrap_or(line).to_string();
     let names_line = group_key.strip_suffix('\r').unwrap_or(&group_key);

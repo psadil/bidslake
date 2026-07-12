@@ -102,6 +102,20 @@ impl BidsFileSystem for LocalFileSystem {
         })
     }
 
+    fn read_head(&self, path: &Path, max_bytes: usize) -> BoxFuture<'_, Result<String>> {
+        use tokio::io::AsyncReadExt;
+        let full_path = self.root.join(path);
+        Box::pin(async move {
+            // Read at most `max_bytes` — a header line fits easily — rather than the
+            // whole file, matching the S3 ranged read.
+            let mut file = tokio::fs::File::open(full_path).await?;
+            let mut buf = vec![0u8; max_bytes];
+            let n = file.read(&mut buf).await?;
+            buf.truncate(n);
+            Ok(String::from_utf8_lossy(&buf).into_owned())
+        })
+    }
+
     fn materialize(&self, path: &Path) -> BoxFuture<'_, Result<PathBuf>> {
         // Already local: hand back the absolute path for DuckDB to read directly.
         let full_path = self.root.join(path);
