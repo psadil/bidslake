@@ -25,10 +25,12 @@ use pyo3::types::{PyBool, PyBytes};
 /// A read (or read-write) handle to a bidslake DuckDB database.
 ///
 /// Holds the connection behind a `Mutex` so the `#[pyclass]` is `Send + Sync`
-/// (a `duckdb::Connection` is `Send` but not `Sync`).
+/// (a `duckdb::Connection` is `Send` but not `Sync`). The `Option` lets
+/// [`PyLake::close`] drop the connection deterministically — releasing its file
+/// handle and any write lock — instead of waiting for garbage collection.
 #[pyclass(module = "bidslake._bidslake")]
 struct PyLake {
-    conn: Mutex<Connection>,
+    conn: Mutex<Option<Connection>>,
 }
 
 #[pymethods]
@@ -48,8 +50,15 @@ impl PyLake {
             .with_context(|| format!("opening DuckDB database at {path}"))
             .map_err(anyhow_err)?;
         Ok(PyLake {
-            conn: Mutex::new(conn),
+            conn: Mutex::new(Some(conn)),
         })
+    }
+
+    /// Close the underlying DuckDB connection, releasing its file handle and (for a
+    /// read-write handle) its write lock. Idempotent; any later query raises
+    /// `RuntimeError`.
+    fn close(&self) {
+        *self.conn.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     /// Run `sql` (with optional positional bind `params`) and return the result
@@ -67,14 +76,22 @@ impl PyLake {
             .iter()
             .map(py_to_duck_value)
             .collect::<PyResult<_>>()?;
-        let bytes = self.query_ipc_bytes(sql, &values).map_err(anyhow_err)?;
+        // Detach from the GIL for the DuckDB prepare/execute/collect + Arrow-IPC
+        // serialize: `query_ipc_bytes` touches no Python objects, so a long
+        // query no longer stalls every other Python thread.
+        let bytes = py
+            .detach(|| self.query_ipc_bytes(sql, &values))
+            .map_err(anyhow_err)?;
         Ok(PyBytes::new(py, &bytes))
     }
 
     /// Base tables and views in the `main` schema, sorted.
     fn list_tables(&self) -> PyResult<Vec<String>> {
-        let guard = self.conn.lock().unwrap();
-        let mut stmt = guard
+        let guard = self.locked_conn();
+        let conn = guard
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("operation on closed BidsLake"))?;
+        let mut stmt = conn
             .prepare(
                 "SELECT table_name FROM information_schema.tables \
                  WHERE table_schema = 'main' ORDER BY table_name",
@@ -89,8 +106,11 @@ impl PyLake {
     /// The `(column_name, data_type)` pairs of `table`, in ordinal order.
     /// Includes the generated virtual columns (they are real catalog columns).
     fn columns(&self, table: &str) -> PyResult<Vec<(String, String)>> {
-        let guard = self.conn.lock().unwrap();
-        let mut stmt = guard
+        let guard = self.locked_conn();
+        let conn = guard
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("operation on closed BidsLake"))?;
+        let mut stmt = conn
             .prepare(
                 "SELECT column_name, data_type FROM information_schema.columns \
                  WHERE table_schema = 'main' AND table_name = ? \
@@ -108,8 +128,11 @@ impl PyLake {
     /// The `bidslake_meta` version stamp `(schema_version, bids_version,
     /// bidslake_version)`, or `None` if the DB predates the stamp.
     fn meta(&self) -> PyResult<Option<(String, String, String)>> {
-        let guard = self.conn.lock().unwrap();
-        let mut stmt = match guard.prepare(
+        let guard = self.locked_conn();
+        let conn = guard
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("operation on closed BidsLake"))?;
+        let mut stmt = match conn.prepare(
             "SELECT schema_version, bids_version, bidslake_version \
              FROM bidslake_meta LIMIT 1",
         ) {
@@ -133,9 +156,17 @@ impl PyLake {
 }
 
 impl PyLake {
+    /// Lock the connection, recovering from a poisoned mutex (a panic in a prior
+    /// pymethod while holding the lock) instead of bricking the handle into a
+    /// permanent `PanicException` loop.
+    fn locked_conn(&self) -> std::sync::MutexGuard<'_, Option<Connection>> {
+        self.conn.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn query_ipc_bytes(&self, sql: &str, values: &[DuckValue]) -> anyhow::Result<Vec<u8>> {
-        let guard = self.conn.lock().unwrap();
-        let mut stmt = guard.prepare(sql).context("preparing query")?;
+        let guard = self.locked_conn();
+        let conn = guard.as_ref().context("operation on closed BidsLake")?;
+        let mut stmt = conn.prepare(sql).context("preparing query")?;
         let arrow = stmt
             .query_arrow(params_from_iter(values.iter()))
             .context("executing query")?;

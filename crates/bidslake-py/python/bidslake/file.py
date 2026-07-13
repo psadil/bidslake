@@ -6,8 +6,6 @@ import dataclasses
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import pydantic
-import pydantic.dataclasses
 from upath import UPath
 
 from .paths import to_local_path, to_upath
@@ -15,14 +13,14 @@ from .paths import to_local_path, to_upath
 if TYPE_CHECKING:
     import polars as pl
 
+    from .layout import BidsLake
+
 # Columns present on every file-based row that are not BIDS concepts; excluded
 # from the ``entities`` mapping.
 _NON_CONCEPT = frozenset({"dataset_id", "file_path", "other_data", "HED", "acq_time", "row_idx"})
 
 
-@pydantic.dataclasses.dataclass(
-    frozen=True, config=pydantic.ConfigDict(arbitrary_types_allowed=True)
-)
+@dataclasses.dataclass(frozen=True, slots=True)
 class BidsFile:
     """A single data file, with its resolved location and BIDS concepts.
 
@@ -38,7 +36,7 @@ class BidsFile:
     entities: dict[str, Any]
     # Back-reference to the opened database, for lazy metadata/events/associated
     # lookups. Excluded from equality/repr; not part of the file's identity.
-    lake: Any = dataclasses.field(default=None, compare=False, repr=False)
+    lake: BidsLake | None = dataclasses.field(default=None, compare=False, repr=False)
 
     @property
     def path(self) -> UPath:
@@ -95,7 +93,7 @@ class BidsFile:
         `file_associations`, optionally filtered to one `association_type`."""
         return self._require_lake()._associated_for(self.dataset_id, self.file_path, kind)
 
-    def _require_lake(self) -> Any:
+    def _require_lake(self) -> BidsLake:
         if self.lake is None:
             raise RuntimeError(
                 "this BidsFile has no database reference; construct it via BidsLake.get()"
@@ -104,7 +102,12 @@ class BidsFile:
 
     @classmethod
     def _from_row(
-        cls, dataset_id: str, file_path: str, uri: str, row: dict[str, Any], lake: Any = None
+        cls,
+        dataset_id: str,
+        file_path: str,
+        uri: str,
+        row: dict[str, Any],
+        lake: BidsLake | None = None,
     ) -> BidsFile:
         entities = {k: v for k, v in row.items() if k not in _NON_CONCEPT and v is not None}
         return cls(
