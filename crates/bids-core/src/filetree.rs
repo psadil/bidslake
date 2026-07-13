@@ -227,9 +227,9 @@ impl FileTree {
 
         let mut current = self;
         for part in parts {
-            match current.find_dir(part) {
-                Some(d) => current = d,
-                None => return None,
+            {
+                let d = current.find_dir(part)?;
+                current = d
             }
         }
         Some(current)
@@ -258,14 +258,12 @@ impl<'a> Iterator for WalkFiles<'a> {
                 return Some(file);
             }
 
-            match self.stack.pop() {
-                Some(current_dir) => {
-                    self.current_files = Some(current_dir.files.iter());
-                    for dir in current_dir.directories.iter().rev() {
-                        self.stack.push(dir);
-                    }
+            {
+                let current_dir = self.stack.pop()?;
+                self.current_files = Some(current_dir.files.iter());
+                for dir in current_dir.directories.iter().rev() {
+                    self.stack.push(dir);
                 }
-                None => return None,
             }
         }
     }
