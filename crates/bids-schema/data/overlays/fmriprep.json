@@ -1,0 +1,158 @@
+{
+  "objects": {
+    "entities": {
+      "from": {
+        "name": "from",
+        "display_name": "From",
+        "description": "The source space or reference of a spatial transform (e.g. `from-T1w`). Only applicable to derivative data.\n",
+        "type": "string",
+        "format": "label"
+      },
+      "to": {
+        "name": "to",
+        "display_name": "To",
+        "description": "The target space or reference of a spatial transform (e.g. `to-MNI152NLin2009cAsym`). Only applicable to derivative data.\n",
+        "type": "string",
+        "format": "label"
+      },
+      "mode": {
+        "name": "mode",
+        "display_name": "Mode",
+        "description": "The interpretation of a transform file (e.g. `mode-image`). Only applicable to derivative data.\n",
+        "type": "string",
+        "format": "label"
+      }
+    },
+    "suffixes": {
+      "timeseries": {
+        "value": "timeseries",
+        "display_name": "Time series",
+        "description": "A tabular file whose rows are ordered samples in register with an associated time series (e.g. fMRIPrep confounds, one row per functional volume).\n"
+      },
+      "xfm": {
+        "value": "xfm",
+        "display_name": "Transformation",
+        "description": "A spatial transform mapping one space to another, typically named with `from-`, `to-`, and `mode-` entities.\n"
+      },
+      "boldref": {
+        "value": "boldref",
+        "display_name": "BOLD reference image",
+        "description": "A single 3D volume used as the reference for a BOLD run.\n"
+      },
+      "morph": {
+        "value": "morph",
+        "display_name": "Morphometric map",
+        "description": "A surface morphometry map (e.g. thickness, curvature, sulcal depth).\n"
+      }
+    },
+    "columns": {
+      "trans_x__confounds": {
+        "name": "trans_x",
+        "display_name": "Translation (x)",
+        "description": "Estimated framewise translation along the x axis (mm).\n",
+        "type": "number"
+      },
+      "trans_y__confounds": {
+        "name": "trans_y",
+        "display_name": "Translation (y)",
+        "description": "Estimated framewise translation along the y axis (mm).\n",
+        "type": "number"
+      },
+      "trans_z__confounds": {
+        "name": "trans_z",
+        "display_name": "Translation (z)",
+        "description": "Estimated framewise translation along the z axis (mm).\n",
+        "type": "number"
+      },
+      "rot_x__confounds": {
+        "name": "rot_x",
+        "display_name": "Rotation (x)",
+        "description": "Estimated framewise rotation about the x axis (radians).\n",
+        "type": "number"
+      },
+      "rot_y__confounds": {
+        "name": "rot_y",
+        "display_name": "Rotation (y)",
+        "description": "Estimated framewise rotation about the y axis (radians).\n",
+        "type": "number"
+      },
+      "rot_z__confounds": {
+        "name": "rot_z",
+        "display_name": "Rotation (z)",
+        "description": "Estimated framewise rotation about the z axis (radians).\n",
+        "type": "number"
+      },
+      "framewise_displacement__confounds": {
+        "name": "framewise_displacement",
+        "display_name": "Framewise displacement",
+        "description": "Framewise displacement (Power et al.), a scalar summary of head motion (mm).\n",
+        "type": "number"
+      },
+      "dvars__confounds": {
+        "name": "dvars",
+        "display_name": "DVARS",
+        "description": "The spatial root-mean-square of the temporal derivative of the BOLD signal.\n",
+        "type": "number"
+      },
+      "std_dvars__confounds": {
+        "name": "std_dvars",
+        "display_name": "Standardized DVARS",
+        "description": "Standardized (z-scored) DVARS.\n",
+        "type": "number"
+      },
+      "rmsd__confounds": {
+        "name": "rmsd",
+        "display_name": "RMS displacement",
+        "description": "Root-mean-square framewise displacement relative to the reference volume (mm).\n",
+        "type": "number"
+      },
+      "global_signal__confounds": {
+        "name": "global_signal",
+        "display_name": "Global signal",
+        "description": "Mean signal within the whole-brain mask.\n",
+        "type": "number"
+      },
+      "csf__confounds": {
+        "name": "csf",
+        "display_name": "CSF signal",
+        "description": "Mean signal within the cerebrospinal-fluid mask.\n",
+        "type": "number"
+      },
+      "white_matter__confounds": {
+        "name": "white_matter",
+        "display_name": "White-matter signal",
+        "description": "Mean signal within the white-matter mask.\n",
+        "type": "number"
+      }
+    }
+  },
+  "rules": {
+    "tabular_data": {
+      "fmriprep": {
+        "fmriprep_confounds": {
+          "selectors": [
+            "dataset.dataset_description.DatasetType == \"derivative\"",
+            "suffix == \"timeseries\"",
+            "extension == \".tsv\""
+          ],
+          "additional_columns": "allowed",
+          "columns": {
+            "trans_x__confounds": "optional",
+            "trans_y__confounds": "optional",
+            "trans_z__confounds": "optional",
+            "rot_x__confounds": "optional",
+            "rot_y__confounds": "optional",
+            "rot_z__confounds": "optional",
+            "framewise_displacement__confounds": "optional",
+            "dvars__confounds": "optional",
+            "std_dvars__confounds": "optional",
+            "rmsd__confounds": "optional",
+            "global_signal__confounds": "optional",
+            "csf__confounds": "optional",
+            "white_matter__confounds": "optional"
+          }
+        }
+      }
+    }
+  }
+}

@@ -100,6 +100,10 @@ pub struct BidsParser {
     /// [`Self::parse`]. `None` for local datasets.
     s3_httpfs: Option<S3Httpfs>,
     ignore_set: Gitignore,
+    /// Whether to honor the dataset's `.bidsignore`. False (via `--no-bidsignore`)
+    /// walks and classifies every file, so overlay-described derivative outputs a
+    /// pipeline hides (e.g. fMRIPrep's `*_timeseries.tsv`, `*_xfm.*`) are indexed.
+    apply_bidsignore: bool,
     pending_associations: Vec<FileAssociation>,
     pending_diffusion: HashMap<String, PendingDiffusion>,
     schema: Schema,
@@ -206,6 +210,7 @@ impl BidsParser {
         dataset_id: Option<String>,
         schema: Schema,
         s3_httpfs: Option<S3Httpfs>,
+        apply_bidsignore: bool,
     ) -> Self {
         let datatypes = schema.datatypes().into_iter().collect();
         Self {
@@ -213,6 +218,7 @@ impl BidsParser {
             dataset_id,
             s3_httpfs,
             ignore_set: Gitignore::empty(),
+            apply_bidsignore,
             pending_associations: Vec::new(),
             pending_diffusion: HashMap::new(),
             schema,
@@ -277,8 +283,11 @@ impl BidsParser {
         // later phases are timed against a rolling `phase_start`.
         let t_walk = self.phase_timer.mark();
 
-        // Load .bidsignore patterns before parsing
-        self.load_bidsignore().await?;
+        // Load .bidsignore patterns before parsing (unless `--no-bidsignore`, which
+        // leaves `ignore_set` empty so nothing is filtered on the parser side either).
+        if self.apply_bidsignore {
+            self.load_bidsignore().await?;
+        }
 
         // Collect all file paths first
         let mut dataset_description: Vec<std::path::PathBuf> = Vec::new();
@@ -289,7 +298,8 @@ impl BidsParser {
         // Pseudo-file extensions (`.ds/`, `.ome.zarr/`, …) from the schema, so opaque BIDS
         // directories are emitted as single files (and become association sources).
         let pseudo_exts = bids_schema::pseudo_file_extensions(self.schema.raw());
-        let files: Vec<std::path::PathBuf> = self.fs.walk(&pseudo_exts).await?;
+        let files: Vec<std::path::PathBuf> =
+            self.fs.walk(&pseudo_exts, self.apply_bidsignore).await?;
 
         for path in files {
             let file_name = path.file_name().unwrap().to_str().unwrap();
@@ -1235,6 +1245,10 @@ impl BidsParser {
         }
 
         let sub = entities.get("sub").map(|s| s.as_str());
+        // Positional per-row tables (`*timeseries.tsv` &c., reached here when the file
+        // has a literal `filename` column) must keep TSV line order so `row_idx` is a
+        // faithful row number; see `is_order_insensitive` / bids-2-devel#98.
+        let preserve_order = !is_order_insensitive(&spec.table);
         let sql = build_tabular_insert_sql(
             spec,
             &local,
@@ -1243,6 +1257,7 @@ impl BidsParser {
             sub,
             &sniffed,
             HEADER_READ_OPTS,
+            preserve_order,
         );
         // A single malformed TSV must not abort the whole dataset's ingest — log
         // and move on (the file is still recorded in `tabular_files`, with 0 rows).
@@ -1315,6 +1330,13 @@ impl BidsParser {
             // padded/dropped rather than aborting, so it can't poison the ingest
             // transaction; dropping the old dry-run halves the reads (the dominant
             // cost on a network filesystem).
+            //
+            // Row order matters for positional tabular files — notably derivative
+            // `*timeseries.tsv` (e.g. fMRIPrep confounds), where row N aligns with
+            // volume N of the associated 4D image — so their line order is preserved
+            // and `row_idx` records the row number. BIDS has no schema field to
+            // express this yet, so the policy is hardcoded in `is_order_insensitive`;
+            // see https://github.com/bids-standard/bids-2-devel/issues/98.
             let preserve_order = !is_order_insensitive(&spec.table);
             let select =
                 build_tabular_batch_select(spec, &dataset_id, &files, columns, preserve_order);
@@ -1535,6 +1557,8 @@ impl BidsParser {
         db.conn.execute(&del, [])?;
 
         let sub = rec.entities.get("sub").map(|s| s.as_str());
+        // Recordings are positional (row N is sample N), so preserve line order.
+        let preserve_order = !is_order_insensitive(&spec.table);
         let sql = build_tabular_insert_sql(
             &spec,
             &local,
@@ -1543,6 +1567,7 @@ impl BidsParser {
             sub,
             &colnames,
             &read_opts,
+            preserve_order,
         );
         match db.conn.execute(&sql, []) {
             Ok(n) => Ok((Some(table.to_string()), n as i64)),
@@ -1893,6 +1918,9 @@ fn needs_try_cast(sql_type: &str) -> bool {
 /// Columns the schema declares but the file lacks are simply omitted — `INSERT …
 /// BY NAME` leaves them NULL. `read_opts` is the `read_csv` argument list after the
 /// path (it differs only by `header=`/`columns=` between the two cases).
+// A SQL builder with many distinct inputs; grouping them into a struct would add
+// indirection without clarity, and `preserve_order` mirrors `build_tabular_batch_select`.
+#[allow(clippy::too_many_arguments)]
 fn build_tabular_insert_sql(
     spec: &TableSpec,
     local_path: &str,
@@ -1901,6 +1929,7 @@ fn build_tabular_insert_sql(
     sub: Option<&str>,
     sniffed: &[String],
     read_opts: &str,
+    preserve_order: bool,
 ) -> String {
     let present: HashSet<&str> = sniffed.iter().map(|s| s.as_str()).collect();
     let mut selects: Vec<String> = vec![format!("{} AS dataset_id", sql_lit(dataset_id))];
@@ -1949,6 +1978,10 @@ fn build_tabular_insert_sql(
         }
         RowIdentity::PerRow => {
             selects.push(format!("{} AS file_path", sql_lit(rel_path)));
+            // `row_number() OVER ()` numbers rows in physical read order; under the
+            // `parallel=false` read forced below for order-sensitive tables, that is
+            // TSV line order. For order-insensitive tables it is an arbitrary but
+            // unique 0-based key (order doesn't matter — e.g. `events` sorts by onset).
             selects.push("(row_number() OVER () - 1)::BIGINT AS row_idx".to_string());
         }
     }
@@ -1992,8 +2025,17 @@ fn build_tabular_insert_sql(
         RowIdentity::PerRow => "INSERT",
         _ => "INSERT OR IGNORE",
     };
+    // Order-sensitive per-row tables (positional `*timeseries.tsv`, `*_physio`,
+    // recordings, …) must be read sequentially so `row_number()` above reproduces TSV
+    // line order; a parallel read would scramble `row_idx`. PK tables carry no
+    // `row_idx`, so the flag is a no-op for them. See bids-standard/bids-2-devel#98.
+    let sequential = if preserve_order && matches!(spec.identity, RowIdentity::PerRow) {
+        ", parallel=false"
+    } else {
+        ""
+    };
     format!(
-        "{verb} INTO {} BY NAME SELECT {} FROM read_csv({}, {read_opts})",
+        "{verb} INTO {} BY NAME SELECT {} FROM read_csv({}, {read_opts}{sequential})",
         spec.table,
         selects.join(", "),
         sql_lit(local_path),
@@ -2103,13 +2145,25 @@ fn build_tabular_batch_select(
     )
 }
 
-/// Whether a per-row tabular table's `row_idx` need not track TSV line order, so
-/// its batch may be read in parallel (a network-FS win). True only where rows are
-/// an unordered set with a real ordering column — `events` are sorted by `onset`,
-/// not by position. Positional tables (`*_channels`/`*_electrodes`/`*_optodes`,
-/// whose row order maps to a recording's columns/sensors) must preserve line
-/// order, so they are deliberately excluded.
+/// Whether a per-row tabular table's rows may be read out of order (letting the batch
+/// be read in parallel — a network-FS win) instead of in TSV line order.
+///
+/// This encodes BIDS row-order semantics that the schema cannot yet express, so it is
+/// deliberately **hardcoded** (a `row_order` field is proposed upstream:
+/// <https://github.com/bids-standard/bids-2-devel/issues/98>). The policy:
+///
+/// - `events` is order-*insensitive*: its rows are sorted by the `onset` column, so
+///   physical position is incidental and the batch may be read concurrently.
+/// - Every other tabular table is order-*sensitive* and preserves physical line order,
+///   so `row_idx` records the row number. This is the required treatment for
+///   *positional* files, whose row N corresponds to element N of an associated series:
+///   continuous recordings (`*_physio`/`*_channels`/`*_electrodes`/`*_optodes`) and
+///   derivative time series such as `*timeseries.tsv` (e.g. fMRIPrep confounds, one row
+///   per functional volume).
 fn is_order_insensitive(table: &str) -> bool {
+    // Only `events` may be reordered (it has an `onset` ordering column); everything
+    // else — including positional `*timeseries.tsv` derivatives — must keep line order.
+    // Hardcoded pending a schema field; see bids-standard/bids-2-devel#98.
     table == "events"
 }
 
@@ -2250,5 +2304,48 @@ mod tests {
         let content = "*.tsv\n!keep.tsv\n";
         assert!(ignored(content, "sub-01/drop.tsv"));
         assert!(!ignored(content, "sub-01/keep.tsv"));
+    }
+
+    /// The single-file tabular/recording path must force `parallel=false` for
+    /// order-sensitive per-row tables so `row_idx` reproduces TSV line order — the
+    /// gap that positional `*timeseries.tsv`/recordings would otherwise hit (the
+    /// batched path already does this). See bids-standard/bids-2-devel#98.
+    #[test]
+    fn order_sensitive_per_row_reads_sequentially() {
+        use super::{HEADER_READ_OPTS, build_tabular_insert_sql};
+        use crate::schema::tabular::{RowIdentity, TableSpec};
+
+        let spec = |table: &str, identity| TableSpec {
+            table: table.to_string(),
+            columns: Vec::new(),
+            identity,
+            file_based: true,
+            rule_ids: Vec::new(),
+        };
+        let sql = |spec: &TableSpec, preserve| {
+            build_tabular_insert_sql(
+                spec,
+                "/t/f.tsv",
+                "sub-01/func/f.tsv",
+                "ds",
+                None,
+                &[],
+                HEADER_READ_OPTS,
+                preserve,
+            )
+        };
+
+        // Positional per-row table → sequential read + a row_idx.
+        let ordered = sql(&spec("fmriprep_confounds", RowIdentity::PerRow), true);
+        assert!(ordered.contains("parallel=false"), "{ordered}");
+        assert!(ordered.contains("AS row_idx"));
+
+        // Order-insensitive per-row (e.g. events) → no forced sequential read.
+        let unordered = sql(&spec("events", RowIdentity::PerRow), false);
+        assert!(!unordered.contains("parallel=false"), "{unordered}");
+
+        // PK tables carry no row_idx → never forced sequential, even with preserve_order.
+        let pk = sql(&spec("participants", RowIdentity::PerEntity), true);
+        assert!(!pk.contains("parallel=false"), "{pk}");
     }
 }

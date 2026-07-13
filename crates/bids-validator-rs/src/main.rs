@@ -86,7 +86,7 @@ async fn main() {
         eprintln!("Reading file tree from: {}", cli.dataset.display());
     }
     let pseudo_exts = schema.pseudo_file_extensions();
-    let tree = match read_file_tree(&cli.dataset, &pseudo_exts) {
+    let tree = match read_file_tree(&cli.dataset, &pseudo_exts, true) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("Error reading dataset: {}", e);

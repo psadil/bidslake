@@ -62,11 +62,12 @@ pub async fn validate(
 
     // Read the file tree
     let pseudo_exts = schema.pseudo_file_extensions();
-    let tree =
-        read_file_tree(dataset_path, &pseudo_exts).map_err(|source| ValidatorError::ReadTree {
+    let tree = read_file_tree(dataset_path, &pseudo_exts, true).map_err(|source| {
+        ValidatorError::ReadTree {
             path: dataset_path.to_path_buf(),
             source,
-        })?;
+        }
+    })?;
 
     // Prepare main issues collector
     let mut issues = DatasetIssues {

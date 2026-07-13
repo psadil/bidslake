@@ -1,15 +1,20 @@
-//! Vendors the BIDS schema (from the in-tree `third_party/bids-schema` subtree) into
-//! `OUT_DIR/schema.json`, which the crate embeds via `include_str!`, and generates one
-//! expression-conformance test per `meta.expression_tests` case.
+//! Vendors the BIDS schema and metaschema into `OUT_DIR`, which the crate embeds via
+//! `include_str!`, and generates one expression-conformance test per
+//! `meta.expression_tests` case.
 //!
-//! Deterministic and offline: the schema is a committed, in-tree file (a `git subtree` of
-//! `bids-standard/bids-schema`), so there is no build-time download and no version branching.
+//! Deterministic and offline: both inputs are committed, pinned, in-tree files, so there
+//! is no build-time download and no version branching. They come from two different
+//! upstream repositories (the schema and metaschema are maintained separately), each
+//! pinned by a `.pinned-commit` beside it and refreshable via `tools/vendor-schema.sh`:
+//!
+//! - schema: `third_party/bids-schema/versions/<DIR>/schema.json` (from `bids-standard/bids-schema`)
+//! - metaschema: `third_party/bids-specification/src/metaschema.json` (from `bids-standard/bids-specification`)
 
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Pinned BIDS spec-version directory within the vendored schema subtree
+/// Pinned BIDS spec-version directory within the vendored schema tree
 /// (`third_party/bids-schema/versions/<DIR>/schema.json`). This one is schema_version 1.2.1.
 const SCHEMA_VERSION_DIR: &str = "1.11.1";
 
@@ -18,7 +23,28 @@ fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
     vendor_schema(&manifest, &out_dir);
+    vendor_metaschema(&manifest, &out_dir);
     generate_expression_tests(&out_dir);
+}
+
+/// Copy the pinned in-tree `metaschema.json` into `OUT_DIR` (no network, no fallback).
+/// The metaschema is the JSON Schema that a valid BIDS schema — and thus a valid
+/// overlay-augmented schema — must satisfy; see `crate::overlay`.
+fn vendor_metaschema(manifest: &Path, out_dir: &Path) {
+    let src = manifest.join("../../third_party/bids-specification/src/metaschema.json");
+    println!("cargo:rerun-if-changed={}", src.display());
+
+    let body = fs::read_to_string(&src).unwrap_or_else(|e| {
+        panic!(
+            "failed to read vendored BIDS metaschema {} ({e}). Run tools/vendor-schema.sh.",
+            src.display()
+        )
+    });
+    assert!(
+        body.trim_start().starts_with('{'),
+        "unexpected (non-JSON) BIDS metaschema content"
+    );
+    fs::write(out_dir.join("metaschema.json"), body).expect("write metaschema.json to OUT_DIR");
 }
 
 /// Copy the pinned in-tree `schema.json` into `OUT_DIR` (no network, no fallback).

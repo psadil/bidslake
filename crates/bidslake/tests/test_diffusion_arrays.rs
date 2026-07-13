@@ -38,7 +38,7 @@ async fn test_diffusion_numeric_arrays() -> Result<()> {
     db.create_tables(&schema)?;
 
     let fs = Box::new(LocalFileSystem::new(dataset_path));
-    let mut parser = BidsParser::new(fs, None, schema, None);
+    let mut parser = BidsParser::new(fs, None, schema, None, true);
     parser.parse(&db).await?;
 
     // One row per volume: the .bval had 4 values, so 4 diffusion rows.

@@ -119,7 +119,13 @@ pub fn configure_httpfs(conn: &duckdb::Connection, region: &str, anonymous: bool
 }
 
 impl BidsFileSystem for S3Client {
-    fn walk(&self, _pseudo_exts: &[String]) -> future::BoxFuture<'_, Result<Vec<PathBuf>>> {
+    // `.bidsignore` is applied by the parser for the S3 backend (its object listing
+    // does not consult it), so `apply_bidsignore` is honored there, not here.
+    fn walk(
+        &self,
+        _pseudo_exts: &[String],
+        _apply_bidsignore: bool,
+    ) -> future::BoxFuture<'_, Result<Vec<PathBuf>>> {
         let bucket = self.bucket.clone();
         let prefix = self.prefix.clone();
         let client = self.client.clone();

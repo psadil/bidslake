@@ -62,7 +62,7 @@ async fn test_bids_inheritance() -> Result<()> {
     db.create_tables(&schema)?;
 
     let fs = Box::new(LocalFileSystem::new(dataset_path.clone()));
-    let mut parser = BidsParser::new(fs, None, schema, None);
+    let mut parser = BidsParser::new(fs, None, schema, None, true);
     parser.parse(&db).await?;
 
     // Verify sub-01 (Inheritance)

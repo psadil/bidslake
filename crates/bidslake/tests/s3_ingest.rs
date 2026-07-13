@@ -37,6 +37,7 @@ async fn ingest_s3(dataset: &str) -> anyhow::Result<BidsDb> {
             region: region.clone(),
             anonymous: true,
         }),
+        true,
     );
 
     let txn = db.conn.unchecked_transaction()?;
@@ -58,7 +59,7 @@ fn count(db: &BidsDb, table: &str) -> i64 {
 async fn s3_methods_walk_and_read() -> anyhow::Result<()> {
     let client = S3Client::new(BUCKET, "ds000001", s3::SigningMode::Anonymous).await?;
 
-    let files = client.walk(&[]).await?;
+    let files = client.walk(&[], true).await?;
     assert!(
         files
             .iter()

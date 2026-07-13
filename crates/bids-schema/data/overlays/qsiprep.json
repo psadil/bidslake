@@ -1,0 +1,111 @@
+{
+  "objects": {
+    "entities": {
+      "from": {
+        "name": "from",
+        "display_name": "From",
+        "description": "The source space or reference of a spatial transform (e.g. `from-T1w`). Only applicable to derivative data.\n",
+        "type": "string",
+        "format": "label"
+      },
+      "to": {
+        "name": "to",
+        "display_name": "To",
+        "description": "The target space or reference of a spatial transform (e.g. `to-MNI152NLin2009cAsym`). Only applicable to derivative data.\n",
+        "type": "string",
+        "format": "label"
+      },
+      "mode": {
+        "name": "mode",
+        "display_name": "Mode",
+        "description": "The interpretation of a transform file (e.g. `mode-image`). Only applicable to derivative data.\n",
+        "type": "string",
+        "format": "label"
+      }
+    },
+    "suffixes": {
+      "timeseries": {
+        "value": "timeseries",
+        "display_name": "Time series",
+        "description": "A tabular file whose rows are ordered samples in register with an associated time series (e.g. fMRIPrep confounds, one row per functional volume).\n"
+      },
+      "xfm": {
+        "value": "xfm",
+        "display_name": "Transformation",
+        "description": "A spatial transform mapping one space to another, typically named with `from-`, `to-`, and `mode-` entities.\n"
+      },
+      "dwiref": {
+        "value": "dwiref",
+        "display_name": "DWI reference image",
+        "description": "A single 3D volume used as the reference for a diffusion-weighted run.\n"
+      }
+    },
+    "columns": {
+      "trans_x__confounds": {
+        "name": "trans_x",
+        "display_name": "Translation (x)",
+        "description": "Estimated framewise translation along the x axis (mm).\n",
+        "type": "number"
+      },
+      "trans_y__confounds": {
+        "name": "trans_y",
+        "display_name": "Translation (y)",
+        "description": "Estimated framewise translation along the y axis (mm).\n",
+        "type": "number"
+      },
+      "trans_z__confounds": {
+        "name": "trans_z",
+        "display_name": "Translation (z)",
+        "description": "Estimated framewise translation along the z axis (mm).\n",
+        "type": "number"
+      },
+      "rot_x__confounds": {
+        "name": "rot_x",
+        "display_name": "Rotation (x)",
+        "description": "Estimated framewise rotation about the x axis (radians).\n",
+        "type": "number"
+      },
+      "rot_y__confounds": {
+        "name": "rot_y",
+        "display_name": "Rotation (y)",
+        "description": "Estimated framewise rotation about the y axis (radians).\n",
+        "type": "number"
+      },
+      "rot_z__confounds": {
+        "name": "rot_z",
+        "display_name": "Rotation (z)",
+        "description": "Estimated framewise rotation about the z axis (radians).\n",
+        "type": "number"
+      },
+      "framewise_displacement__confounds": {
+        "name": "framewise_displacement",
+        "display_name": "Framewise displacement",
+        "description": "Framewise displacement (Power et al.), a scalar summary of head motion (mm).\n",
+        "type": "number"
+      }
+    }
+  },
+  "rules": {
+    "tabular_data": {
+      "qsiprep": {
+        "qsiprep_confounds": {
+          "selectors": [
+            "dataset.dataset_description.DatasetType == \"derivative\"",
+            "suffix == \"timeseries\"",
+            "extension == \".tsv\""
+          ],
+          "additional_columns": "allowed",
+          "columns": {
+            "trans_x__confounds": "optional",
+            "trans_y__confounds": "optional",
+            "trans_z__confounds": "optional",
+            "rot_x__confounds": "optional",
+            "rot_y__confounds": "optional",
+            "rot_z__confounds": "optional",
+            "framewise_displacement__confounds": "optional"
+          }
+        }
+      }
+    }
+  }
+}

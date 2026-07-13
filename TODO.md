@@ -51,3 +51,41 @@ as issues. Roughly ordered by value.
 - [ ] **Concurrent Rust-side reads**. The known-deferred ingest perf lever from the prior
   performance sweep (the sidecar/tabular header reads are prefetched concurrently, but the
   per-file Rust-side reads are still sequential).
+
+## Schema augmentation (overlays)
+
+Follow-ups from the overlay feature (see `docs/adr/0001-schema-augmentation-overlays.md`).
+Landed and verified: the core; all three bundled overlays (fMRIPrep, MRIQC, QSIPrep — authored
+and metaschema-valid); `index --no-bidsignore` (walk past a pipeline's `.bidsignore`, without
+which overlays are inert on real derivative datasets — validated on `ds000001-fmriprep`);
+`schema --diff`/`index --dry-run`; dataset-embedded overlay auto-discovery; the Python runtime
+accessors; and the opt-in `python -m bidslake.stubgen`. Remaining follow-ups:
+
+- [ ] **Grow bundled-overlay coverage**. The three overlays cover the common outputs; extend them
+  as needs arise — e.g. the fMRIPrep overlay does not yet capture `*_desc-MELODIC_mixing.tsv` or
+  `*_AROMAnoiseICs.csv` (they show as `skipped` on `ds000001-fmriprep`); MRIQC group TSVs; more
+  QSIPrep QC files. Column *values* are only lightly validated (the bids-examples confounds files
+  are empty) — check names against a dataset with real confound data when one is available.
+
+- [ ] **Auto-relax `.bidsignore` under `--overlay`?** Consider having an overlay imply
+  `--no-bidsignore` (or selectively un-ignore only schema-recognized files), so the common case
+  needs one flag, not two. Currently explicit.
+
+- [ ] **YAML overlay authoring**. Overlays are JSON-only; accept `.yaml`/`.yml` (parse to `Value`
+  before merge) behind an optional `yaml` cargo feature.
+
+- [ ] **Rust `emit-types --from-db`**. The Python `stubgen` is the recommended path; optionally add
+  a `--from-db <db>` mode to the `emit-types` bin for cargo-based workflows.
+
+- [ ] **Consider filtering `bidslake_*` meta tables** from the generated `COLUMNS`/`C` typed surface
+  (they are internal provenance tables; `bidslake_meta`/`bidslake_schema` currently appear there).
+
+- [ ] **Schema-driven ordering, once BIDS has `row_order`**. `bids::is_order_insensitive` hardcodes
+  the row-order policy (only `events` is reorderable). If bids-standard/bids-2-devel#98 lands, drive
+  it from the schema and drop the hardcode. Related: declarable `row_identity` (blocked on the same
+  "no invented schema concepts" constraint).
+
+- [ ] **Batched-insert crash on empty header columns** (pre-existing, unrelated to overlays). A TSV
+  with a trailing tab (an empty-string column name) makes the batched insert emit
+  `json_object('', raw."")`, a "zero-length delimited identifier" parser error that drops the file
+  (seen as a warning on `ds001` events). The single-file path tolerates it; harden the batched path.
