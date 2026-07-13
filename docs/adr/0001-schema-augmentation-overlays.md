@@ -86,6 +86,22 @@ if adopted, the hardcode can be driven from the schema.
 The same reasoning defers the other "lift the hardcoded limits" items (declarable
 `row_identity`, etc.) wherever they would require inventing schema concepts.
 
+### 7. Overlays need to walk past `.bidsignore`
+
+Pipelines hide their non-standard outputs from BIDS validation with a `.bidsignore`
+(fMRIPrep lists `*_timeseries.tsv`, `*_xfm.*`, `*_boldref.nii.gz`, …) — i.e. it hides
+*exactly* the files an overlay exists to index. bidslake's walker honors `.bidsignore`,
+so by default an overlay is inert against a real derivative dataset. The `index
+--no-bidsignore` flag walks every file so overlay-described outputs are indexed;
+bidslake's own classification still decides what becomes a scan/table, so reports/logs
+(`*.html`, `figures/`) are walked but not indexed. Verified against a real fMRIPrep
+dataset (`third_party/bids-examples/ds000001-fmriprep`): without the flag its transforms
+and confounds are invisible; with it, 48 transforms parse with `from`/`to`/`mode` and the
+confounds route to `fmriprep_confounds`.
+
+Kept as an explicit flag rather than implied by `--overlay` (auto-relaxing `.bidsignore`
+whenever an overlay is present is a reasonable future default; see the TODO).
+
 ## Consequences
 
 - New derivative outputs become first-class (real tables, generated entity columns,

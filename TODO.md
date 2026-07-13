@@ -55,32 +55,37 @@ as issues. Roughly ordered by value.
 ## Schema augmentation (overlays)
 
 Follow-ups from the overlay feature (see `docs/adr/0001-schema-augmentation-overlays.md`).
+Landed and verified: the core; all three bundled overlays (fMRIPrep, MRIQC, QSIPrep — authored
+and metaschema-valid); `index --no-bidsignore` (walk past a pipeline's `.bidsignore`, without
+which overlays are inert on real derivative datasets — validated on `ds000001-fmriprep`);
+`schema --diff`/`index --dry-run`; dataset-embedded overlay auto-discovery; the Python runtime
+accessors; and the opt-in `python -m bidslake.stubgen`. Remaining follow-ups:
 
-- [ ] **Flesh out the bundled MRIQC/QSIPrep overlays**. `crates/bids-schema/data/overlays/{mriqc,qsiprep}.json`
-  are valid-but-empty stubs; author them (IQMs, group TSVs, transforms, pipeline entities/fields)
-  from the OpenNeuroDerivatives corpus, like the fMRIPrep overlay.
+- [ ] **Grow bundled-overlay coverage**. The three overlays cover the common outputs; extend them
+  as needs arise — e.g. the fMRIPrep overlay does not yet capture `*_desc-MELODIC_mixing.tsv` or
+  `*_AROMAnoiseICs.csv` (they show as `skipped` on `ds000001-fmriprep`); MRIQC group TSVs; more
+  QSIPrep QC files. Column *values* are only lightly validated (the bids-examples confounds files
+  are empty) — check names against a dataset with real confound data when one is available.
+
+- [ ] **Auto-relax `.bidsignore` under `--overlay`?** Consider having an overlay imply
+  `--no-bidsignore` (or selectively un-ignore only schema-recognized files), so the common case
+  needs one flag, not two. Currently explicit.
 
 - [ ] **YAML overlay authoring**. Overlays are JSON-only; accept `.yaml`/`.yml` (parse to `Value`
   before merge) behind an optional `yaml` cargo feature.
 
-- [ ] **Opt-in stubgen for augmented types**. Generate a project-local typed module (Literals +
-  extended `GetFilters` + `C`) from an augmented DB's stored effective schema — a `--from-db` mode
-  on `emit-types` and/or `python -m bidslake.stubgen`. While there, filter the `bidslake_*` meta
-  tables out of the generated `COLUMNS`/`C` (now that `bidslake_schema` is always stamped).
+- [ ] **Rust `emit-types --from-db`**. The Python `stubgen` is the recommended path; optionally add
+  a `--from-db <db>` mode to the `emit-types` bin for cargo-based workflows.
 
-- [ ] **Python runtime ergonomics**. Dynamic `C`-style column accessors from live introspection so
-  augmented tables get them without codegen; make `_warn_on_version_mismatch` read
-  `effective_schema()`/`overlays()` and nudge toward stubgen when a DB is augmented.
-
-- [ ] **`bidslake schema --diff` / `index --dry-run`**. Experimentation surfaces: print the DDL/table
-  delta an overlay would produce (no DB written), and a per-file routing preview (which table each
-  file hits, what stays `skipped`). Pairs with `bids-validator --overlay` for the file-recognition half.
-
-- [ ] **Dataset-embedded overlay auto-discovery**. Auto-apply a `.bidslake/overlay.json` at the
-  dataset root (lowest precedence) so a derivative dataset self-describes with zero flags; reuses
-  `overlay::{load_overlay, merge_into}`.
+- [ ] **Consider filtering `bidslake_*` meta tables** from the generated `COLUMNS`/`C` typed surface
+  (they are internal provenance tables; `bidslake_meta`/`bidslake_schema` currently appear there).
 
 - [ ] **Schema-driven ordering, once BIDS has `row_order`**. `bids::is_order_insensitive` hardcodes
   the row-order policy (only `events` is reorderable). If bids-standard/bids-2-devel#98 lands, drive
   it from the schema and drop the hardcode. Related: declarable `row_identity` (blocked on the same
   "no invented schema concepts" constraint).
+
+- [ ] **Batched-insert crash on empty header columns** (pre-existing, unrelated to overlays). A TSV
+  with a trailing tab (an empty-string column name) makes the batched insert emit
+  `json_object('', raw."")`, a "zero-length delimited identifier" parser error that drops the file
+  (seen as a warning on `ds001` events). The single-file path tolerates it; harden the batched path.
