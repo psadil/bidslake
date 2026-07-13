@@ -241,6 +241,7 @@ impl FileTree {
     }
 }
 
+#[derive(Debug)]
 pub struct WalkFiles<'a> {
     stack: Vec<&'a FileTree>,
     current_files: Option<std::slice::Iter<'a, BidsFile>>,
@@ -270,6 +271,7 @@ impl<'a> Iterator for WalkFiles<'a> {
     }
 }
 
+#[derive(Debug)]
 pub struct WalkDirectories<'a> {
     stack: Vec<&'a FileTree>,
 }
