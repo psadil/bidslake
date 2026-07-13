@@ -22,6 +22,28 @@ pub struct IgnoreRule {
     pub code: String,
 }
 
+/// An error from [`ValidatorConfig::from_file`]. Typed (with a `source` chain)
+/// rather than a `String`, so callers can distinguish read from parse failures.
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    /// The config file could not be read.
+    #[error("reading config file {path}")]
+    Read {
+        /// The config path that could not be read.
+        path: PathBuf,
+        /// The underlying IO error.
+        source: std::io::Error,
+    },
+    /// The config file was read but is not valid JSON.
+    #[error("parsing config file {path}")]
+    Parse {
+        /// The config path that failed to parse.
+        path: PathBuf,
+        /// The underlying JSON error.
+        source: serde_json::Error,
+    },
+}
+
 impl ValidatorConfig {
     /// Loads a `ValidatorConfig` from a JSON file.
     ///
@@ -31,21 +53,16 @@ impl ValidatorConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error if the file cannot be read or if the JSON is malformed.
-    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, String> {
-        let content = fs::read_to_string(&path).map_err(|e| {
-            format!(
-                "Failed to read config file {}: {}",
-                path.as_ref().display(),
-                e
-            )
+    /// Returns a [`ConfigError`] if the file cannot be read or if the JSON is malformed.
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
+        let path = path.as_ref();
+        let content = fs::read_to_string(path).map_err(|source| ConfigError::Read {
+            path: path.to_path_buf(),
+            source,
         })?;
-        serde_json::from_str(&content).map_err(|e| {
-            format!(
-                "Failed to parse config file {}: {}",
-                path.as_ref().display(),
-                e
-            )
+        serde_json::from_str(&content).map_err(|source| ConfigError::Parse {
+            path: path.to_path_buf(),
+            source,
         })
     }
 }

@@ -11,6 +11,24 @@ use futures::future;
 use std::env;
 use std::path::{Path, PathBuf};
 
+/// Whether S3 requests are signed with AWS credentials or sent anonymously
+/// (public buckets like OpenNeuro's). A named type instead of a bare `bool` so
+/// call sites read `SigningMode::Anonymous` rather than an opaque `true`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SigningMode {
+    /// Sign requests with resolved AWS credentials.
+    Signed,
+    /// Send unsigned (anonymous) requests — required for public buckets.
+    Anonymous,
+}
+
+impl SigningMode {
+    /// Whether this is anonymous (unsigned) access.
+    pub fn is_anonymous(self) -> bool {
+        self == SigningMode::Anonymous
+    }
+}
+
 /// S3 utilities for accessing OpenNeuro datasets
 pub struct S3Client {
     client: aws_sdk_s3::Client,
@@ -28,15 +46,15 @@ impl S3Client {
     /// # Arguments
     /// * `bucket` - S3 bucket name
     /// * `prefix` - Object prefix (directory path)
-    /// * `no_sign_request` - If true, use anonymous access (no AWS credentials)
-    pub async fn new(bucket: &str, prefix: &str, no_sign_request: bool) -> Result<Self> {
+    /// * `signing` - [`SigningMode::Anonymous`] for public buckets (no credentials)
+    pub async fn new(bucket: &str, prefix: &str, signing: SigningMode) -> Result<Self> {
         let region = env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_string());
 
         let config_loader = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .region(aws_sdk_s3::config::Region::new(region.clone()));
 
         // For public buckets or when explicitly requested, use anonymous access
-        let config_loader = if no_sign_request {
+        let config_loader = if signing.is_anonymous() {
             config_loader.no_credentials()
         } else {
             config_loader
@@ -57,7 +75,7 @@ impl S3Client {
             bucket: bucket.to_string(),
             prefix,
             region,
-            anonymous: no_sign_request,
+            anonymous: signing.is_anonymous(),
         })
     }
 
@@ -125,7 +143,7 @@ impl BidsFileSystem for S3Client {
                             let relative_key = if !prefix.is_empty() && key.starts_with(&prefix) {
                                 key[prefix.len()..].to_string()
                             } else {
-                                key.clone()
+                                key
                             };
 
                             // Skip directories (keys ending in /)

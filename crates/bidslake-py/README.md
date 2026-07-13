@@ -68,11 +68,13 @@ exact `bidslake` schema/DDL model (no logic is re-implemented in Python):
 PYO3_PYTHON=$PWD/.venv/bin/python cargo run -p bidslake-py --bin emit-types
 ```
 
-CI checks (also runnable locally):
+CI (`.github/workflows/ci.yml`, also runnable locally):
 
 - `pytest` — includes `test_codegen.py` (generated `COLUMNS` == the real
   database) and `test_typing.py` (asserts `ty` *rejects* a fixture of bad
   queries — the one typing check the `ty` hook can't make).
-- Re-run `emit-types` and `git diff --exit-code` on `_generated.py` — fails if
-  the committed types drifted from the schema.
+- `codegen-drift` job — re-runs `emit-types` and `git diff --exit-code` on
+  `_generated.py`; fails if the committed types drifted from the schema. This is
+  the only check that covers the value-set `Literal`s (Datatype/Suffix/Modality/…),
+  which `test_codegen.py` (DB-introspected `COLUMNS` only) does not.
 - `ty check python/bidslake`.

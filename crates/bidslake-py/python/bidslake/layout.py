@@ -77,6 +77,20 @@ class BidsLake:
         self._root_override = {k: to_uri(v) for k, v in (root_override or {}).items()}
         self._warn_on_version_mismatch()
 
+    # -- lifecycle ---------------------------------------------------------
+
+    def close(self) -> None:
+        """Close the underlying DuckDB connection, releasing its file handle and
+        (for a ``read_only=False`` handle) its write lock, without waiting for
+        garbage collection. Idempotent; any later query raises ``RuntimeError``."""
+        self._lake.close()
+
+    def __enter__(self) -> BidsLake:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
     # -- table access ------------------------------------------------------
 
     @property
@@ -135,6 +149,11 @@ class BidsLake:
         equality, a sequence by ``IN (...)``, and ``None`` by ``IS NULL`` (so
         ``ses=None`` selects sessionless files). With no filters, iterates the
         whole table across every dataset in the database.
+
+        Note: the result set is materialized in full (the Arrow-IPC buffer is read
+        into a Polars frame) before any row is yielded, so peak memory is the whole
+        result set — the generator form is for ergonomics, not streaming. Genuine
+        streaming awaits the PyCapsule bridge (see ``src/lib.rs``).
         """
         where, params = self._compile_filters(table, filters)
         sql = f"SELECT * FROM {quote_ident(table)}"
@@ -318,11 +337,14 @@ class BidsLake:
 
     def _warn_on_version_mismatch(self) -> None:
         meta = self._lake.meta()
-        if meta is not None and meta[0] != SCHEMA_VERSION:
+        if meta is None:
+            return
+        schema_version, _bids_version, _bidslake_version = meta
+        if schema_version != SCHEMA_VERSION:
             warnings.warn(
-                f"database indexed with BIDS schema {meta[0]}; bidslake is typed "
-                f"against {SCHEMA_VERSION}. Column names/types are validated at "
-                "runtime.",
+                f"database indexed with BIDS schema {schema_version}; bidslake is "
+                f"typed against {SCHEMA_VERSION}. Column names/types are validated "
+                "at runtime.",
                 stacklevel=3,
             )
 

@@ -9,7 +9,7 @@
 //! sidecar + event table, and maps the returned [`HedError`]s onto BIDS issues.
 //!
 //! [`HED_ERROR_KEYS`] lists the schema keys handled here; `test_all_schema_errors_implemented`
-//! treats them as implemented by this module rather than the [`super::get_all_errors`] registry.
+//! treats them as implemented by this module rather than the [`super::VALIDATORS`] registry.
 
 use crate::context::{BidsContext, DatasetContext};
 use crate::issues::{BidsIssue, DatasetIssues};

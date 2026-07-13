@@ -1,8 +1,11 @@
 """The generated schema types must stay in lockstep with the real database.
 
-This is the drift guard: the committed `COLUMNS` (emitted from the Rust schema
-model by `emit-types`) must equal what an actual ingested database contains.
-Paired in CI with a `git diff --exit-code` after re-running `emit-types`.
+This covers only the DB-introspected part: the committed `COLUMNS` (emitted from
+the Rust schema model by `emit-types`) must equal what an actual ingested database
+contains. The schema-JSON value-set `Literal`s (Entity/Datatype/Suffix/Modality/
+Sex/Handedness) are NOT checked here — the `codegen-drift` CI job
+(.github/workflows/ci.yml) re-runs `emit-types` and `git diff --exit-code`s
+`_generated.py`, which is what actually guards those.
 """
 
 from __future__ import annotations

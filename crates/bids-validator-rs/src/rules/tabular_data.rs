@@ -87,7 +87,7 @@ fn eval_initial_columns(
     schema: &BidsSchema,
     issues: &mut DatasetIssues,
 ) {
-    if !do_selectors_select(&rule.selectors, ctx_value) {
+    if !do_selectors_select(rule.selectors.as_deref(), ctx_value) {
         return;
     }
     let Some(initial) = &rule.initial_columns else {
@@ -133,7 +133,7 @@ fn eval_tabular_rule(
     schema: &BidsSchema,
     issues: &mut DatasetIssues,
 ) {
-    if !do_selectors_select(&rule.selectors, ctx_value) {
+    if !do_selectors_select(rule.selectors.as_deref(), ctx_value) {
         return;
     }
 

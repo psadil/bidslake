@@ -18,13 +18,15 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 
-from . import _bidslake
 from .file import BidsFile
 from .layout import BidsLake, Table
 from .paths import RemotePathError
 from .schema import C
 
-__all__ = ["BidsFile", "BidsLake", "C", "RemotePathError", "Table", "_bidslake", "open"]
+# `_bidslake` (the compiled extension) is intentionally not re-exported here — it
+# is a private implementation detail, imported and used by `layout`. It remains
+# importable as `bidslake._bidslake` for anyone who needs it.
+__all__ = ["BidsFile", "BidsLake", "C", "RemotePathError", "Table", "open"]
 
 
 def open(

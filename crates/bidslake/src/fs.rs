@@ -31,10 +31,11 @@ pub trait BidsFileSystem: Send + Sync {
         self.read_to_string(path)
     }
 
-    /// Resolve a dataset-relative path to a **local filesystem path** that DuckDB's
-    /// `read_csv` can open directly. For [`LocalFileSystem`] this is a no-op join
-    /// onto the root; a remote backend must download the object to a temp file.
-    /// Used by the tabular ingest, which lets DuckDB parse TSVs natively.
+    /// Resolve a dataset-relative path to a source string DuckDB's `read_csv` can
+    /// open directly: an absolute local path for [`LocalFileSystem`] (a no-op join
+    /// onto the root), or an `s3://` URL for the S3 backend — served via httpfs, not
+    /// downloaded to a temp file. Used by the tabular ingest, which lets DuckDB parse
+    /// TSVs natively. (Despite the name, nothing is materialized to disk for S3.)
     fn materialize(&self, path: &Path) -> BoxFuture<'_, Result<PathBuf>>;
 
     /// Get the root path/URI of the dataset

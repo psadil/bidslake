@@ -1,14 +1,48 @@
 //! Thin wrapper over the DuckDB connection.
 //!
 //! [`BidsDb`] owns the `duckdb::Connection` and exposes the write primitives the
-//! ingestion pipeline uses. Row shaping and SQL generation live in
-//! [`crate::schema`]; this module just routes calls to it and holds the two
+//! ingestion pipeline uses. Row shaping and SQL generation for these methods live
+//! in [`crate::schema`]; this module just routes calls to it and holds the two
 //! hand-written insert paths ([`BidsDb::insert_diffusion`],
 //! [`BidsDb::insert_file_association`]) for the static tables.
+//!
+//! Note that the tabular ingest in [`crate::bids`] (and the driver in `main`) also
+//! execute their own hand-built SQL directly against the public [`BidsDb::conn`] —
+//! the batched `read_csv` inserts, re-index `DELETE`s, and count-back `SELECT`s — by
+//! design; this module deliberately does not gate every statement.
 
 use crate::schema::{self, Schema};
 use duckdb::{Connection, Result, params};
 use serde_json::Value;
+
+/// Disposition of a tabular file in the `tabular_files` catalog (see
+/// [`schema::CREATE_TABULAR_FILES_TABLE`] for the column's documentation). A
+/// closed set as a type — not a `&str` — so a typo can't silently corrupt the
+/// tabular-coverage invariant this column backs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabularStatus {
+    /// Its rows are in `table_name` (`n_rows` of them).
+    Ingested,
+    /// A compressed continuous recording left on disk; `table_name` names the
+    /// table it *would* map to.
+    OnDisk,
+    /// A tabular file the BIDS schema does not describe (`table_name` NULL).
+    Skipped,
+    /// A batch `INSERT` execution failure dropped this file's rows for the run.
+    Failed,
+}
+
+impl TabularStatus {
+    /// The literal stored in the `status` column.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TabularStatus::Ingested => "ingested",
+            TabularStatus::OnDisk => "on_disk",
+            TabularStatus::Skipped => "skipped",
+            TabularStatus::Failed => "failed",
+        }
+    }
+}
 
 /// A cross-reference between two files derived at ingest (e.g. an fmap's
 /// `IntendedFor`). Written to the `file_associations` table.
@@ -41,8 +75,6 @@ impl BidsDb {
             self.conn.execute(&sql, [])?;
         }
         // Create static tables (diffusion and file associations)
-        // Files table removed - no longer needed
-        // self.conn.execute(schema::CREATE_FILES_TABLE, [])?;
         self.conn.execute(schema::CREATE_DIFFUSION_TABLE, [])?;
         self.conn
             .execute(schema::CREATE_FILE_ASSOCIATIONS_TABLE, [])?;
@@ -80,21 +112,29 @@ impl BidsDb {
         Ok(())
     }
 
-    /// Record a tabular file's disposition (`ingested` / `on_disk` / `skipped`).
-    /// Backs the tabular-data invariant. `INSERT OR REPLACE` keeps it correct
-    /// across re-indexing.
+    /// Record a tabular file's [`TabularStatus`] disposition. Backs the
+    /// tabular-data invariant. `INSERT OR REPLACE` keeps it correct across
+    /// re-indexing.
     pub fn record_tabular_file(
         &self,
         dataset_id: &str,
         file_path: &str,
         table_name: Option<&str>,
         n_rows: i64,
-        status: &str,
-    ) -> Result<()> {
+        status: TabularStatus,
+    ) -> anyhow::Result<()> {
+        use anyhow::Context as _;
         let mut stmt = self.conn.prepare_cached(
             "INSERT OR REPLACE INTO tabular_files (dataset_id, file_path, table_name, n_rows, status) VALUES (?, ?, ?, ?, ?)",
         )?;
-        stmt.execute(params![dataset_id, file_path, table_name, n_rows, status])?;
+        stmt.execute(params![
+            dataset_id,
+            file_path,
+            table_name,
+            n_rows,
+            status.as_str()
+        ])
+        .with_context(|| format!("recording tabular file {file_path} as {}", status.as_str()))?;
         Ok(())
     }
 

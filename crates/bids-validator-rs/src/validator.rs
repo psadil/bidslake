@@ -21,6 +21,20 @@ use crate::rules::sidecars::check_sidecar_rules;
 use crate::rules::tabular_data::check_tabular_rules;
 use crate::schema::BidsSchema;
 
+/// An error returned by [`validate`]. A typed error (with a `source` chain) rather
+/// than a `String`, so callers can match on it and `?`-compose it.
+#[derive(Debug, thiserror::Error)]
+pub enum ValidatorError {
+    /// The dataset directory tree could not be read.
+    #[error("reading dataset tree at {path}")]
+    ReadTree {
+        /// The dataset root that could not be read.
+        path: std::path::PathBuf,
+        /// The underlying IO error.
+        source: std::io::Error,
+    },
+}
+
 /// Validates a BIDS dataset against a schema.
 ///
 /// # Arguments
@@ -32,12 +46,12 @@ use crate::schema::BidsSchema;
 /// # Returns
 ///
 /// Returns a `DatasetIssues` object containing all discovered errors and warnings,
-/// or an error message if the dataset tree could not be read.
+/// or a [`ValidatorError`] if the dataset tree could not be read.
 pub async fn validate(
     dataset_path: &Path,
     schema: &BidsSchema,
     config: Option<&ValidatorConfig>,
-) -> Result<DatasetIssues, String> {
+) -> Result<DatasetIssues, ValidatorError> {
     // Collect ignored codes from config
     let mut ignored_codes = HashSet::new();
     if let Some(cfg) = config {
@@ -48,8 +62,11 @@ pub async fn validate(
 
     // Read the file tree
     let pseudo_exts = schema.pseudo_file_extensions();
-    let tree = read_file_tree(dataset_path, &pseudo_exts)
-        .map_err(|e| format!("Error reading dataset: {}", e))?;
+    let tree =
+        read_file_tree(dataset_path, &pseudo_exts).map_err(|source| ValidatorError::ReadTree {
+            path: dataset_path.to_path_buf(),
+            source,
+        })?;
 
     // Prepare main issues collector
     let mut issues = DatasetIssues {

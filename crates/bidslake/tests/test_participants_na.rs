@@ -33,7 +33,7 @@ async fn test_participants_tsv_na() -> anyhow::Result<()> {
     writeln!(part_file, "sub-02\tn/a\tF")?;
 
     let db = BidsDb::new(db_path.to_str().unwrap())?;
-    let schema = Schema::load(None);
+    let schema = Schema::load(None).unwrap();
     db.create_tables(&schema)?;
 
     // Check the schema of participants table
@@ -71,7 +71,7 @@ async fn test_participants_tsv_na() -> anyhow::Result<()> {
     assert!(found_sex, "Sex column not found in participants table");
 
     let fs = Box::new(LocalFileSystem::new(dataset_path));
-    let mut parser = BidsParser::new(fs, None, schema);
+    let mut parser = BidsParser::new(fs, None, schema, None);
 
     // This should fail if age is numeric and n/a is not handled
     parser.parse(&db).await?;

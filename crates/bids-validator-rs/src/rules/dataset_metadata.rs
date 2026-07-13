@@ -21,7 +21,7 @@ pub fn check_dataset_metadata_rules(
     issues: &mut DatasetIssues,
 ) {
     for (rule_name, rule) in &schema.dataset_metadata_rules {
-        if !do_selectors_select(&rule.selectors, ctx_value) {
+        if !do_selectors_select(rule.selectors.as_deref(), ctx_value) {
             continue;
         }
 

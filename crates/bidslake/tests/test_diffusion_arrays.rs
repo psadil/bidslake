@@ -34,11 +34,11 @@ async fn test_diffusion_numeric_arrays() -> Result<()> {
     // Run bidslake
     let db_path = temp_dir.path().join("test.duckdb");
     let db = BidsDb::new(db_path.to_str().unwrap())?;
-    let schema = Schema::load(None);
+    let schema = Schema::load(None).unwrap();
     db.create_tables(&schema)?;
 
     let fs = Box::new(LocalFileSystem::new(dataset_path));
-    let mut parser = BidsParser::new(fs, None, schema);
+    let mut parser = BidsParser::new(fs, None, schema, None);
     parser.parse(&db).await?;
 
     // One row per volume: the .bval had 4 values, so 4 diffusion rows.

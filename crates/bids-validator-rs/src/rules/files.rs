@@ -337,7 +337,7 @@ fn check_rule_group<T: MatchableRule>(
 ) {
     for (key, rule) in group {
         let rule_path = format!("{}.{}", path_prefix, key);
-        if !do_selectors_select(&rule.selectors().cloned(), ctx_val) {
+        if !do_selectors_select(rule.selectors().map(Vec::as_slice), ctx_val) {
             continue;
         }
         if rule.match_context(context) {

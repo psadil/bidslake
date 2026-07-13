@@ -12,7 +12,6 @@ license = { text = "MIT" }
 dependencies = [
     "polars>=1.9",
     "universal_pathlib",
-    "pydantic>=2",
 ]
 
 [project.optional-dependencies]

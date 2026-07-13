@@ -20,11 +20,11 @@ use std::path::{Path, PathBuf};
 /// erroring statement poisons the transaction for the rest of the ingest.
 pub async fn ingest(dataset_path: impl AsRef<Path>) -> Result<BidsDb> {
     let db = BidsDb::new(":memory:")?;
-    let schema = Schema::load(None);
+    let schema = Schema::load(None).unwrap();
     db.create_tables(&schema)?;
 
     let fs = Box::new(LocalFileSystem::new(dataset_path.as_ref().to_path_buf()));
-    let mut parser = BidsParser::new(fs, None, schema);
+    let mut parser = BidsParser::new(fs, None, schema, None);
     let txn = db.conn.unchecked_transaction()?;
     parser.parse(&db).await?;
     txn.commit()?;
