@@ -40,18 +40,14 @@
                       ]
                     }
                   },
-                  "required": [
-                    "extension"
-                  ],
+                  "required": ["extension"],
                   "additionalProperties": false
                 },
                 "inherit": {
                   "type": "boolean"
                 }
               },
-              "required": [
-                "target"
-              ],
+              "required": ["target"],
               "additionalProperties": false
             }
           },
@@ -71,10 +67,7 @@
               },
               "result": {}
             },
-            "required": [
-              "expression",
-              "result"
-            ],
+            "required": ["expression", "result"],
             "additionalProperties": false
           }
         },
@@ -89,12 +82,7 @@
           }
         }
       },
-      "required": [
-        "associations",
-        "context",
-        "expression_tests",
-        "versions"
-      ]
+      "required": ["associations", "context", "expression_tests", "versions"]
     },
     "objects": {
       "type": "object",
@@ -106,37 +94,23 @@
               "allOf": [
                 {
                   "anyOf": [
-                    {
-                      "$ref": "#/definitions/termTypes/JSONSchema"
-                    },
+                    { "$ref": "#/definitions/termTypes/JSONSchema" },
                     {
                       "type": "object",
                       "properties": {
-                        "definition": {
-                          "type": "object"
-                        }
+                        "definition": { "type": "object" }
                       },
-                      "required": [
-                        "definition"
-                      ]
+                      "required": ["definition"]
                     }
                   ]
                 },
-                {
-                  "$ref": "#/definitions/termTypes/general"
-                },
-                {
-                  "$ref": "#/definitions/termTypes/nameValue"
-                },
+                { "$ref": "#/definitions/termTypes/general" },
+                { "$ref": "#/definitions/termTypes/nameValue" },
                 {
                   "type": "object",
                   "properties": {
-                    "format": {
-                      "$ref": "#/definitions/enums/formats"
-                    },
-                    "unit": {
-                      "type": "string"
-                    }
+                    "format": { "$ref": "#/definitions/enums/formats" },
+                    "unit": { "type": "string" }
                   }
                 }
               ],
@@ -160,12 +134,8 @@
           "patternProperties": {
             "^[a-zA-Z0-9_]+$": {
               "allOf": [
-                {
-                  "$ref": "#/definitions/termTypes/general"
-                },
-                {
-                  "$ref": "#/definitions/termTypes/value"
-                }
+                { "$ref": "#/definitions/termTypes/general" },
+                { "$ref": "#/definitions/termTypes/value" }
               ],
               "unevaluatedProperties": false
             }
@@ -177,25 +147,15 @@
           "patternProperties": {
             "^[a-zA-Z0-9_]+$": {
               "allOf": [
-                {
-                  "$ref": "#/definitions/termTypes/JSONSchema"
-                },
-                {
-                  "$ref": "#/definitions/termTypes/general"
-                },
-                {
-                  "$ref": "#/definitions/termTypes/nameValue"
-                },
+                { "$ref": "#/definitions/termTypes/JSONSchema" },
+                { "$ref": "#/definitions/termTypes/general" },
+                { "$ref": "#/definitions/termTypes/nameValue" },
                 {
                   "type": "object",
                   "properties": {
-                    "format": {
-                      "$ref": "#/definitions/enums/formats"
-                    }
+                    "format": { "$ref": "#/definitions/enums/formats" }
                   },
-                  "required": [
-                    "format"
-                  ]
+                  "required": ["format"]
                 }
               ],
               "unevaluatedProperties": false
@@ -208,27 +168,14 @@
           "patternProperties": {
             "^[a-zA-Z0-9][a-zA-Z0-9_-]*$": {
               "allOf": [
-                {
-                  "$ref": "#/definitions/termTypes/general"
-                },
-                {
-                  "$ref": "#/definitions/termTypes/value"
-                },
-                {
-                  "properties": {
-                    "tags": {
-                      "type": "array"
-                    }
-                  }
-                }
+                { "$ref": "#/definitions/termTypes/general" },
+                { "$ref": "#/definitions/termTypes/value" },
+                { "properties": { "tags": { "type": "array" } } }
               ]
             },
             "^_[a-zA-Z0-9_-]+$": {
               "$ref": "https://json-schema.org/draft/2020-12/schema#",
-              "required": [
-                "type",
-                "enum"
-              ]
+              "required": ["type", "enum"]
             },
             "unevaluatedProperties": false
           },
@@ -239,12 +186,8 @@
           "patternProperties": {
             "^[a-zA-Z0-9_]+$": {
               "allOf": [
-                {
-                  "$ref": "#/definitions/termTypes/general"
-                },
-                {
-                  "$ref": "#/definitions/termTypes/value"
-                }
+                { "$ref": "#/definitions/termTypes/general" },
+                { "$ref": "#/definitions/termTypes/value" }
               ],
               "unevaluatedProperties": false
             }
@@ -256,18 +199,10 @@
           "patternProperties": {
             "^[a-zA-Z0-9_]+$": {
               "allOf": [
+                { "$ref": "#/definitions/termTypes/general" },
                 {
-                  "$ref": "#/definitions/termTypes/general"
-                },
-                {
-                  "properties": {
-                    "file_type": {
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "file_type"
-                  ]
+                  "properties": { "file_type": { "type": "string" } },
+                  "required": ["file_type"]
                 }
               ],
               "unevaluatedProperties": false
@@ -277,14 +212,10 @@
         },
         "formats": {
           "type": "object",
-          "propertyNames": {
-            "$ref": "#/definitions/enums/formats"
-          },
+          "propertyNames": { "$ref": "#/definitions/enums/formats" },
           "additionalProperties": {
             "allOf": [
-              {
-                "$ref": "#/definitions/termTypes/general"
-              },
+              { "$ref": "#/definitions/termTypes/general" },
               {
                 "type": "object",
                 "properties": {
@@ -292,9 +223,7 @@
                     "$ref": "https://json-schema.org/draft/2020-12/meta/validation#/properties/pattern"
                   }
                 },
-                "required": [
-                  "pattern"
-                ]
+                "required": ["pattern"]
               }
             ],
             "unevaluatedProperties": false
@@ -305,24 +234,16 @@
           "patternProperties": {
             "^[a-zA-Z0-9_]+$": {
               "allOf": [
-                {
-                  "$ref": "#/definitions/termTypes/JSONSchema"
-                },
-                {
-                  "$ref": "#/definitions/termTypes/general"
-                },
-                {
-                  "$ref": "#/definitions/termTypes/nameValue"
-                },
+                { "$ref": "#/definitions/termTypes/JSONSchema" },
+                { "$ref": "#/definitions/termTypes/general" },
+                { "$ref": "#/definitions/termTypes/nameValue" },
                 {
                   "type": "object",
                   "properties": {
                     "recommended": {
                       "$ref": "https://json-schema.org/draft/2020-12/meta/validation#/properties/required"
                     },
-                    "unit": {
-                      "type": "string"
-                    }
+                    "unit": { "type": "string" }
                   }
                 }
               ],
@@ -356,27 +277,17 @@
           "patternProperties": {
             "^[a-zA-Z0-9_]+$": {
               "allOf": [
-                {
-                  "$ref": "#/definitions/termTypes/general"
-                },
-                {
-                  "$ref": "#/definitions/termTypes/value"
-                },
+                { "$ref": "#/definitions/termTypes/general" },
+                { "$ref": "#/definitions/termTypes/value" },
                 {
                   "type": "object",
                   "properties": {
-                    "unit": {
-                      "type": "string"
-                    },
+                    "unit": { "type": "string" },
                     "anyOf": {
                       "$ref": "https://json-schema.org/draft/2020-12/meta/applicator#/properties/anyOf"
                     },
-                    "maxValue": {
-                      "type": "number"
-                    },
-                    "minValue": {
-                      "type": "number"
-                    }
+                    "maxValue": { "type": "number" },
+                    "minValue": { "type": "number" }
                   }
                 }
               ],
@@ -415,14 +326,8 @@
                   "type": "object",
                   "properties": {
                     "issue": {
-                      "allOf": [
-                        {
-                          "$ref": "#/definitions/ruleTypes/issue"
-                        }
-                      ],
-                      "required": [
-                        "level"
-                      ]
+                      "allOf": [{ "$ref": "#/definitions/ruleTypes/issue" }],
+                      "required": ["level"]
                     },
                     "selectors": {
                       "$ref": "#/definitions/ruleTypes/expressionList"
@@ -431,11 +336,7 @@
                       "$ref": "#/definitions/ruleTypes/expressionList"
                     }
                   },
-                  "required": [
-                    "checks",
-                    "selectors",
-                    "issue"
-                  ],
+                  "required": ["checks", "selectors", "issue"],
                   "additionalProperties": false
                 }
               }
@@ -454,12 +355,8 @@
                   "patternProperties": {
                     "^[a-zA-Z0-9_]+$": {
                       "anyOf": [
-                        {
-                          "$ref": "#/definitions/pathRule"
-                        },
-                        {
-                          "$ref": "#/definitions/stemRule"
-                        }
+                        { "$ref": "#/definitions/pathRule" },
+                        { "$ref": "#/definitions/stemRule" }
                       ]
                     }
                   },
@@ -470,22 +367,15 @@
                   "patternProperties": {
                     "^[a-zA-Z0-9_]+$": {
                       "anyOf": [
-                        {
-                          "$ref": "#/definitions/stemRule"
-                        },
-                        {
-                          "$ref": "#/definitions/suffixRule"
-                        }
+                        { "$ref": "#/definitions/stemRule" },
+                        { "$ref": "#/definitions/suffixRule" }
                       ]
                     }
                   },
                   "additionalProperties": false
                 }
               },
-              "required": [
-                "core",
-                "tables"
-              ],
+              "required": ["core", "tables"],
               "additionalProperties": false
             },
             "deriv": {
@@ -494,9 +384,7 @@
                 "^[a-z_]+$": {
                   "type": "object",
                   "patternProperties": {
-                    "^[a-zA-Z0-9_]+$": {
-                      "$ref": "#/definitions/suffixRule"
-                    }
+                    "^[a-zA-Z0-9_]+$": { "$ref": "#/definitions/suffixRule" }
                   }
                 }
               },
@@ -508,9 +396,7 @@
                 "^[a-z]+$": {
                   "type": "object",
                   "patternProperties": {
-                    "^[a-zA-Z0-9_]+$": {
-                      "$ref": "#/definitions/suffixRule"
-                    }
+                    "^[a-zA-Z0-9_]+$": { "$ref": "#/definitions/suffixRule" }
                   },
                   "additionalProperties": false
                 }
@@ -518,11 +404,7 @@
               "additionalProperties": false
             }
           },
-          "required": [
-            "common",
-            "deriv",
-            "raw"
-          ],
+          "required": ["common", "deriv", "raw"],
           "additionalProperties": false
         },
         "json": {
@@ -537,17 +419,10 @@
             "^derivatives$": {
               "type": "object",
               "properties": {
-                "atlas": {
-                  "$ref": "#/definitions/json"
-                },
-                "common_derivatives": {
-                  "$ref": "#/definitions/json"
-                }
+                "atlas": { "$ref": "#/definitions/json" },
+                "common_derivatives": { "$ref": "#/definitions/json" }
               },
-              "required": [
-                "atlas",
-                "common_derivatives"
-              ],
+              "required": ["atlas", "common_derivatives"],
               "additionalProperties": false
             },
             "^(?!derivatives$)[a-z_]+$": {
@@ -567,9 +442,7 @@
                   "$ref": "#/definitions/tabular_data"
                 }
               },
-              "required": [
-                "common_derivatives"
-              ],
+              "required": ["common_derivatives"],
               "additionalProperties": false
             },
             "^(?!derivatives$)[a-z_]+$": {
@@ -580,24 +453,18 @@
         },
         "metaentities": {
           "type": "array",
-          "items": {
-            "type": "string"
-          }
+          "items": { "type": "string" }
         },
         "common_principles": {
           "type": "array",
-          "items": {
-            "type": "string"
-          }
+          "items": { "type": "string" }
         },
         "directories": {
           "type": "object"
         },
         "entities": {
           "type": "array",
-          "items": {
-            "type": "string"
-          }
+          "items": { "type": "string" }
         },
         "errors": {
           "type": "object",
@@ -605,26 +472,14 @@
             "^[a-zA-Z0-9_]+$": {
               "type": "object",
               "properties": {
-                "code": {
-                  "type": "string"
-                },
-                "message": {
-                  "type": "string"
-                },
-                "level": {
-                  "enum": [
-                    "error",
-                    "warning"
-                  ]
-                },
+                "code": { "type": "string" },
+                "message": { "type": "string" },
+                "level": { "enum": ["error", "warning"] },
                 "selectors": {
                   "$ref": "#/definitions/ruleTypes/expressionList"
                 }
               },
-              "required": [
-                "message",
-                "level"
-              ],
+              "required": ["message", "level"],
               "additionalProperties": false
             }
           },
@@ -638,15 +493,10 @@
               "properties": {
                 "datatypes": {
                   "type": "array",
-                  "items": {
-                    "type": "string",
-                    "pattern": "^[a-z]+$"
-                  }
+                  "items": { "type": "string", "pattern": "^[a-z]+$" }
                 }
               },
-              "required": [
-                "datatypes"
-              ],
+              "required": ["datatypes"],
               "additionalProperties": false
             }
           }
@@ -673,13 +523,7 @@
       "type": "string"
     }
   },
-  "required": [
-    "meta",
-    "objects",
-    "rules",
-    "bids_version",
-    "schema_version"
-  ],
+  "required": ["meta", "objects", "rules", "bids_version", "schema_version"],
   "additionalProperties": false,
   "definitions": {
     "enums": {
@@ -710,93 +554,46 @@
       "requirement_level": {
         "$comment": "Requirement levels that may apply to terms",
         "type": "string",
-        "enum": [
-          "required",
-          "recommended",
-          "optional",
-          "deprecated"
-        ]
+        "enum": ["required", "recommended", "optional", "deprecated"]
       }
     },
     "termTypes": {
       "general": {
         "type": "object",
         "properties": {
-          "display_name": {
-            "type": "string"
-          },
-          "description": {
-            "type": "string"
-          }
+          "display_name": { "type": "string" },
+          "description": { "type": "string" }
         },
-        "required": [
-          "display_name",
-          "description"
-        ]
+        "required": ["display_name", "description"]
       },
       "JSONSchema": {
         "$ref": "https://json-schema.org/draft/2020-12/schema#",
-        "anyOf": [
-          {
-            "required": [
-              "type"
-            ]
-          },
-          {
-            "required": [
-              "anyOf"
-            ]
-          }
-        ]
+        "anyOf": [{ "required": ["type"] }, { "required": ["anyOf"] }]
       },
       "nameValue": {
         "type": "object",
-        "properties": {
-          "name": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "name"
-        ]
+        "properties": { "name": { "type": "string" } },
+        "required": ["name"]
       },
       "value": {
         "type": "object",
-        "properties": {
-          "value": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "value"
-        ]
+        "properties": { "value": { "type": "string" } },
+        "required": ["value"]
       }
     },
     "ruleTypes": {
       "field": {
         "anyOf": [
-          {
-            "$ref": "#/definitions/enums/requirement_level"
-          },
+          { "$ref": "#/definitions/enums/requirement_level" },
           {
             "type": "object",
             "properties": {
-              "level": {
-                "$ref": "#/definitions/enums/requirement_level"
-              },
-              "level_addendum": {
-                "type": "string"
-              },
-              "description_addendum": {
-                "type": "string"
-              },
-              "issue": {
-                "$ref": "#/definitions/ruleTypes/issue"
-              }
+              "level": { "$ref": "#/definitions/enums/requirement_level" },
+              "level_addendum": { "type": "string" },
+              "description_addendum": { "type": "string" },
+              "issue": { "$ref": "#/definitions/ruleTypes/issue" }
             },
-            "required": [
-              "level"
-            ],
+            "required": ["level"],
             "additionalProperties": false
           }
         ]
@@ -804,23 +601,11 @@
       "issue": {
         "type": "object",
         "properties": {
-          "code": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          },
-          "level": {
-            "enum": [
-              "error",
-              "warning"
-            ]
-          }
+          "code": { "type": "string" },
+          "message": { "type": "string" },
+          "level": { "enum": ["error", "warning"] }
         },
-        "required": [
-          "code",
-          "message"
-        ],
+        "required": ["code", "message"],
         "additionalProperties": false
       },
       "expressionList": {
@@ -836,9 +621,7 @@
         "^[a-zA-Z0-9_]+$": {
           "type": "object",
           "properties": {
-            "selectors": {
-              "$ref": "#/definitions/ruleTypes/expressionList"
-            },
+            "selectors": { "$ref": "#/definitions/ruleTypes/expressionList" },
             "fields": {
               "type": "object",
               "patternProperties": {
@@ -849,10 +632,7 @@
               "additionalProperties": false
             }
           },
-          "required": [
-            "selectors",
-            "fields"
-          ],
+          "required": ["selectors", "fields"],
           "additionalProperties": false
         }
       },
@@ -864,9 +644,7 @@
         "^[a-zA-Z0-9_]+$": {
           "type": "object",
           "properties": {
-            "selectors": {
-              "$ref": "#/definitions/ruleTypes/expressionList"
-            },
+            "selectors": { "$ref": "#/definitions/ruleTypes/expressionList" },
             "columns": {
               "type": "object",
               "patternProperties": {
@@ -878,31 +656,15 @@
             },
             "additional_columns": {
               "type": "string",
-              "enum": [
-                "allowed",
-                "allowed_if_defined",
-                "not_allowed",
-                "n/a"
-              ]
+              "enum": ["allowed", "allowed_if_defined", "not_allowed", "n/a"]
             },
-            "index_columns": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
+            "index_columns": { "type": "array", "items": { "type": "string" } },
             "initial_columns": {
               "type": "array",
-              "items": {
-                "type": "string"
-              }
+              "items": { "type": "string" }
             }
           },
-          "required": [
-            "selectors",
-            "columns",
-            "additional_columns"
-          ],
+          "required": ["selectors", "columns", "additional_columns"],
           "additionalProperties": false
         }
       }
@@ -910,126 +672,58 @@
     "pathRule": {
       "type": "object",
       "properties": {
-        "selectors": {
-          "$ref": "#/definitions/ruleTypes/expressionList"
-        },
-        "level": {
-          "enum": [
-            "optional",
-            "required"
-          ]
-        },
-        "path": {
-          "type": "string"
-        }
+        "selectors": { "$ref": "#/definitions/ruleTypes/expressionList" },
+        "level": { "enum": ["optional", "required"] },
+        "path": { "type": "string" }
       },
-      "required": [
-        "level",
-        "path"
-      ],
+      "required": ["level", "path"],
       "additionalProperties": false
     },
     "stemRule": {
       "type": "object",
       "properties": {
-        "selectors": {
-          "$ref": "#/definitions/ruleTypes/expressionList"
-        },
-        "level": {
-          "enum": [
-            "optional",
-            "recommended",
-            "required"
-          ]
-        },
+        "selectors": { "$ref": "#/definitions/ruleTypes/expressionList" },
+        "level": { "enum": ["optional", "recommended", "required"] },
         "datatypes": {
           "type": "array",
-          "items": {
-            "type": "string",
-            "pattern": "^[a-z]+$"
-          }
+          "items": { "type": "string", "pattern": "^[a-z]+$" }
         },
-        "stem": {
-          "type": "string"
-        },
-        "extensions": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        }
+        "stem": { "type": "string" },
+        "extensions": { "type": "array", "items": { "type": "string" } }
       },
-      "required": [
-        "level",
-        "stem",
-        "extensions"
-      ],
+      "required": ["level", "stem", "extensions"],
       "additionalProperties": false
     },
     "suffixRule": {
       "type": "object",
       "properties": {
-        "selectors": {
-          "$ref": "#/definitions/ruleTypes/expressionList"
-        },
-        "level": {
-          "enum": [
-            "optional",
-            "recommended",
-            "required"
-          ]
-        },
+        "selectors": { "$ref": "#/definitions/ruleTypes/expressionList" },
+        "level": { "enum": ["optional", "recommended", "required"] },
         "datatypes": {
           "type": "array",
-          "items": {
-            "type": "string",
-            "pattern": "^[a-z]+$"
-          }
+          "items": { "type": "string", "pattern": "^[a-z]+$" }
         },
         "suffixes": {
           "type": "array",
-          "items": {
-            "type": "string",
-            "pattern": "^[a-zA-Z0-9]+$"
-          }
+          "items": { "type": "string", "pattern": "^[a-zA-Z0-9]+$" }
         },
-        "extensions": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
+        "extensions": { "type": "array", "items": { "type": "string" } },
         "entities": {
           "type": "object",
           "patternProperties": {
             "^[a-z]+$": {
               "anyOf": [
-                {
-                  "enum": [
-                    "optional",
-                    "required"
-                  ]
-                },
+                { "enum": ["optional", "required"] },
                 {
                   "type": "object",
                   "properties": {
-                    "level": {
-                      "enum": [
-                        "optional",
-                        "required"
-                      ]
-                    },
+                    "level": { "enum": ["optional", "required"] },
                     "enum": {
                       "type": "array",
-                      "items": {
-                        "type": "string"
-                      }
+                      "items": { "type": "string" }
                     }
                   },
-                  "required": [
-                    "level",
-                    "enum"
-                  ]
+                  "required": ["level", "enum"]
                 }
               ]
             }
@@ -1037,11 +731,7 @@
           "additionalProperties": false
         }
       },
-      "required": [
-        "suffixes",
-        "extensions",
-        "entities"
-      ],
+      "required": ["suffixes", "extensions", "entities"],
       "additionalProperties": false
     }
   }

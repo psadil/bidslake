@@ -131,7 +131,7 @@
 
 pub mod dynamic;
 pub mod tabular;
-pub use dynamic::Schema;
+pub use dynamic::{AppliedOverlay, Schema};
 
 // Provenance for the tabular-data invariant: one row per tabular file the walk
 // encountered (minus `.bidsignore`d ones), so nothing is silently dropped.

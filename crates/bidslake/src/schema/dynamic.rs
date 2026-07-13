@@ -48,6 +48,16 @@ use std::collections::HashMap;
 /// metaschema; its `objects.*` and `rules.*` sections drive table generation.
 const SCHEMA_JSON: &str = bids_schema::SCHEMA_JSON;
 
+/// One overlay applied to the base schema. Its provenance is stamped into
+/// `bidslake_overlays` (see [`crate::db::BidsDb`]).
+#[derive(Clone, Debug)]
+pub struct AppliedOverlay {
+    /// How the overlay was named: a bundled pipeline name (`fmriprep`) or a file path.
+    pub source: String,
+    /// The overlay's parsed JSON content, kept verbatim for reproducibility.
+    pub content: Value,
+}
+
 #[derive(Clone, Debug)]
 pub struct Schema {
     schema: Value,
@@ -58,6 +68,8 @@ pub struct Schema {
     table_columns: HashMap<String, Vec<(String, String, String)>>, // table -> [(col_name, col_type, json_key)]
     primary_keys: HashMap<String, Vec<String>>,                    // table -> [pk_col_names]
     insert_sql: HashMap<String, String>, // table -> prebuilt INSERT statement
+    /// The overlays merged into this schema, in application order (empty if none).
+    overlays: Vec<AppliedOverlay>,
 }
 
 impl Schema {
@@ -66,8 +78,20 @@ impl Schema {
     /// `Err` rather than a panic. `None` uses the embedded schema, a build
     /// invariant that is `.expect()`ed.
     pub fn load(schema_path: Option<&str>) -> anyhow::Result<Self> {
+        Self::load_with_overlays(schema_path, &[])
+    }
+
+    /// Load the schema, deep-merging any additive `overlays` (see
+    /// [`bids_schema::overlay`]) onto the base before generating the table model, then
+    /// validating the merged schema against the BIDS metaschema. A conflicting or
+    /// non-conformant overlay is an `Err`. Merged fragments need no further handling
+    /// here: the generators below all read the schema `Value`.
+    pub fn load_with_overlays(
+        schema_path: Option<&str>,
+        overlays: &[AppliedOverlay],
+    ) -> anyhow::Result<Self> {
         use anyhow::Context as _;
-        let schema: Value = match schema_path {
+        let mut schema: Value = match schema_path {
             Some(path) => {
                 let content = std::fs::read_to_string(path)
                     .with_context(|| format!("reading schema file {path}"))?;
@@ -77,6 +101,18 @@ impl Schema {
             None => serde_json::from_str(SCHEMA_JSON).expect("embedded schema.json must parse"),
         };
 
+        if !overlays.is_empty() {
+            // Keep the pre-overlay schema to validate only what the overlays *add*
+            // (the base schema itself has known, tolerated metaschema deviations).
+            let base = schema.clone();
+            for overlay in overlays {
+                bids_schema::overlay::merge_into(&mut schema, &overlay.content)
+                    .with_context(|| format!("merging schema overlay {:?}", overlay.source))?;
+            }
+            bids_schema::overlay::validate_effective(&base, &schema)
+                .context("validating augmented schema against the BIDS metaschema")?;
+        }
+
         let tabular = Tabular::load(&schema);
         let mut instance = Schema {
             schema,
@@ -85,10 +121,16 @@ impl Schema {
             table_columns: HashMap::new(),
             primary_keys: HashMap::new(),
             insert_sql: HashMap::new(),
+            overlays: overlays.to_vec(),
         };
         instance.generate_definitions();
         instance.build_insert_statements();
         Ok(instance)
+    }
+
+    /// The overlays merged into this schema, in application order (empty if none).
+    pub fn overlays(&self) -> &[AppliedOverlay] {
+        &self.overlays
     }
 
     /// The schema-driven tabular model — which tables exist and their columns,

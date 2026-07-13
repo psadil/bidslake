@@ -14,6 +14,14 @@
 use crate::schema::{self, Schema};
 use duckdb::{Connection, Result, params};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+
+/// Lowercase-hex SHA-256 of `bytes` (overlay provenance digests in `stamp_schema`).
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
 
 /// Disposition of a tabular file in the `tabular_files` catalog (see
 /// [`schema::CREATE_TABULAR_FILES_TABLE`] for the column's documentation). A
@@ -80,6 +88,7 @@ impl BidsDb {
             .execute(schema::CREATE_FILE_ASSOCIATIONS_TABLE, [])?;
         self.conn.execute(schema::CREATE_TABULAR_FILES_TABLE, [])?;
         self.stamp_meta(schema)?;
+        self.stamp_schema(schema)?;
         Ok(())
     }
 
@@ -109,6 +118,55 @@ impl BidsDb {
              SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM bidslake_meta)",
             params![schema_version, bids_version, env!("CARGO_PKG_VERSION")],
         )?;
+        Ok(())
+    }
+
+    /// Embed the effective schema so every database is self-describing: the Python
+    /// query side and the `--from-db` stubgen recover the exact schema the catalog was
+    /// built from without re-passing anything. When overlays were applied, their
+    /// provenance is also recorded (in `bidslake_overlays`, and as `overlay_digest`).
+    /// `bidslake_meta.schema_version` still holds the base version. Idempotent.
+    fn stamp_schema(&self, schema: &Schema) -> Result<()> {
+        let raw = schema.raw();
+        let base_schema_version = raw
+            .get("schema_version")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let effective_schema = serde_json::to_string(raw).unwrap_or_default();
+        let overlays = schema.overlays();
+        let overlay_digest: Option<String> = (!overlays.is_empty()).then(|| {
+            let contents: Vec<&Value> = overlays.iter().map(|o| &o.content).collect();
+            sha256_hex(&serde_json::to_vec(&contents).unwrap_or_default())
+        });
+
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS bidslake_schema (\
+             base_schema_version TEXT, effective_schema JSON, overlay_digest TEXT)",
+            [],
+        )?;
+        self.conn.execute(
+            "INSERT INTO bidslake_schema (base_schema_version, effective_schema, overlay_digest) \
+             SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM bidslake_schema)",
+            params![base_schema_version, effective_schema, overlay_digest],
+        )?;
+
+        if overlays.is_empty() {
+            return Ok(());
+        }
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS bidslake_overlays (\
+             idx INTEGER, source TEXT, sha256 TEXT, content JSON)",
+            [],
+        )?;
+        for (i, overlay) in overlays.iter().enumerate() {
+            let content = serde_json::to_string(&overlay.content).unwrap_or_default();
+            let sha = sha256_hex(content.as_bytes());
+            self.conn.execute(
+                "INSERT INTO bidslake_overlays (idx, source, sha256, content) \
+                 SELECT ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM bidslake_overlays WHERE idx = ?)",
+                params![i as i32, &overlay.source, sha, content, i as i32],
+            )?;
+        }
         Ok(())
     }
 

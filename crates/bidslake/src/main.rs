@@ -45,6 +45,13 @@ enum Commands {
         /// Path to BIDS schema JSON file (optional, uses embedded schema if not provided)
         #[arg(long)]
         schema_path: Option<PathBuf>,
+
+        /// Schema overlay to merge onto the base schema, so bidslake can index
+        /// "bidsish" derivative outputs (e.g. fMRIPrep). Either a bundled pipeline
+        /// name (fmriprep, mriqc, qsiprep) or a path to an overlay JSON file.
+        /// Repeatable; applied left to right.
+        #[arg(long = "overlay")]
+        overlay: Vec<String>,
     },
 
     /// (Managed mode, not yet implemented) Verify integrity of managed files:
@@ -80,6 +87,7 @@ async fn main() -> Result<()> {
             dataset_id,
             no_sign_request,
             schema_path,
+            overlay,
         } => {
             let schema_path_str = schema_path
                 .as_deref()
@@ -88,7 +96,12 @@ async fn main() -> Result<()> {
                         .ok_or_else(|| anyhow::anyhow!("--schema path is not valid UTF-8: {p:?}"))
                 })
                 .transpose()?;
-            let schema = Schema::load(schema_path_str)?;
+            let schema = if overlay.is_empty() {
+                Schema::load(schema_path_str)?
+            } else {
+                let overlays = resolve_overlays(&overlay)?;
+                Schema::load_with_overlays(schema_path_str, &overlays)?
+            };
             run_indexer(input, output, dataset_id, no_sign_request, schema).await
         }
         Commands::Verify { database } => {
@@ -104,6 +117,35 @@ async fn main() -> Result<()> {
             )
         }
     }
+}
+
+/// Resolve each `--overlay` argument to an [`AppliedOverlay`] (source label + parsed
+/// content). An argument that names a bundled pipeline (`fmriprep`, `mriqc`,
+/// `qsiprep`) resolves to the embedded overlay; otherwise it is treated as a path to
+/// an overlay JSON file.
+fn resolve_overlays(specs: &[String]) -> Result<Vec<schema::AppliedOverlay>> {
+    use anyhow::Context as _;
+    specs
+        .iter()
+        .map(|spec| {
+            let content = if let Some(bundled) = bids_schema::overlay::bundled_overlay(spec) {
+                bundled
+            } else {
+                bids_schema::overlay::load_overlay(std::path::Path::new(spec)).with_context(
+                    || {
+                        format!(
+                            "loading overlay {spec:?} (not a bundled pipeline name; bundled are {:?})",
+                            bids_schema::overlay::BUNDLED_OVERLAY_NAMES
+                        )
+                    },
+                )?
+            };
+            Ok(schema::AppliedOverlay {
+                source: spec.clone(),
+                content,
+            })
+        })
+        .collect()
 }
 
 async fn run_indexer(

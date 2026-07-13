@@ -13,6 +13,7 @@ pub mod associations;
 pub mod context;
 pub mod datatypes;
 pub mod expression;
+pub mod overlay;
 
 use serde_json::Value;
 
@@ -34,7 +35,14 @@ pub fn pseudo_file_extensions(schema: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The bundled BIDS schema JSON (schema_version 1.2.1), vendored in-tree via the
-/// `third_party/bids-schema` subtree of `bids-standard/bids-schema` and embedded at build
-/// time. The single source of truth for the whole workspace.
+/// The bundled BIDS schema JSON (schema_version 1.2.1), vendored in-tree from
+/// `bids-standard/bids-schema` (pinned; see `third_party/bids-schema/.pinned-commit`) and
+/// embedded at build time. The single source of truth for the whole workspace.
 pub const SCHEMA_JSON: &str = include_str!(concat!(env!("OUT_DIR"), "/schema.json"));
+
+/// The bundled BIDS **metaschema** — the JSON Schema (draft 2020-12) a valid BIDS
+/// schema must satisfy. Vendored (pinned) from `bids-standard/bids-specification` — a
+/// *different* upstream repo than [`SCHEMA_JSON`] — and embedded at build time. Used by
+/// [`overlay::validate_effective`], which accounts for the metaschema lagging the
+/// schema slightly.
+pub const METASCHEMA_JSON: &str = include_str!(concat!(env!("OUT_DIR"), "/metaschema.json"));

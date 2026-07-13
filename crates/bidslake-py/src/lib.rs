@@ -153,6 +153,52 @@ impl PyLake {
             Err(e) => Err(anyhow_err_from(e)),
         }
     }
+
+    /// The full effective (base + overlays) schema JSON stamped into a database built
+    /// with schema overlays, or `None` if the DB carries no augmentation (it was
+    /// indexed without overlays, or predates the stamp). The stubgen reads this to
+    /// generate static types for augmented entities/suffixes/columns.
+    fn effective_schema(&self) -> PyResult<Option<String>> {
+        let guard = self.locked_conn();
+        let conn = guard
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("operation on closed BidsLake"))?;
+        let mut stmt =
+            match conn.prepare("SELECT effective_schema::VARCHAR FROM bidslake_schema LIMIT 1") {
+                Ok(stmt) => stmt,
+                // Table absent (un-augmented or older DB) → no stored effective schema.
+                Err(_) => return Ok(None),
+            };
+        match stmt.query_row([], |r| r.get::<_, String>(0)) {
+            Ok(v) => Ok(Some(v)),
+            Err(duckdb::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(anyhow_err_from(e)),
+        }
+    }
+
+    /// The applied overlays' provenance `(idx, source, sha256)` in application order,
+    /// or an empty list if the DB carries no augmentation.
+    fn overlays(&self) -> PyResult<Vec<(i64, String, String)>> {
+        let guard = self.locked_conn();
+        let conn = guard
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("operation on closed BidsLake"))?;
+        let mut stmt =
+            match conn.prepare("SELECT idx, source, sha256 FROM bidslake_overlays ORDER BY idx") {
+                Ok(stmt) => stmt,
+                Err(_) => return Ok(Vec::new()),
+            };
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i32>(0)? as i64,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(anyhow_err_from)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(anyhow_err_from)
+    }
 }
 
 impl PyLake {

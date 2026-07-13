@@ -31,6 +31,19 @@ pub async fn ingest(dataset_path: impl AsRef<Path>) -> Result<BidsDb> {
     Ok(db)
 }
 
+/// Like [`ingest`], but with a caller-provided schema — e.g. one built via
+/// `Schema::load_with_overlays` so tests can exercise overlay-augmented indexing.
+pub async fn ingest_with_schema(dataset_path: impl AsRef<Path>, schema: Schema) -> Result<BidsDb> {
+    let db = BidsDb::new(":memory:")?;
+    db.create_tables(&schema)?;
+    let fs = Box::new(LocalFileSystem::new(dataset_path.as_ref().to_path_buf()));
+    let mut parser = BidsParser::new(fs, None, schema, None);
+    let txn = db.conn.unchecked_transaction()?;
+    parser.parse(&db).await?;
+    txn.commit()?;
+    Ok(db)
+}
+
 /// `COUNT(*)` for a table.
 pub fn count(db: &BidsDb, table: &str) -> Result<i64> {
     let sql = format!("SELECT COUNT(*) FROM {table}");
