@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: rust (fmt · clippy · test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: cargo test
+        # Default-members only (excludes the maturin bidslake-py crate); the
+        # whole-corpus smoke test stays #[ignore] and does not run here.
+        run: cargo test
+
+  python:
+    name: python (pytest · ty)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      # `cargo index` (the pytest session fixture) and `maturin develop` both
+      # need the Rust toolchain.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v5
+      - name: Create venv (Python 3.14)
+        working-directory: crates/bidslake-py
+        run: uv venv --python 3.14
+      - name: Install build + test tooling
+        working-directory: crates/bidslake-py
+        run: uv pip install maturin pytest ty
+      - name: Build the extension (editable)
+        working-directory: crates/bidslake-py
+        run: .venv/bin/maturin develop
+      - name: pytest
+        working-directory: crates/bidslake-py
+        # Includes test_codegen.py (generated COLUMNS == the real DB) and
+        # test_typing.py (asserts `ty` rejects a bad-query fixture).
+        run: .venv/bin/python -m pytest
+      - name: ty
+        working-directory: crates/bidslake-py
+        run: .venv/bin/ty check python/bidslake
+
+  codegen-drift:
+    name: codegen drift (emit-types == committed)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v5
+      - name: Create venv (Python 3.14)
+        working-directory: crates/bidslake-py
+        run: uv venv --python 3.14
+      - name: Regenerate the typed schema module
+        # PYO3_PYTHON points cargo's link step at the venv interpreter.
+        run: PYO3_PYTHON=$PWD/crates/bidslake-py/.venv/bin/python cargo run -p bidslake-py --bin emit-types
+      - name: Fail if _generated.py drifted from the schema
+        run: git diff --exit-code crates/bidslake-py/python/bidslake/schema/_generated.py
