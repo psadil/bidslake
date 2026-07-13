@@ -18,37 +18,61 @@ pub struct Sidecar {
     pub columns: HashMap<String, HedColumnDef>,
 }
 
+/// An error from [`Sidecar::parse`]. Typed rather than a `String`, so callers can
+/// match on the specific malformation.
+#[derive(Debug, thiserror::Error)]
+pub enum SidecarError {
+    /// The sidecar JSON was not an object.
+    #[error("sidecar must be a JSON object")]
+    NotObject,
+    /// A categorical column mapped a value to a non-string.
+    #[error("invalid HED string for categorical value '{category}' in column '{column}'")]
+    InvalidCategorical {
+        /// The column whose categorical map was malformed.
+        column: String,
+        /// The categorical key with a non-string HED value.
+        category: String,
+    },
+    /// A column's `HED` field was neither a string nor an object.
+    #[error("invalid HED format for column '{column}'")]
+    InvalidFormat {
+        /// The column with the malformed `HED` field.
+        column: String,
+    },
+}
+
 impl Sidecar {
-    pub fn parse(json: &Value) -> Result<Self, String> {
+    pub fn parse(json: &Value) -> Result<Self, SidecarError> {
         let mut columns = HashMap::new();
 
-        if let Some(obj) = json.as_object() {
-            for (col_name, col_meta) in obj {
-                if let Some(meta_obj) = col_meta.as_object()
-                    && let Some(hed_val) = meta_obj.get("HED")
-                {
-                    if let Some(s) = hed_val.as_str() {
-                        columns.insert(col_name.clone(), HedColumnDef::Value(s.to_string()));
-                    } else if let Some(dict) = hed_val.as_object() {
-                        let mut cat_map = HashMap::new();
-                        for (cat_key, cat_val) in dict {
-                            if let Some(cat_s) = cat_val.as_str() {
-                                cat_map.insert(cat_key.clone(), cat_s.to_string());
-                            } else {
-                                return Err(format!(
-                                    "Invalid HED string for categorical value '{}' in column '{}'",
-                                    cat_key, col_name
-                                ));
-                            }
+        let Some(obj) = json.as_object() else {
+            return Err(SidecarError::NotObject);
+        };
+        for (col_name, col_meta) in obj {
+            if let Some(meta_obj) = col_meta.as_object()
+                && let Some(hed_val) = meta_obj.get("HED")
+            {
+                if let Some(s) = hed_val.as_str() {
+                    columns.insert(col_name.clone(), HedColumnDef::Value(s.to_string()));
+                } else if let Some(dict) = hed_val.as_object() {
+                    let mut cat_map = HashMap::new();
+                    for (cat_key, cat_val) in dict {
+                        if let Some(cat_s) = cat_val.as_str() {
+                            cat_map.insert(cat_key.clone(), cat_s.to_string());
+                        } else {
+                            return Err(SidecarError::InvalidCategorical {
+                                column: col_name.clone(),
+                                category: cat_key.clone(),
+                            });
                         }
-                        columns.insert(col_name.clone(), HedColumnDef::Categorical(cat_map));
-                    } else {
-                        return Err(format!("Invalid HED format for column '{}'", col_name));
                     }
+                    columns.insert(col_name.clone(), HedColumnDef::Categorical(cat_map));
+                } else {
+                    return Err(SidecarError::InvalidFormat {
+                        column: col_name.clone(),
+                    });
                 }
             }
-        } else {
-            return Err("Sidecar must be a JSON object".to_string());
         }
 
         Ok(Sidecar { columns })
@@ -61,8 +85,22 @@ pub struct TabularInput {
     pub rows: Vec<Vec<String>>,
 }
 
+/// An error from [`TabularInput::parse`].
+#[derive(Debug, thiserror::Error)]
+pub enum TabularInputError {
+    /// A header cell was not a string.
+    #[error("header row contains a non-string value")]
+    NonStringHeader,
+    /// A data cell was not a string, number, or null.
+    #[error("unsupported cell type: {value}")]
+    UnsupportedCell {
+        /// The offending cell value.
+        value: Value,
+    },
+}
+
 impl TabularInput {
-    pub fn parse(data: &[Vec<Value>]) -> Result<Self, String> {
+    pub fn parse(data: &[Vec<Value>]) -> Result<Self, TabularInputError> {
         if data.is_empty() {
             return Ok(TabularInput {
                 headers: Vec::new(),
@@ -75,7 +113,7 @@ impl TabularInput {
             if let Some(s) = h.as_str() {
                 headers.push(s.to_string());
             } else {
-                return Err("Header row contains non-string value".to_string());
+                return Err(TabularInputError::NonStringHeader);
             }
         }
 
@@ -90,7 +128,9 @@ impl TabularInput {
                 } else if cell.is_null() {
                     row_data.push("n/a".to_string());
                 } else {
-                    return Err(format!("Unsupported cell type: {:?}", cell));
+                    return Err(TabularInputError::UnsupportedCell {
+                        value: cell.clone(),
+                    });
                 }
             }
             rows.push(row_data);
