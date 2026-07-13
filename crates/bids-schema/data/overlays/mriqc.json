@@ -1,4 +1,133 @@
 {
-  "objects": {},
+  "objects": {
+    "metadata": {
+      "fd_mean": {
+        "name": "fd_mean",
+        "display_name": "Mean framewise displacement",
+        "description": "MRIQC IQM: average framewise displacement over the BOLD run (mm).\n",
+        "type": "number"
+      },
+      "fd_num": {
+        "name": "fd_num",
+        "display_name": "Number of high-motion frames",
+        "description": "MRIQC IQM: number of frames with framewise displacement above the threshold.\n",
+        "type": "integer"
+      },
+      "fd_perc": {
+        "name": "fd_perc",
+        "display_name": "Percent high-motion frames",
+        "description": "MRIQC IQM: percentage of frames above the framewise-displacement threshold.\n",
+        "type": "number"
+      },
+      "tsnr": {
+        "name": "tsnr",
+        "display_name": "Temporal SNR",
+        "description": "MRIQC IQM: median temporal signal-to-noise ratio of the BOLD run.\n",
+        "type": "number"
+      },
+      "dvars_nstd": {
+        "name": "dvars_nstd",
+        "display_name": "DVARS (non-standardized)",
+        "description": "MRIQC IQM: average non-standardized DVARS.\n",
+        "type": "number"
+      },
+      "dvars_std": {
+        "name": "dvars_std",
+        "display_name": "DVARS (standardized)",
+        "description": "MRIQC IQM: average standardized DVARS.\n",
+        "type": "number"
+      },
+      "gsr_x": {
+        "name": "gsr_x",
+        "display_name": "Ghost-to-signal ratio (x)",
+        "description": "MRIQC IQM: ghost-to-signal ratio along the x axis.\n",
+        "type": "number"
+      },
+      "gsr_y": {
+        "name": "gsr_y",
+        "display_name": "Ghost-to-signal ratio (y)",
+        "description": "MRIQC IQM: ghost-to-signal ratio along the y axis.\n",
+        "type": "number"
+      },
+      "gcor": {
+        "name": "gcor",
+        "display_name": "Global correlation",
+        "description": "MRIQC IQM: global correlation of the BOLD signal.\n",
+        "type": "number"
+      },
+      "aor": {
+        "name": "aor",
+        "display_name": "AFNI outlier ratio",
+        "description": "MRIQC IQM: mean fraction of outliers per fMRI volume (AFNI's 3dToutcount).\n",
+        "type": "number"
+      },
+      "aqi": {
+        "name": "aqi",
+        "display_name": "AFNI quality index",
+        "description": "MRIQC IQM: mean quality index (AFNI's 3dTqual).\n",
+        "type": "number"
+      },
+      "snr": {
+        "name": "snr",
+        "display_name": "Signal-to-noise ratio",
+        "description": "MRIQC IQM: signal-to-noise ratio.\n",
+        "type": "number"
+      },
+      "snr_total": {
+        "name": "snr_total",
+        "display_name": "Signal-to-noise ratio (total)",
+        "description": "MRIQC IQM: signal-to-noise ratio averaged over all tissues (anatomical).\n",
+        "type": "number"
+      },
+      "cjv": {
+        "name": "cjv",
+        "display_name": "Coefficient of joint variation",
+        "description": "MRIQC IQM: coefficient of joint variation of GM and WM (anatomical).\n",
+        "type": "number"
+      },
+      "cnr": {
+        "name": "cnr",
+        "display_name": "Contrast-to-noise ratio",
+        "description": "MRIQC IQM: contrast-to-noise ratio (anatomical).\n",
+        "type": "number"
+      },
+      "efc": {
+        "name": "efc",
+        "display_name": "Entropy focus criterion",
+        "description": "MRIQC IQM: entropy focus criterion (ghosting/blurring from head motion).\n",
+        "type": "number"
+      },
+      "fber": {
+        "name": "fber",
+        "display_name": "Foreground-background energy ratio",
+        "description": "MRIQC IQM: foreground-to-background energy ratio.\n",
+        "type": "number"
+      },
+      "fwhm_avg": {
+        "name": "fwhm_avg",
+        "display_name": "Average smoothness (FWHM)",
+        "description": "MRIQC IQM: average full-width half-maximum of the spatial smoothness (anatomical).\n",
+        "type": "number"
+      },
+      "qi_1": {
+        "name": "qi_1",
+        "display_name": "Mortamet's QI1",
+        "description": "MRIQC IQM: proportion of voxels with artifacts in the air background (anatomical).\n",
+        "type": "number"
+      },
+      "qi_2": {
+        "name": "qi_2",
+        "display_name": "Mortamet's QI2",
+        "description": "MRIQC IQM: goodness-of-fit of the air-background noise to a chi-squared model (anatomical).\n",
+        "type": "number"
+      },
+      "wm2max": {
+        "name": "wm2max",
+        "display_name": "White-matter-to-max intensity ratio",
+        "description": "MRIQC IQM: median intensity within white matter relative to the 99.95th percentile (anatomical).\n",
+        "type": "number"
+      }
+    }
+  },
   "rules": {}
 }

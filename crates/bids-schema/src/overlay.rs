@@ -344,6 +344,21 @@ mod tests {
     }
 
     #[test]
+    fn bundled_overlays_are_co_applicable() {
+        // Shared derivative concepts (from/to/mode, timeseries, xfm, confound columns)
+        // are identical across pipelines, so applying several bundled overlays to one
+        // dataset merges idempotently rather than tripping the additive conflict check.
+        let mut effective = base_schema();
+        for name in BUNDLED_OVERLAY_NAMES {
+            let overlay = bundled_overlay(name).unwrap();
+            merge_into(&mut effective, &overlay).unwrap_or_else(|e| {
+                panic!("bundled overlays must be co-applicable; {name} conflicts: {e}")
+            });
+        }
+        validate_effective(&base_schema(), &effective).unwrap();
+    }
+
+    #[test]
     fn rejects_non_object_overlay_from_disk() {
         let dir = std::env::temp_dir();
         let path = dir.join("bidslake_overlay_test_array.json");
