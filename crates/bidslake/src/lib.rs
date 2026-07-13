@@ -82,7 +82,7 @@
 //! for name in ["ds001", "ds114"] {
 //!     let path = format!("{}/tests/bids-examples/{}", env!("CARGO_MANIFEST_DIR"), name);
 //!     let fs = Box::new(LocalFileSystem::new(path));
-//!     BidsParser::new(fs, Some(name.to_string()), schema.clone(), None).parse(&db).await?;
+//!     BidsParser::new(fs, Some(name.to_string()), schema.clone(), None, true).parse(&db).await?;
 //! }
 //!
 //! // Functional BOLD runs across both datasets — by concept, not by path.
@@ -107,7 +107,7 @@
 //! # let schema = Schema::load(None)?;
 //! # db.create_tables(&schema)?;
 //! # let dataset = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/bids-examples/ds001");
-//! # BidsParser::new(Box::new(LocalFileSystem::new(dataset)), None, schema, None).parse(&db).await?;
+//! # BidsParser::new(Box::new(LocalFileSystem::new(dataset)), None, schema, None, true).parse(&db).await?;
 //! db.conn.execute(
 //!     "UPDATE participants SET participant_id = 'sub-001' WHERE participant_id = 'sub-01'",
 //!     [],
@@ -134,7 +134,7 @@
 //! # let schema = Schema::load(None)?;
 //! # db.create_tables(&schema)?;
 //! # let dataset = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/bids-examples/2d_mb_pcasl");
-//! # BidsParser::new(Box::new(LocalFileSystem::new(dataset)), None, schema, None).parse(&db).await?;
+//! # BidsParser::new(Box::new(LocalFileSystem::new(dataset)), None, schema, None, true).parse(&db).await?;
 //! let mut stmt = db.conn.prepare(
 //!     "SELECT target_file_path, source_file_path \
 //!      FROM file_associations WHERE association_type = 'fieldmap'",
