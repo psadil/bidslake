@@ -167,6 +167,11 @@ COLUMNS: dict[str, dict[str, str]] = {
         "bids_version": "VARCHAR",
         "bidslake_version": "VARCHAR",
     },
+    "bidslake_schema": {
+        "base_schema_version": "VARCHAR",
+        "effective_schema": "JSON",
+        "overlay_digest": "VARCHAR",
+    },
     "blood": {
         "dataset_id": "VARCHAR",
         "file_path": "VARCHAR",
@@ -1912,6 +1917,11 @@ class C:
         schema_version: pl.Expr = pl.col("schema_version")
         bids_version: pl.Expr = pl.col("bids_version")
         bidslake_version: pl.Expr = pl.col("bidslake_version")
+
+    class bidslake_schema:
+        base_schema_version: pl.Expr = pl.col("base_schema_version")
+        effective_schema: pl.Expr = pl.col("effective_schema")
+        overlay_digest: pl.Expr = pl.col("overlay_digest")
 
     class blood:
         dataset_id: pl.Expr = pl.col("dataset_id")

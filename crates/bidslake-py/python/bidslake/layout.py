@@ -134,6 +134,27 @@ class BidsLake:
         """Every base table and view in the database."""
         return self._lake.list_tables()
 
+    # -- schema augmentation -----------------------------------------------
+
+    @property
+    def overlays(self) -> list[tuple[int, str, str]]:
+        """The schema overlays applied when this database was indexed, as
+        ``(index, source, sha256)`` in application order — empty if none.
+
+        Augmented columns and tables are queryable with no extra step (``get`` and
+        the table accessors validate against the live database), so this is for
+        provenance/introspection. For *static* typing of augmented columns, generate
+        a project-local module with ``python -m bidslake.stubgen``.
+        """
+        return self._lake.overlays()
+
+    def effective_schema(self) -> dict[str, Any] | None:
+        """The full effective (base + overlays) BIDS schema stamped into the
+        database, or ``None`` for a database that predates the stamp. Every database
+        embeds its schema, so this recovers exactly what the catalog was built from."""
+        raw = self._lake.effective_schema()
+        return json.loads(raw) if raw is not None else None
+
     # -- the headline iterator --------------------------------------------
 
     def get(
@@ -341,10 +362,17 @@ class BidsLake:
             return
         schema_version, _bids_version, _bidslake_version = meta
         if schema_version != SCHEMA_VERSION:
+            # Overlays add columns/tables beyond the base types this build ships; the
+            # runtime introspection covers them, but static typing wants a regen.
+            augmented = (
+                " (augmented; run `python -m bidslake.stubgen` for static types)"
+                if self._lake.overlays()
+                else ""
+            )
             warnings.warn(
                 f"database indexed with BIDS schema {schema_version}; bidslake is "
                 f"typed against {SCHEMA_VERSION}. Column names/types are validated "
-                "at runtime.",
+                f"at runtime{augmented}.",
                 stacklevel=3,
             )
 
