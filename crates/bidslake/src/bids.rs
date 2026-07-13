@@ -24,12 +24,12 @@
 //! planning), and the entire parse runs inside a single transaction (opened by
 //! the caller in `main`), so it commits atomically.
 
-use crate::db::{BidsDb, FileAssociation};
+use crate::db::{BidsDb, FileAssociation, TabularStatus};
 use crate::fs::BidsFileSystem;
 use crate::schema::Schema;
-use crate::schema::dynamic::quote_ident;
+use crate::schema::dynamic::{quote_ident, sql_in_list, sql_lit};
 use crate::schema::tabular::{ColumnSpec, FileContext, RowIdentity, TableSpec};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bids_core::entities::read_entities;
 use duckdb::Connection;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
@@ -37,6 +37,18 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
+
+/// The `read_csv` relaxations that make a tabular read non-poisoning: a malformed
+/// row is padded or dropped rather than aborting the ingest transaction (so
+/// `bids-validator-rs`, not bidslake, owns malformation). Shared verbatim by the
+/// header-bearing [`HEADER_READ_OPTS`] and the headerless recording read so the two
+/// can't drift out of sync. A macro (not a `const`) so the literal can be spliced
+/// into both a `const concat!` and a runtime `format!`.
+macro_rules! non_poisoning_read_flags {
+    () => {
+        "delim='\\t', all_varchar=true, nullstr='n/a', strict_mode=false, null_padding=true, ignore_errors=true"
+    };
+}
 
 /// Wall-time accountant for [`BidsParser::parse`], active only when
 /// `BIDSLAKE_TIMING` is set. It isolates the per-file tabular `read_csv` cost
@@ -71,9 +83,22 @@ impl PhaseTimer {
     }
 }
 
+/// S3/httpfs configuration for reading `s3://` tabular data via DuckDB. Passed to
+/// [`BidsParser::new`] so the read-preflight connection is configured as part of
+/// construction — there is no separate must-call-before-`parse` step to forget.
+pub struct S3Httpfs {
+    /// The AWS region httpfs should target.
+    pub region: String,
+    /// Whether to use anonymous (unsigned) access — public buckets like OpenNeuro's.
+    pub anonymous: bool,
+}
+
 pub struct BidsParser {
     fs: Box<dyn BidsFileSystem>,
     dataset_id: Option<String>,
+    /// S3/httpfs config for the read-preflight connection, applied at the start of
+    /// [`Self::parse`]. `None` for local datasets.
+    s3_httpfs: Option<S3Httpfs>,
     ignore_set: Gitignore,
     pending_associations: Vec<FileAssociation>,
     pending_diffusion: HashMap<String, PendingDiffusion>,
@@ -176,11 +201,17 @@ struct PendingTabular {
 }
 
 impl BidsParser {
-    pub fn new(fs: Box<dyn BidsFileSystem>, dataset_id: Option<String>, schema: Schema) -> Self {
+    pub fn new(
+        fs: Box<dyn BidsFileSystem>,
+        dataset_id: Option<String>,
+        schema: Schema,
+        s3_httpfs: Option<S3Httpfs>,
+    ) -> Self {
         let datatypes = schema.datatypes().into_iter().collect();
         Self {
             fs,
             dataset_id,
+            s3_httpfs,
             ignore_set: Gitignore::empty(),
             pending_associations: Vec::new(),
             pending_diffusion: HashMap::new(),
@@ -202,11 +233,15 @@ impl BidsParser {
         }
     }
 
-    /// Enable httpfs on the read-preflight [`Self::validator`] connection so its
-    /// `read_csv` sniff/dry-run can open `s3://` tabular files, mirroring the write
-    /// connection. Call when ingesting from S3.
-    pub fn configure_s3_httpfs(&self, region: &str, anonymous: bool) -> Result<()> {
-        crate::s3::configure_httpfs(&self.validator, region, anonymous)
+    /// Enable httpfs on the read-preflight [`Self::validator`] connection (from the
+    /// [`S3Httpfs`] config given to [`Self::new`]) so its `read_csv` sniff can open
+    /// `s3://` tabular files, mirroring the write connection. Called once at the
+    /// start of [`Self::parse`]; a no-op for local datasets.
+    fn configure_s3_httpfs(&self) -> Result<()> {
+        if let Some(cfg) = &self.s3_httpfs {
+            crate::s3::configure_httpfs(&self.validator, &cfg.region, cfg.anonymous)?;
+        }
+        Ok(())
     }
 
     /// Whether DuckDB can read this `read_csv(...)` call — tested on the throwaway
@@ -215,10 +250,9 @@ impl BidsParser {
     /// rows); an unreadable one (bad gzip, malformed) returns `false`.
     fn read_csv_ok(&self, read_csv_from: &str) -> bool {
         let sql = format!("SELECT 1 FROM {read_csv_from} LIMIT 1");
-        match self.validator.prepare(&sql) {
-            Ok(mut stmt) => stmt.query([]).map(|_| ()).is_ok(),
-            Err(_) => false,
-        }
+        self.validator
+            .prepare(&sql)
+            .is_ok_and(|mut stmt| stmt.query([]).is_ok())
     }
 
     /// Column names of a header-bearing file, sniffed on the validator connection.
@@ -235,6 +269,10 @@ impl BidsParser {
     }
 
     pub async fn parse(&mut self, db: &BidsDb) -> Result<()> {
+        // Configure httpfs on the read-preflight connection (if this is an S3
+        // ingest) before any `read_csv` sniff runs. No-op for local datasets.
+        self.configure_s3_httpfs()?;
+
         // Opt-in phase timing (`BIDSLAKE_TIMING`). `t_walk` brackets the walk;
         // later phases are timed against a rolling `phase_start`.
         let t_walk = self.phase_timer.mark();
@@ -561,11 +599,12 @@ impl BidsParser {
             "file_path".to_string(),
             Value::String(file_path.to_string()),
         );
-        sidecar_entry.insert("other_data".to_string(), Value::Object(merged.clone()));
-        // Also flatten metadata into top-level fields for known columns.
+        // Flatten metadata into top-level fields for known columns (borrowing
+        // `merged`), then move the whole map into `other_data` — no clone.
         for (k, v) in &merged {
             sidecar_entry.insert(k.clone(), v.clone());
         }
+        sidecar_entry.insert("other_data".to_string(), Value::Object(merged));
         Some(Value::Object(sidecar_entry))
     }
 
@@ -767,12 +806,15 @@ impl BidsParser {
                 );
                 participant_data.insert("participant_id".to_string(), Value::String(pid.clone()));
 
-                // Ignore errors - participant might already exist (e.g. from participants.tsv)
-                let _ = db.insert(
+                // A duplicate (e.g. from participants.tsv) is a no-op: the
+                // insert carries a `WHERE NOT EXISTS` primary-key guard
+                // (see `schema::dynamic`), so `?` only surfaces real failures.
+                db.insert(
                     &self.schema,
                     "participants",
                     &Value::Object(participant_data),
-                );
+                )
+                .with_context(|| format!("inserting implicit participant {pid}"))?;
             }
 
             if let Some(ref sid) = session_id
@@ -788,8 +830,10 @@ impl BidsParser {
                 session_data.insert("session_id".to_string(), Value::String(sid.clone()));
                 session_data.insert("participant_id".to_string(), Value::String(pid.clone()));
 
-                // Ignore errors - session might already exist
-                let _ = db.insert(&self.schema, "sessions", &Value::Object(session_data));
+                // Duplicate is a no-op via the `WHERE NOT EXISTS` guard; `?`
+                // surfaces only real failures.
+                db.insert(&self.schema, "sessions", &Value::Object(session_data))
+                    .with_context(|| format!("inserting implicit session {sid} for {pid}"))?;
             }
         }
 
@@ -840,17 +884,18 @@ impl BidsParser {
         let file_name = path.file_name().unwrap().to_str().unwrap();
         let suffix = read_entities(file_name).suffix;
 
-        // Store sidecar info for later inheritance processing
+        // Check for IntendedFor field to create associations (borrows the parsed
+        // value before it is moved into the sidecar store below).
+        self.process_intended_for(rel_path, &json_value, dataset_id)?;
+
+        // Store sidecar info for later inheritance processing.
         self.sidecars.push(SidecarInfo {
             dataset_id: dataset_id.to_string(),
             file_path: rel_path.to_string(),
             entities: entities.clone(),
             suffix,
-            content: json_value.clone(),
+            content: json_value,
         });
-
-        // Check for IntendedFor field to create associations
-        self.process_intended_for(rel_path, &content, dataset_id)?;
 
         Ok(())
     }
@@ -891,7 +936,8 @@ impl BidsParser {
             map.insert("root_uri".to_string(), Value::String(self.fs.root()));
         }
 
-        db.insert(&self.schema, "dataset_description", &json_value)?;
+        db.insert(&self.schema, "dataset_description", &json_value)
+            .with_context(|| format!("inserting dataset_description for {dataset_id}"))?;
         Ok(())
     }
 
@@ -1020,7 +1066,7 @@ impl BidsParser {
         // roadmap for where this line is likely to move.
         if extension == ".tsv.gz" {
             let table = recording_table_of(&suffix);
-            db.record_tabular_file(dataset_id, rel_path, table, 0, "on_disk")?;
+            db.record_tabular_file(dataset_id, rel_path, table, 0, TabularStatus::OnDisk)?;
             return Ok(());
         }
 
@@ -1041,7 +1087,7 @@ impl BidsParser {
         // Datatype from the path, or — for a file above a datatype directory, like
         // a session-level channels.tsv — inferred from the datatype dirs beneath it.
         let datatype = self
-            .datatype_of(rel_path)
+            .datatype_dir_in_path(rel_path)
             .or_else(|| self.infer_datatype(rel_path, &suffix, &extension));
         // BIDS selector paths are dataset-relative with a leading slash.
         let path_with_slash = format!("/{rel_path}");
@@ -1099,7 +1145,7 @@ impl BidsParser {
                             rel_path,
                             Some(&spec.table),
                             0,
-                            "ingested",
+                            TabularStatus::Ingested,
                         )?;
                     }
                     Some((_, columns)) if columns.iter().any(|c| c == "filename") => {
@@ -1115,7 +1161,7 @@ impl BidsParser {
                             rel_path,
                             Some(&spec.table),
                             n,
-                            "ingested",
+                            TabularStatus::Ingested,
                         )?;
                     }
                     Some((group_key, columns)) => {
@@ -1135,14 +1181,20 @@ impl BidsParser {
                     .ingest_tabular(db, &spec, rel_path, dataset_id, entities)
                     .await?;
                 self.phase_timer.add_tabular(t);
-                db.record_tabular_file(dataset_id, rel_path, Some(&spec.table), n, "ingested")?;
+                db.record_tabular_file(
+                    dataset_id,
+                    rel_path,
+                    Some(&spec.table),
+                    n,
+                    TabularStatus::Ingested,
+                )?;
             }
             None => {
                 // A validated dataset should not reach here (all its tabular files
                 // are schema-described). Warn rather than fail so a newer BIDS
                 // extension than the vendored schema doesn't abort ingest.
                 eprintln!("Warning: no tabular_data rule for {rel_path}; skipping");
-                db.record_tabular_file(dataset_id, rel_path, None, 0, "skipped")?;
+                db.record_tabular_file(dataset_id, rel_path, None, 0, TabularStatus::Skipped)?;
             }
         }
         Ok(())
@@ -1210,18 +1262,22 @@ impl BidsParser {
     /// positional tables and is an arbitrary unique key for order-insensitive ones
     /// (see [`build_tabular_batch_select`]).
     ///
-    /// Safety: the whole batch is dry-run on the throwaway validator connection
-    /// first. A file that sniffed OK could still fail a full read, and inside the
-    /// ingest transaction that error would poison every later statement (DuckDB
-    /// has no `ROLLBACK TO`). If the dry run fails, the group falls back to the
-    /// per-file path, which isolates each file's errors — so batching is never
-    /// less safe than the per-file ingest it replaces.
+    /// Malformed rows can't poison the ingest transaction: `read_csv` uses the
+    /// non-erroring relaxations in [`HEADER_READ_OPTS`] (`ignore_errors` /
+    /// `null_padding` / `strict_mode=false`), so a bad row is padded or dropped
+    /// rather than aborting the statement — `bids-validator-rs`, not bidslake, is
+    /// the authority on tabular malformation. There is **no** dry-run and no
+    /// per-file fallback (both were removed once the reads became non-poisoning).
+    /// Trade-off: each group is one pre-`DELETE` + one batch `INSERT`, so if that
+    /// `INSERT` itself errors (e.g. an IO/read failure) the group's rows are
+    /// dropped for this run with no per-file isolation, and the affected files are
+    /// recorded with `status = "failed"` (see below) rather than `"ingested"`.
     async fn flush_tabular(&mut self, db: &BidsDb) -> Result<()> {
         if self.pending_tabular.is_empty() {
             return Ok(());
         }
         let dataset_id = self.dataset_id.as_ref().unwrap().clone();
-        // Move the pending list out so the per-file fallback can borrow `&self`.
+        // Move the pending list out so the group loop can borrow `&self`.
         let pending = std::mem::take(&mut self.pending_tabular);
 
         // Group by (table, raw header). Files in a group have byte-identical header
@@ -1246,11 +1302,7 @@ impl BidsParser {
 
             // Re-index idempotency (per-row tables have no PK): clear these files'
             // prior rows in one DELETE before re-inserting.
-            let rel_list = members
-                .iter()
-                .map(|m| sql_lit(&m.rel_path))
-                .collect::<Vec<_>>()
-                .join(", ");
+            let rel_list = sql_in_list(members.iter().map(|m| m.rel_path.as_str()));
             let del = format!(
                 "DELETE FROM {} WHERE dataset_id = {} AND file_path IN ({rel_list})",
                 spec.table,
@@ -1258,32 +1310,35 @@ impl BidsParser {
             );
             db.conn.execute(&del, [])?;
 
-            // Write the batch directly — no throwaway dry-run read first. With
-            // `ignore_errors`/`null_padding` (see `HEADER_READ_OPTS`) `read_csv` no
-            // longer aborts on a malformed row, so it can't poison the ingest
-            // transaction; the dry-run existed only to catch that off to the side,
-            // and dropping it halves the reads (the dominant cost on a network
-            // filesystem — the dry-run and the insert each downloaded every file).
-            // The trade-off: a genuinely malformed row is padded/dropped by DuckDB
-            // rather than isolating its file, so `bids-validator-rs` — not
-            // bidslake — is the authority on tabular malformation.
+            // Write the batch directly — no dry-run. `read_csv`'s non-erroring
+            // relaxations (see `HEADER_READ_OPTS`) mean a malformed row is
+            // padded/dropped rather than aborting, so it can't poison the ingest
+            // transaction; dropping the old dry-run halves the reads (the dominant
+            // cost on a network filesystem).
             let preserve_order = !is_order_insensitive(&spec.table);
             let select =
                 build_tabular_batch_select(spec, &dataset_id, &files, columns, preserve_order);
             let sql = format!("INSERT INTO {} BY NAME {select}", spec.table);
-            if let Err(e) = db.conn.execute(&sql, []) {
+            // A batch-INSERT execution failure (e.g. an IO/read error) drops this
+            // group's rows for the run — record its members as `failed` so the
+            // `tabular_files` catalog can distinguish that from an empty-but-
+            // successful ingest, rather than claiming `ingested` with 0 rows.
+            let status = if let Err(e) = db.conn.execute(&sql, []) {
                 eprintln!(
                     "Warning: batched tabular insert into {} failed: {e}",
                     spec.table
                 );
-            }
+                TabularStatus::Failed
+            } else {
+                TabularStatus::Ingested
+            };
             // Counts come from the table itself (a cheap local query, not a re-read
             // of the source files), so `tabular_files` reflects exactly what landed
             // — including any rows `ignore_errors` dropped.
             let counts = self.table_row_counts(db, spec, &dataset_id, &members);
             for m in &members {
                 let n = counts.get(&m.rel_path).copied().unwrap_or(0);
-                db.record_tabular_file(&dataset_id, &m.rel_path, Some(&spec.table), n, "ingested")?;
+                db.record_tabular_file(&dataset_id, &m.rel_path, Some(&spec.table), n, status)?;
             }
         }
         Ok(())
@@ -1299,11 +1354,7 @@ impl BidsParser {
         dataset_id: &str,
         members: &[&PendingTabular],
     ) -> HashMap<String, i64> {
-        let rel_list = members
-            .iter()
-            .map(|m| sql_lit(&m.rel_path))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let rel_list = sql_in_list(members.iter().map(|m| m.rel_path.as_str()));
         let sql = format!(
             "SELECT file_path, count(*) FROM {} WHERE dataset_id = {} AND file_path IN ({rel_list}) \
              GROUP BY file_path",
@@ -1320,8 +1371,12 @@ impl BidsParser {
         counts
     }
 
-    /// The BIDS datatype for a file, taken from the datatype directory in its path.
-    fn datatype_of(&self, rel_path: &str) -> Option<String> {
+    /// The BIDS datatype for a file, taken from *any* datatype directory in its
+    /// path. This deliberately differs from [`bids_schema::datatypes::find_datatype`]
+    /// (which matches only the immediate parent dir): the any-component match here
+    /// mirrors the `datatype` DuckDB virtual column's `/({alt})/` regex (see
+    /// `schema::dynamic`), so both classify nested/derivative layouts the same way.
+    fn datatype_dir_in_path(&self, rel_path: &str) -> Option<String> {
         rel_path
             .split('/')
             .find(|c| self.datatypes.contains(*c))
@@ -1395,9 +1450,9 @@ impl BidsParser {
                 (None, 0)
             });
             let status = if table.is_some() {
-                "ingested"
+                TabularStatus::Ingested
             } else {
-                "skipped"
+                TabularStatus::Skipped
             };
             db.record_tabular_file(&rec.dataset_id, &rec.rel_path, table.as_deref(), n, status)?;
         }
@@ -1411,18 +1466,20 @@ impl BidsParser {
         db: &BidsDb,
         rec: &PendingRecording,
     ) -> Result<(Option<String>, i64)> {
-        // Map suffix → target table and the table's schema-declared columns.
-        let (table, columns): (&str, Vec<ColumnSpec>) = match rec.suffix.as_str() {
-            "physio" => ("physio", self.recording_columns("physio")),
-            "physioevents" => ("physio_events", self.recording_columns("physio_events")),
-            "stim" => ("stim", Vec::new()),
-            "motion" => ("motion", Vec::new()),
-            _ => return Ok((None, 0)),
+        // Map suffix → target table + column strategy via the single descriptor table.
+        let Some(kind) = recording_kind(rec.suffix.as_str()) else {
+            return Ok((None, 0));
+        };
+        let table = kind.table;
+        let columns: Vec<ColumnSpec> = if kind.schema_columns {
+            self.recording_columns(table)
+        } else {
+            Vec::new()
         };
 
         // Column names, in file order: from the associated channels file (motion) or
         // the merged sidecar `Columns` (physio/stim/physioevents).
-        let colnames = if rec.suffix == "motion" {
+        let colnames = if kind.colnames_from_channels {
             self.motion_columns(db, rec)?
         } else {
             self.sidecar_columns(rec)
@@ -1451,12 +1508,12 @@ impl BidsParser {
             .iter()
             .map(|c| format!("{}: 'VARCHAR'", sql_lit(c)))
             .collect();
-        // Same non-erroring relaxations as `HEADER_READ_OPTS` (see there): tolerate
-        // CSV-standard quirks and malformed rows so a bad recording can't poison
-        // the ingest transaction.
+        // Same non-poisoning relaxations as `HEADER_READ_OPTS`, from the shared
+        // `non_poisoning_read_flags!` fragment, plus the headerless-recording
+        // specifics (`header=false`, `auto_detect=false`, explicit `columns`).
         let read_opts = format!(
-            "delim='\\t', header=false, auto_detect=false, all_varchar=true, nullstr='n/a', \
-             strict_mode=false, null_padding=true, ignore_errors=true, columns={{{}}}",
+            "header=false, auto_detect=false, {}, columns={{{}}}",
+            non_poisoning_read_flags!(),
             cols_spec.join(", ")
         );
 
@@ -1616,17 +1673,15 @@ impl BidsParser {
         Ok(())
     }
 
-    /// Process IntendedFor field in sidecar to create file associations
+    /// Process IntendedFor field in sidecar to create file associations. Takes
+    /// the already-parsed sidecar value so the JSON isn't re-parsed here.
     fn process_intended_for(
         &mut self,
         source_file: &str,
-        sidecar_content: &str,
+        sidecar: &Value,
         dataset_id: &str,
     ) -> Result<()> {
-        // Parse JSON to extract IntendedFor
-        if let Ok(json) = serde_json::from_str::<Value>(sidecar_content)
-            && let Some(intended_for) = json.get("IntendedFor")
-        {
+        if let Some(intended_for) = sidecar.get("IntendedFor") {
             // Association type = the source file's BIDS datatype (fmap → "fieldmap"), derived from
             // the schema rather than guessed from path substrings.
             let assoc_type =
@@ -1736,22 +1791,66 @@ fn is_tabular_file(file_name: &str) -> bool {
     file_name.ends_with(".tsv") || file_name.ends_with(".tsv.gz")
 }
 
+/// How one headerless continuous-recording suffix maps to a table and how its
+/// columns are built. Single source of truth for the recording suffix set, the
+/// suffix→table map (note `physioevents` → `physio_events`), and each table's
+/// column strategy — so adding a recording kind is a one-line change here rather
+/// than edits to three disjoint functions.
+struct RecordingKind {
+    /// The BIDS suffix (`physio`, `physioevents`, `stim`, `motion`).
+    suffix: &'static str,
+    /// The DuckDB table it maps to.
+    table: &'static str,
+    /// Whether the table carries schema-declared typed columns (`physio`,
+    /// `physio_events`) or is a bare all-VARCHAR table (`stim`, `motion`).
+    schema_columns: bool,
+    /// Where column names come from: the associated `_channels.tsv` (`motion`) or
+    /// the merged sidecar `Columns` (everything else).
+    colnames_from_channels: bool,
+}
+
+const RECORDING_KINDS: &[RecordingKind] = &[
+    RecordingKind {
+        suffix: "physio",
+        table: "physio",
+        schema_columns: true,
+        colnames_from_channels: false,
+    },
+    RecordingKind {
+        suffix: "physioevents",
+        table: "physio_events",
+        schema_columns: true,
+        colnames_from_channels: false,
+    },
+    RecordingKind {
+        suffix: "stim",
+        table: "stim",
+        schema_columns: false,
+        colnames_from_channels: false,
+    },
+    RecordingKind {
+        suffix: "motion",
+        table: "motion",
+        schema_columns: false,
+        colnames_from_channels: true,
+    },
+];
+
+/// The [`RecordingKind`] for a suffix, or `None` if it is not a continuous recording.
+fn recording_kind(suffix: &str) -> Option<&'static RecordingKind> {
+    RECORDING_KINDS.iter().find(|k| k.suffix == suffix)
+}
+
 /// Whether a suffix names a headerless continuous recording (columns come from the
 /// sidecar `Columns` or the associated channels file, not a header row).
 fn is_recording_suffix(suffix: &str) -> bool {
-    matches!(suffix, "physio" | "physioevents" | "stim" | "motion")
+    recording_kind(suffix).is_some()
 }
 
 /// The table a recording suffix maps to (for provenance), or `None` for suffixes
 /// with no dedicated table.
 fn recording_table_of(suffix: &str) -> Option<&'static str> {
-    match suffix {
-        "physio" => Some("physio"),
-        "physioevents" => Some("physio_events"),
-        "stim" => Some("stim"),
-        "motion" => Some("motion"),
-        _ => None,
-    }
+    recording_kind(suffix).map(|k| k.table)
 }
 
 /// Split a tabular filename into its BIDS `(suffix, extension)` via the shared
@@ -1760,11 +1859,6 @@ fn recording_table_of(suffix: &str) -> Option<&'static str> {
 fn split_suffix_ext(file_name: &str) -> (String, String) {
     let parts = read_entities(file_name);
     (parts.suffix, parts.extension)
-}
-
-/// A SQL string literal: single-quoted, with embedded `'` doubled.
-fn sql_lit(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
 }
 
 /// Whether a DuckDB type needs a `TRY_CAST` when read from an all-varchar TSV
@@ -1907,9 +2001,8 @@ fn build_tabular_insert_sql(
 }
 
 /// Build the batched `SELECT` for a group of per-row tabular files that share a
-/// table and header (Lever 1b) — one `read_csv([f1,…,fN])` in place of N. Used
-/// two ways by the caller: wrapped in `count(*)` as a validator dry-run, and
-/// prefixed with `INSERT INTO … BY NAME` as the real write. `files` is
+/// table and header (Lever 1b) — one `read_csv([f1,…,fN])` in place of N. The
+/// caller prefixes it with `INSERT INTO … BY NAME` for the real write. `files` is
 /// `(canonical local path, dataset-relative path)`.
 ///
 /// Shape mirrors [`build_tabular_insert_sql`]'s `PerRow` arm, generalized to many
@@ -2070,8 +2163,7 @@ fn tsv_header_from_line(line: &str) -> Option<(String, Vec<String>)> {
 /// specifics if a hard accounting is ever needed. Not erroring is also what lets
 /// the batched flush skip its validator dry-run — halving the reads over a
 /// network filesystem.
-const HEADER_READ_OPTS: &str = "delim='\\t', header=true, all_varchar=true, nullstr='n/a', \
-     strict_mode=false, null_padding=true, ignore_errors=true";
+const HEADER_READ_OPTS: &str = concat!("header=true, ", non_poisoning_read_flags!());
 
 /// Determine if a file is an imaging data file that should go in scans table
 /// Whether a file is a primary BIDS **data file** (→ one `scans` row): it sits in a datatype

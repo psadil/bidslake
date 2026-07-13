@@ -13,8 +13,10 @@ use std::collections::HashMap;
 
 /// Map each entity's abbreviation (`entity`, falling back to `name`) → its schema object-key,
 /// from `schema.objects.entities`. e.g. `"sub" → "subject"`. Used to lift a filename's raw
-/// entity keys into the schema's namespace, matching the reference validator.
-fn entity_name_to_key(schema: &Value) -> HashMap<String, String> {
+/// entity keys into the schema's namespace, matching the reference validator. Public so the
+/// validator can populate its own `entity_name_to_key` from this single derivation rather than
+/// re-deriving the same mapping from its parsed entity list.
+pub fn entity_name_to_key(schema: &Value) -> HashMap<String, String> {
     let mut map = HashMap::new();
     if let Some(ents) = schema
         .get("objects")

@@ -41,44 +41,42 @@ pub trait ErrorValidator: Send + Sync {
     }
 }
 
-/// Retrieve all error validator instances.
-pub fn get_all_errors() -> Vec<Box<dyn ErrorValidator>> {
-    let errors: Vec<Box<dyn ErrorValidator>> = vec![
-        // empty_file
-        Box::new(empty_file::EmptyFile),
-        // bval_bvec
-        Box::new(bval_bvec::BFile),
-        Box::new(bval_bvec::BvecRowLength),
-        Box::new(bval_bvec::MalformedBvec),
-        Box::new(bval_bvec::MalformedBval),
-        // dataset
-        Box::new(dataset::MissingSession),
-        Box::new(dataset::NoValidDataFoundForSubject),
-        Box::new(dataset::SidecarWithoutDatafile),
-        // gzip
-        Box::new(gzip::GzNotGzipped),
-        // hed: the HED_* keys are handled by the dedicated `hed::check_hed_file` pass
-        // (see that module), not this registry.
-        // json
-        Box::new(json::JsonInvalid),
-        Box::new(json::InvalidJsonEncoding),
-        Box::new(json::JsonSchemaValidationError),
-        // nifti
-        Box::new(nifti::NiftiHeaderUnreadable),
-        Box::new(nifti::NiftiTooSmall),
-        // system
-        Box::new(system::InternalError),
-        Box::new(system::NotIncluded),
-        Box::new(system::OrphanedSymlink),
-        Box::new(system::FileRead),
-        Box::new(system::InaccessibleRemoteFile),
-        Box::new(system::BrainvisionLinksBroken),
-        // tsv
-        Box::new(tsv::WrongNewLine),
-    ];
-
-    errors
-}
+/// Every error validator, as a compile-time dispatch table. The validators are
+/// zero-sized unit structs, so this `static` costs nothing to build — unlike the
+/// old per-call `Vec<Box<dyn ErrorValidator>>`, which was rebuilt for every file.
+pub static VALIDATORS: &[&dyn ErrorValidator] = &[
+    // empty_file
+    &empty_file::EmptyFile,
+    // bval_bvec
+    &bval_bvec::BFile,
+    &bval_bvec::BvecRowLength,
+    &bval_bvec::MalformedBvec,
+    &bval_bvec::MalformedBval,
+    // dataset
+    &dataset::MissingSession,
+    &dataset::NoValidDataFoundForSubject,
+    &dataset::SidecarWithoutDatafile,
+    // gzip
+    &gzip::GzNotGzipped,
+    // hed: the HED_* keys are handled by the dedicated `hed::check_hed_file` pass
+    // (see that module), not this registry.
+    // json
+    &json::JsonInvalid,
+    &json::InvalidJsonEncoding,
+    &json::JsonSchemaValidationError,
+    // nifti
+    &nifti::NiftiHeaderUnreadable,
+    &nifti::NiftiTooSmall,
+    // system
+    &system::InternalError,
+    &system::NotIncluded,
+    &system::OrphanedSymlink,
+    &system::FileRead,
+    &system::InaccessibleRemoteFile,
+    &system::BrainvisionLinksBroken,
+    // tsv
+    &tsv::WrongNewLine,
+];
 
 /// Check file-level rules.errors.
 pub async fn check_rules_errors_files(
@@ -88,9 +86,9 @@ pub async fn check_rules_errors_files(
     schema: &BidsSchema,
     issues: &mut DatasetIssues,
 ) {
-    for validator in get_all_errors() {
+    for validator in VALIDATORS {
         if let Some(err_def) = schema.error_rules.get(validator.key()) {
-            if !do_selectors_select(&err_def.selectors, ctx_value) {
+            if !do_selectors_select(err_def.selectors.as_deref(), ctx_value) {
                 continue;
             }
 
@@ -115,7 +113,7 @@ pub async fn check_rules_errors_dataset(
     schema: &BidsSchema,
     issues: &mut DatasetIssues,
 ) {
-    for validator in get_all_errors() {
+    for validator in VALIDATORS {
         if let Some(err_def) = schema.error_rules.get(validator.key()) {
             let failing_paths = validator.validate_dataset(dataset).await;
             for path in failing_paths {
@@ -141,7 +139,7 @@ mod tests {
     #[test]
     fn test_all_schema_errors_implemented() {
         let schema = BidsSchema::bundled().unwrap();
-        let mut implemented: HashSet<&str> = get_all_errors().iter().map(|e| e.key()).collect();
+        let mut implemented: HashSet<&str> = VALIDATORS.iter().map(|e| e.key()).collect();
         // HED keys are implemented by the dedicated `hed::check_hed_file` pass rather than the
         // generic `ErrorValidator` registry.
         implemented.extend(hed::HED_ERROR_KEYS.iter().copied());

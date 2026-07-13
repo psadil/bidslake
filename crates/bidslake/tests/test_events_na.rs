@@ -33,11 +33,11 @@ async fn test_events_tsv_na() -> anyhow::Result<()> {
     writeln!(events_file, "n/a\t0.5\tstop")?; // This should cause error if not handled
 
     let db = BidsDb::new(db_path.to_str().unwrap())?;
-    let schema = Schema::load(None);
+    let schema = Schema::load(None).unwrap();
     db.create_tables(&schema)?;
 
     let fs = Box::new(LocalFileSystem::new(dataset_path));
-    let mut parser = BidsParser::new(fs, None, schema);
+    let mut parser = BidsParser::new(fs, None, schema, None);
 
     // This should fail if onset is FLOAT and n/a is not handled
     parser.parse(&db).await?;

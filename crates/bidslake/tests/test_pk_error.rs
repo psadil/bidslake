@@ -10,7 +10,7 @@ fn test_insert_without_pk_fails() -> anyhow::Result<()> {
     let db = BidsDb::new(db_path.to_str().unwrap())?;
 
     // Load schema first
-    let schema = Schema::load(None);
+    let schema = Schema::load(None).unwrap();
 
     // Get the official CREATE SQL but remove PRIMARY KEY to simulate the user's broken state
     let create_sql = schema

@@ -142,14 +142,14 @@ impl BidsSchema {
             .to_string();
 
         // Parse all rule types once, before the per-file loop
-        let directory_rules = Self::get_directory_rules_from_raw(&raw);
-        let file_rules = Self::get_file_rules_from_raw(&raw);
-        let check_rules = Self::get_check_rules_from_raw(&raw);
-        let sidecar_rules = Self::get_sidecar_rules_from_raw(&raw);
-        let json_rules = Self::get_json_rules_from_raw(&raw);
-        let dataset_metadata_rules = Self::get_dataset_metadata_rules_from_raw(&raw);
-        let tabular_data_rules = Self::get_tabular_data_rules_from_raw(&raw);
-        let error_rules = Self::get_error_rules_from_raw(&raw);
+        let directory_rules = Self::directory_rules_from_raw(&raw);
+        let file_rules = Self::file_rules_from_raw(&raw);
+        let check_rules = Self::check_rules_from_raw(&raw);
+        let sidecar_rules = Self::sidecar_rules_from_raw(&raw);
+        let json_rules = Self::json_rules_from_raw(&raw);
+        let dataset_metadata_rules = Self::dataset_metadata_rules_from_raw(&raw);
+        let tabular_data_rules = Self::tabular_data_rules_from_raw(&raw);
+        let error_rules = Self::error_rules_from_raw(&raw);
 
         // Derive the object lookups the per-file checks reference repeatedly.
         let entities = Self::get_entities_from_raw(&raw);
@@ -157,10 +157,9 @@ impl BidsSchema {
             .iter()
             .map(|(k, v)| (k.clone(), v.name.clone()))
             .collect();
-        let entity_name_to_key = entities
-            .iter()
-            .map(|(k, v)| (v.entity.clone().unwrap_or(v.name.clone()), k.clone()))
-            .collect();
+        // Reuse the shared derivation in bids-schema (single source of truth) rather
+        // than re-deriving the abbreviation→key map from the parsed entity list.
+        let entity_name_to_key = bids_schema::context::entity_name_to_key(&raw);
         let entity_order = Self::get_entity_order_from_raw(&raw);
         let known_datatypes = Self::get_known_datatypes_from_raw(&raw);
         let modalities = Self::get_modalities_from_raw(&raw);
@@ -187,7 +186,7 @@ impl BidsSchema {
     }
 
     /// Access `schema.rules.directories`.
-    pub fn get_directory_rules_from_raw(
+    pub fn directory_rules_from_raw(
         raw: &Value,
     ) -> HashMap<String, HashMap<String, DirectoryRule>> {
         serde_json::from_value(
@@ -201,7 +200,7 @@ impl BidsSchema {
     }
 
     /// Access `schema.rules.files`.
-    pub fn get_file_rules_from_raw(raw: &Value) -> FilesRules {
+    pub fn file_rules_from_raw(raw: &Value) -> FilesRules {
         serde_json::from_value(
             raw.get("rules")
                 .unwrap_or(&Value::Null)
@@ -213,7 +212,7 @@ impl BidsSchema {
     }
 
     /// Access `schema.rules.checks`.
-    pub fn get_check_rules_from_raw(raw: &Value) -> HashMap<String, CheckNode> {
+    pub fn check_rules_from_raw(raw: &Value) -> HashMap<String, CheckNode> {
         serde_json::from_value(
             raw.get("rules")
                 .unwrap_or(&Value::Null)
@@ -225,7 +224,7 @@ impl BidsSchema {
     }
 
     /// Access `schema.rules.sidecars`.
-    pub fn get_sidecar_rules_from_raw(raw: &Value) -> HashMap<String, SidecarNode> {
+    pub fn sidecar_rules_from_raw(raw: &Value) -> HashMap<String, SidecarNode> {
         serde_json::from_value(
             raw.get("rules")
                 .unwrap_or(&Value::Null)
@@ -236,7 +235,7 @@ impl BidsSchema {
         .unwrap()
     }
 
-    pub fn get_json_rules_from_raw(raw: &Value) -> HashMap<String, JsonNode> {
+    pub fn json_rules_from_raw(raw: &Value) -> HashMap<String, JsonNode> {
         serde_json::from_value(
             raw.get("rules")
                 .unwrap_or(&Value::Null)
@@ -247,9 +246,7 @@ impl BidsSchema {
         .unwrap()
     }
 
-    pub fn get_dataset_metadata_rules_from_raw(
-        raw: &Value,
-    ) -> HashMap<String, DatasetMetadataRuleDef> {
+    pub fn dataset_metadata_rules_from_raw(raw: &Value) -> HashMap<String, DatasetMetadataRuleDef> {
         serde_json::from_value(
             raw.get("rules")
                 .unwrap_or(&Value::Null)
@@ -261,7 +258,7 @@ impl BidsSchema {
     }
 
     /// Access `schema.rules.tabular_data`.
-    pub fn get_tabular_data_rules_from_raw(raw: &Value) -> HashMap<String, TabularNode> {
+    pub fn tabular_data_rules_from_raw(raw: &Value) -> HashMap<String, TabularNode> {
         serde_json::from_value(
             raw.get("rules")
                 .unwrap_or(&Value::Null)
@@ -273,7 +270,7 @@ impl BidsSchema {
     }
 
     /// Access `schema.rules.errors`.
-    fn get_error_rules_from_raw(raw: &Value) -> HashMap<String, ErrorRule> {
+    fn error_rules_from_raw(raw: &Value) -> HashMap<String, ErrorRule> {
         serde_json::from_value(
             raw.get("rules")
                 .unwrap_or(&Value::Null)
@@ -399,26 +396,17 @@ impl BidsSchema {
             .unwrap_or_default()
     }
 
-    /// Collect the datatype values (`objects.datatypes.*.value`) from `raw`.
+    /// The known datatype names from `raw`. Delegates to the shared owner in
+    /// `bids-schema` (single source of truth); datatype key == value in the schema.
     fn get_known_datatypes_from_raw(raw: &Value) -> Vec<String> {
-        raw.get("objects")
-            .and_then(|o| o.get("datatypes"))
-            .and_then(|v| v.as_object())
-            .map(|obj| {
-                obj.values()
-                    .filter_map(|v| v.get("value").and_then(|s| s.as_str()).map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default()
+        bids_schema::datatypes::datatypes(raw)
     }
 
     /// Get the set of pseudo-file extensions (extensions ending with `/`).
+    /// Delegates to the shared owner in `bids-schema` (single source of truth)
+    /// rather than re-deriving from the parsed `ExtensionDef` list.
     pub fn pseudo_file_extensions(&self) -> Vec<String> {
-        self.extensions()
-            .values()
-            .map(|v| v.value.clone())
-            .filter(|s| s.ends_with('/'))
-            .collect()
+        bids_schema::pseudo_file_extensions(&self.raw)
     }
 
     /// Resolve a dot-separated schema path (e.g. "rules.files.raw.anat.nonparametric")
@@ -454,7 +442,7 @@ impl BidsSchema {
                         .and_then(|m| m.as_str())
                         .unwrap_or("")
                         .to_string(),
-                    level: Some(Severity::from_level_str(
+                    level: Some(Severity::from(
                         err_val
                             .get("level")
                             .and_then(|l| l.as_str())
@@ -474,7 +462,7 @@ impl BidsSchema {
                             .and_then(|m| m.as_str())
                             .unwrap_or("")
                             .to_string(),
-                        level: Some(Severity::from_level_str(
+                        level: Some(Severity::from(
                             err_val
                                 .get("level")
                                 .and_then(|l| l.as_str())
@@ -501,7 +489,7 @@ impl BidsSchema {
                                         .and_then(|m| m.as_str())
                                         .unwrap_or("")
                                         .to_string(),
-                                    level: Some(Severity::from_level_str(
+                                    level: Some(Severity::from(
                                         issue_val
                                             .get("level")
                                             .and_then(|l| l.as_str())

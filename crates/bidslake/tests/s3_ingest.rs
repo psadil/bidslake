@@ -8,7 +8,7 @@
 //! Anonymous/unsigned access is used, so no AWS credentials are required.
 
 use bidslake::{
-    bids::BidsParser,
+    bids::{BidsParser, S3Httpfs},
     db::BidsDb,
     fs::BidsFileSystem,
     s3::{self, S3Client},
@@ -22,15 +22,22 @@ const BUCKET: &str = "openneuro.org";
 /// httpfs onto both the write and preflight connections exactly as `main` does.
 async fn ingest_s3(dataset: &str) -> anyhow::Result<BidsDb> {
     let db = BidsDb::new(":memory:")?;
-    let schema = Schema::load(None);
+    let schema = Schema::load(None).unwrap();
     db.create_tables(&schema)?;
 
-    let client = S3Client::new(BUCKET, dataset, true).await?;
+    let client = S3Client::new(BUCKET, dataset, s3::SigningMode::Anonymous).await?;
     let region = client.region().to_string();
     s3::configure_httpfs(&db.conn, &region, true)?;
 
-    let mut parser = BidsParser::new(Box::new(client), Some(dataset.to_string()), schema);
-    parser.configure_s3_httpfs(&region, true)?;
+    let mut parser = BidsParser::new(
+        Box::new(client),
+        Some(dataset.to_string()),
+        schema,
+        Some(S3Httpfs {
+            region: region.clone(),
+            anonymous: true,
+        }),
+    );
 
     let txn = db.conn.unchecked_transaction()?;
     parser.parse(&db).await?;
@@ -49,7 +56,7 @@ fn count(db: &BidsDb, table: &str) -> i64 {
 #[tokio::test]
 #[ignore = "network: hits s3://openneuro.org"]
 async fn s3_methods_walk_and_read() -> anyhow::Result<()> {
-    let client = S3Client::new(BUCKET, "ds000001", true).await?;
+    let client = S3Client::new(BUCKET, "ds000001", s3::SigningMode::Anonymous).await?;
 
     let files = client.walk(&[]).await?;
     assert!(
@@ -101,7 +108,7 @@ async fn s3_full_ingest_ds000001() -> anyhow::Result<()> {
     assert_eq!(skipped, 0, "no tabular file should be skipped over S3");
 
     // No rows dropped: compare a sample events file's DB count to its raw S3 lines.
-    let client = S3Client::new(BUCKET, "ds000001", true).await?;
+    let client = S3Client::new(BUCKET, "ds000001", s3::SigningMode::Anonymous).await?;
     let sample: String = db.conn.query_row(
         "SELECT file_path FROM events GROUP BY file_path ORDER BY file_path LIMIT 1",
         [],

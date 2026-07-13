@@ -81,8 +81,14 @@ async fn main() -> Result<()> {
             no_sign_request,
             schema_path,
         } => {
-            let schema_path_str = schema_path.as_ref().map(|p| p.to_str().unwrap());
-            let schema = Schema::load(schema_path_str);
+            let schema_path_str = schema_path
+                .as_deref()
+                .map(|p| {
+                    p.to_str()
+                        .ok_or_else(|| anyhow::anyhow!("--schema path is not valid UTF-8: {p:?}"))
+                })
+                .transpose()?;
+            let schema = Schema::load(schema_path_str)?;
             run_indexer(input, output, dataset_id, no_sign_request, schema).await
         }
         Commands::Verify { database } => {
@@ -123,7 +129,12 @@ async fn run_indexer(
             let prefix = if parts.len() > 1 { parts[1] } else { "" };
 
             println!("Using S3 backend: bucket={}, prefix={}", bucket, prefix);
-            let client = s3::S3Client::new(bucket, prefix, no_sign_request).await?;
+            let signing = if no_sign_request {
+                s3::SigningMode::Anonymous
+            } else {
+                s3::SigningMode::Signed
+            };
+            let client = s3::S3Client::new(bucket, prefix, signing).await?;
             s3_httpfs = Some((client.region().to_string(), client.anonymous()));
             Box::new(client)
         }
@@ -138,10 +149,13 @@ async fn run_indexer(
         s3::configure_httpfs(&db.conn, region, *anonymous)?;
     }
 
-    let mut parser: BidsParser = BidsParser::new(fs, dataset_id, schema);
-    if let Some((region, anonymous)) = &s3_httpfs {
-        parser.configure_s3_httpfs(region, *anonymous)?;
-    }
+    let s3_httpfs_cfg = s3_httpfs
+        .as_ref()
+        .map(|(region, anonymous)| bids::S3Httpfs {
+            region: region.clone(),
+            anonymous: *anonymous,
+        });
+    let mut parser: BidsParser = BidsParser::new(fs, dataset_id, schema, s3_httpfs_cfg);
 
     // Wrap the whole ingest in one transaction. DuckDB otherwise autocommits
     // every statement, fsyncing per row on a file-backed database — the single

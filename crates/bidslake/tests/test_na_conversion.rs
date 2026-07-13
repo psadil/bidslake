@@ -10,7 +10,7 @@ fn test_na_value_in_numeric_column() -> anyhow::Result<()> {
     let db = BidsDb::new(db_path.to_str().unwrap())?;
 
     // Load schema
-    let schema = Schema::load(None);
+    let schema = Schema::load(None).unwrap();
     db.create_tables(&schema)?;
 
     // Try to insert a scan with "n/a" in a numeric field (e.g., RepetitionTime)

@@ -71,7 +71,7 @@ fn eval_check_rule(
     context: &BidsContext,
     issues: &mut DatasetIssues,
 ) {
-    if !do_selectors_select(&rule.selectors, ctx_value) {
+    if !do_selectors_select(rule.selectors.as_deref(), ctx_value) {
         return;
     }
 

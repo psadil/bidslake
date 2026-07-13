@@ -26,8 +26,11 @@ impl fmt::Display for Severity {
     }
 }
 
-impl Severity {
-    pub fn from_level_str(s: &str) -> Self {
+/// Infallible parse of a BIDS level string; unknown levels default to `Warning`.
+/// Uses the standard conversion trait so callers can write `s.into()` and the type
+/// composes with generic `From` bounds.
+impl From<&str> for Severity {
+    fn from(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "error" => Severity::Error,
             "warning" => Severity::Warning,

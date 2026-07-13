@@ -34,12 +34,12 @@
 //! # use bidslake::{bids::BidsParser, db::BidsDb, fs::LocalFileSystem, schema::Schema};
 //! # tokio::runtime::Runtime::new().unwrap().block_on(async {
 //! let db = BidsDb::new(":memory:")?;
-//! let schema = Schema::load(None);
+//! let schema = Schema::load(None)?;
 //! db.create_tables(&schema)?;
 //!
 //! let dataset = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/bids-examples/ds001");
 //! let fs = Box::new(LocalFileSystem::new(dataset));
-//! BidsParser::new(fs, None, schema).parse(&db).await?;
+//! BidsParser::new(fs, None, schema, None).parse(&db).await?;
 //!
 //! let mut stmt = db.conn.prepare(
 //!     "SELECT s.file_path \
@@ -75,14 +75,14 @@
 //! # use bidslake::{bids::BidsParser, db::BidsDb, fs::LocalFileSystem, schema::Schema};
 //! # tokio::runtime::Runtime::new().unwrap().block_on(async {
 //! let db = BidsDb::new(":memory:")?;
-//! let schema = Schema::load(None);
+//! let schema = Schema::load(None)?;
 //! db.create_tables(&schema)?;
 //!
 //! // Aggregate two datasets into one database (ds001 has no sessions; ds114 does).
 //! for name in ["ds001", "ds114"] {
 //!     let path = format!("{}/tests/bids-examples/{}", env!("CARGO_MANIFEST_DIR"), name);
 //!     let fs = Box::new(LocalFileSystem::new(path));
-//!     BidsParser::new(fs, Some(name.to_string()), schema.clone()).parse(&db).await?;
+//!     BidsParser::new(fs, Some(name.to_string()), schema.clone(), None).parse(&db).await?;
 //! }
 //!
 //! // Functional BOLD runs across both datasets — by concept, not by path.
@@ -104,10 +104,10 @@
 //! # use bidslake::{bids::BidsParser, db::BidsDb, fs::LocalFileSystem, schema::Schema};
 //! # tokio::runtime::Runtime::new().unwrap().block_on(async {
 //! # let db = BidsDb::new(":memory:")?;
-//! # let schema = Schema::load(None);
+//! # let schema = Schema::load(None)?;
 //! # db.create_tables(&schema)?;
 //! # let dataset = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/bids-examples/ds001");
-//! # BidsParser::new(Box::new(LocalFileSystem::new(dataset)), None, schema).parse(&db).await?;
+//! # BidsParser::new(Box::new(LocalFileSystem::new(dataset)), None, schema, None).parse(&db).await?;
 //! db.conn.execute(
 //!     "UPDATE participants SET participant_id = 'sub-001' WHERE participant_id = 'sub-01'",
 //!     [],
@@ -131,10 +131,10 @@
 //! # use bidslake::{bids::BidsParser, db::BidsDb, fs::LocalFileSystem, schema::Schema};
 //! # tokio::runtime::Runtime::new().unwrap().block_on(async {
 //! # let db = BidsDb::new(":memory:")?;
-//! # let schema = Schema::load(None);
+//! # let schema = Schema::load(None)?;
 //! # db.create_tables(&schema)?;
 //! # let dataset = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/bids-examples/2d_mb_pcasl");
-//! # BidsParser::new(Box::new(LocalFileSystem::new(dataset)), None, schema).parse(&db).await?;
+//! # BidsParser::new(Box::new(LocalFileSystem::new(dataset)), None, schema, None).parse(&db).await?;
 //! let mut stmt = db.conn.prepare(
 //!     "SELECT target_file_path, source_file_path \
 //!      FROM file_associations WHERE association_type = 'fieldmap'",

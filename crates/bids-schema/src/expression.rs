@@ -90,6 +90,7 @@ impl ValueExt for Value {
 ///
 /// This is the Rust counterpart to the reference TS validator, which evaluates
 /// `with (context)` against a live context object.
+#[derive(Debug, Clone, Copy)]
 pub struct EvalContext<'a> {
     /// Per-file bindings (`path`, `entities`, `suffix`, `sidecar`, `associations`, …).
     file: &'a Value,
@@ -187,7 +188,7 @@ pub fn evaluate_bool(expr_str: &str, context: &EvalContext) -> Result<bool, Stri
 /// rule — which is how unsupported syntax (parenthesized expressions, `**`) once turned off nine
 /// rules unnoticed. `every_schema_expression_evaluates` (tests/expression_conformance.rs) asserts
 /// that no expression in the bundled schema errors, so this branch is unreachable in practice.
-pub fn do_selectors_select(selectors: &Option<Vec<String>>, context: &EvalContext) -> bool {
+pub fn do_selectors_select(selectors: Option<&[String]>, context: &EvalContext) -> bool {
     let mut applies = true;
     if let Some(selector) = selectors {
         for s in selector {

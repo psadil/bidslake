@@ -15,7 +15,13 @@
 
 use std::path::{Path, PathBuf};
 
-use bidslake::{bids::BidsParser, db::BidsDb, fs::LocalFileSystem, s3, schema::Schema};
+use bidslake::{
+    bids::{BidsParser, S3Httpfs},
+    db::BidsDb,
+    fs::LocalFileSystem,
+    s3,
+    schema::Schema,
+};
 use criterion::{Criterion, criterion_group, criterion_main};
 
 /// Datasets chosen to exercise the cost drivers: `ds001`/`ds002`/`ds114` cover
@@ -37,10 +43,10 @@ fn ingest_once(path: &Path) {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     rt.block_on(async {
         let db = BidsDb::new(":memory:").expect("open db");
-        let schema = Schema::load(None);
+        let schema = Schema::load(None).expect("load schema");
         db.create_tables(&schema).expect("create tables");
         let fs = Box::new(LocalFileSystem::new(path.to_path_buf()));
-        let mut parser = BidsParser::new(fs, None, schema);
+        let mut parser = BidsParser::new(fs, None, schema, None);
         parser.parse(&db).await.expect("parse");
     });
 }
@@ -72,17 +78,22 @@ fn ingest_s3_once(dataset: &str) {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     rt.block_on(async {
         let db = BidsDb::new(":memory:").expect("open db");
-        let schema = Schema::load(None);
+        let schema = Schema::load(None).expect("load schema");
         db.create_tables(&schema).expect("create tables");
-        let client = s3::S3Client::new("openneuro.org", dataset, true)
+        let client = s3::S3Client::new("openneuro.org", dataset, s3::SigningMode::Anonymous)
             .await
             .expect("s3 client");
         let region = client.region().to_string();
         s3::configure_httpfs(&db.conn, &region, true).expect("httpfs");
-        let mut parser = BidsParser::new(Box::new(client), Some(dataset.to_string()), schema);
-        parser
-            .configure_s3_httpfs(&region, true)
-            .expect("httpfs validator");
+        let mut parser = BidsParser::new(
+            Box::new(client),
+            Some(dataset.to_string()),
+            schema,
+            Some(S3Httpfs {
+                region: region.clone(),
+                anonymous: true,
+            }),
+        );
         parser.parse(&db).await.expect("parse");
     });
 }

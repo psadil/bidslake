@@ -160,9 +160,9 @@ async fn multi_dataset_coexistence() -> anyhow::Result<()> {
     // Ingest a second dataset into the same connection.
     {
         use bidslake::{bids::BidsParser, fs::LocalFileSystem, schema::Schema};
-        let schema = Schema::load(None);
+        let schema = Schema::load(None).unwrap();
         let fs = Box::new(LocalFileSystem::new(common::bids_example("ds114")));
-        let mut parser = BidsParser::new(fs, None, schema);
+        let mut parser = BidsParser::new(fs, None, schema, None);
         parser.parse(&db).await?;
     }
 

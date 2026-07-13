@@ -130,6 +130,24 @@ impl Selector {
                 | Selector::Datatype(_)
         )
     }
+
+    /// A stable string key for grouping rules into tables, independent of `Debug`
+    /// output (which is explicitly not a stability contract). Only the identity
+    /// variants need a meaningful key — [`TabularRule::identity_key`] filters to
+    /// those via [`Self::is_identity`] — but the match is total so it can't silently
+    /// change if a variant is added.
+    fn canonical(&self) -> String {
+        match self {
+            Selector::Path(p) => format!("path={p}"),
+            Selector::Suffix(s) => format!("suffix={s}"),
+            Selector::SuffixIn(v) => format!("suffixin={}", v.join(",")),
+            Selector::Extension(e) => format!("extension={e}"),
+            Selector::Datatype(d) => format!("datatype={d}"),
+            Selector::Sidecar { key, value } => format!("sidecar.{key}={value}"),
+            Selector::DatasetType(d) => format!("datasettype={d}"),
+            Selector::Unsupported(s) => format!("unsupported={s}"),
+        }
+    }
 }
 
 /// One leaf rule of `rules.tabular_data`.
@@ -147,14 +165,14 @@ pub struct TabularRule {
 }
 
 impl TabularRule {
-    /// A rule matches a file iff all its selectors evaluate true — delegated to the shared BIDS
-    /// expression evaluator (`bids_schema::expression`) over the raw selector strings, so the
+    /// A rule matches a file iff all its selectors evaluate true against an
+    /// already-built [`EvalContext`] — delegated to the shared BIDS expression
+    /// evaluator (`bids_schema::expression`) over the raw selector strings, so the
     /// full schema selector language is honoured (not bidslake's partial parser).
-    pub fn matches(&self, ctx: &FileContext) -> bool {
-        let (file, dataset) = ctx.eval_bindings();
-        let null = Value::Null;
-        let eval = bids_schema::expression::EvalContext::new(&file, &dataset, &null, &null);
-        bids_schema::expression::do_selectors_select(&Some(self.selectors_raw.clone()), &eval)
+    /// `route`/`matching_rules` build the (loop-invariant) context once per file
+    /// and reuse it across every rule.
+    pub fn matches_with(&self, eval: &bids_schema::expression::EvalContext) -> bool {
+        bids_schema::expression::do_selectors_select(Some(self.selectors_raw.as_slice()), eval)
     }
 
     /// The `datatype ==` selector's value, if the rule has one (used to
@@ -173,7 +191,7 @@ impl TabularRule {
             .selectors
             .iter()
             .filter(|s| s.is_identity())
-            .map(|s| format!("{s:?}"))
+            .map(Selector::canonical)
             .collect();
         parts.sort();
         parts.join("&")
@@ -249,19 +267,29 @@ impl Tabular {
     }
 
     /// Every rule whose selectors all pass for `ctx` (additive — a file can match
-    /// a base rule and its sidecar-conditional overlays). Used by the headerless
-    /// recording ingest, which needs the union of matching rules' columns.
-    #[allow(dead_code)] // consumed by the headerless-recording ingest (next change)
+    /// a base rule and its sidecar-conditional overlays). Test-only helper for
+    /// asserting overlay matching; ingest routes via [`Self::route`].
+    #[cfg(test)]
     pub fn matching_rules(&self, ctx: &FileContext) -> Vec<&TabularRule> {
-        self.rules.iter().filter(|r| r.matches(ctx)).collect()
+        let (file, dataset) = ctx.eval_bindings();
+        let null = Value::Null;
+        let eval = bids_schema::expression::EvalContext::new(&file, &dataset, &null, &null);
+        self.rules
+            .iter()
+            .filter(|r| r.matches_with(&eval))
+            .collect()
     }
 
     /// The table a file routes to, or `None` if no rule matches it. All rules that
     /// match a given file share one table (they differ only by conditions), so the
-    /// first match's table is the answer.
+    /// first match's table is the answer. The selector context is loop-invariant,
+    /// so it is built once here rather than per rule.
     pub fn route(&self, ctx: &FileContext) -> Option<&TableSpec> {
+        let (file, dataset) = ctx.eval_bindings();
+        let null = Value::Null;
+        let eval = bids_schema::expression::EvalContext::new(&file, &dataset, &null, &null);
         for r in &self.rules {
-            if r.matches(ctx)
+            if r.matches_with(&eval)
                 && let Some(&idx) = self.rule_table.get(&r.id)
             {
                 return Some(&self.tables[idx]);

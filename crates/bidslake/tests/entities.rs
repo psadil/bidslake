@@ -93,9 +93,9 @@ async fn query_by_concept_across_mixed_pool() -> anyhow::Result<()> {
     let db = ingest(bids_example("ds210")).await?;
     {
         use bidslake::{bids::BidsParser, fs::LocalFileSystem, schema::Schema};
-        let schema = Schema::load(None);
+        let schema = Schema::load(None).unwrap();
         let fs = Box::new(LocalFileSystem::new(bids_example("eyetracking_fmri")));
-        let mut parser = BidsParser::new(fs, Some("eyetracking_fmri".to_string()), schema);
+        let mut parser = BidsParser::new(fs, Some("eyetracking_fmri".to_string()), schema, None);
         parser.parse(&db).await?;
     }
 

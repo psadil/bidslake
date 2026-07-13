@@ -55,7 +55,7 @@ pub fn resolve_associations(
             .iter()
             .filter_map(|s| s.as_str().map(|s| s.to_string()))
             .collect();
-        if !do_selectors_select(&Some(selector_strings), &eval_ctx) {
+        if !do_selectors_select(Some(selector_strings.as_slice()), &eval_ctx) {
             continue;
         }
         let Some(target) = assoc_def.get("target") else {

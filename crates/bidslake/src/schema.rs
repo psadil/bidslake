@@ -144,6 +144,10 @@ pub use dynamic::Schema;
 //                   metadata, so for now they stay as files.
 //   - `skipped`   — a tabular file the BIDS schema does not describe (`table_name`
 //                   NULL).
+//   - `failed`    — a batch `INSERT` execution error dropped the file's rows for
+//                   this run (distinct from an empty-but-successful `ingested`);
+//                   `table_name` names the table it was routed to, `n_rows` 0.
+// The set is modeled by [`crate::db::TabularStatus`].
 pub const CREATE_TABULAR_FILES_TABLE: &str = "
 CREATE TABLE IF NOT EXISTS tabular_files (
     dataset_id TEXT,

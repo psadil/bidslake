@@ -61,17 +61,20 @@ pub struct Schema {
 }
 
 impl Schema {
-    pub fn load(schema_path: Option<&str>) -> Self {
+    /// Load the schema and generate the table model. `Some(path)` reads a
+    /// user-supplied schema.json — fallible, so a missing or malformed file is an
+    /// `Err` rather than a panic. `None` uses the embedded schema, a build
+    /// invariant that is `.expect()`ed.
+    pub fn load(schema_path: Option<&str>) -> anyhow::Result<Self> {
+        use anyhow::Context as _;
         let schema: Value = match schema_path {
             Some(path) => {
                 let content = std::fs::read_to_string(path)
-                    .unwrap_or_else(|e| panic!("Failed to read schema file {}: {}", path, e));
+                    .with_context(|| format!("reading schema file {path}"))?;
                 serde_json::from_str(&content)
-                    .unwrap_or_else(|e| panic!("Failed to parse schema file {}: {}", path, e))
+                    .with_context(|| format!("parsing schema file {path}"))?
             }
-            None => {
-                serde_json::from_str(SCHEMA_JSON).expect("Failed to parse embedded schema.json")
-            }
+            None => serde_json::from_str(SCHEMA_JSON).expect("embedded schema.json must parse"),
         };
 
         let tabular = Tabular::load(&schema);
@@ -85,7 +88,7 @@ impl Schema {
         };
         instance.generate_definitions();
         instance.build_insert_statements();
-        instance
+        Ok(instance)
     }
 
     /// The schema-driven tabular model — which tables exist and their columns,
@@ -96,12 +99,10 @@ impl Schema {
 
     /// The BIDS datatype directory names (`func`, `anat`, `eeg`, `phenotype`, …)
     /// from `objects.datatypes`. Ingestion uses these to derive a file's datatype
-    /// from its path for selector evaluation.
+    /// from its path for selector evaluation. Delegates to the shared owner in
+    /// `bids-schema` (single source of truth).
     pub fn datatypes(&self) -> Vec<String> {
-        self.schema["objects"]["datatypes"]
-            .as_object()
-            .map(|m| m.keys().cloned().collect())
-            .unwrap_or_default()
+        bids_schema::datatypes::datatypes(&self.schema)
     }
 
     /// The raw parsed BIDS schema JSON — for the shared `bids_schema` helpers
@@ -329,15 +330,14 @@ impl Schema {
         }
     }
 
-    /// Extract all metadata field definitions from schema.json
-    fn extract_metadata_fields(&self) -> HashMap<String, (String, bool)> {
+    /// Extract all metadata field definitions (`field name -> SQL type`) from
+    /// schema.json.
+    fn extract_metadata_fields(&self) -> HashMap<String, String> {
         let mut fields = HashMap::new();
 
         if let Some(metadata) = self.schema["objects"]["metadata"].as_object() {
             for (field_name, field_def) in metadata {
-                let sql_type = json_type_to_sql(field_def);
-                // For now, assume all fields are nullable (we'll refine this later based on REQUIRED/RECOMMENDED)
-                fields.insert(field_name.clone(), (sql_type, true));
+                fields.insert(field_name.clone(), json_type_to_sql(field_def));
             }
         }
 
@@ -383,37 +383,28 @@ impl Schema {
     fn generated_bids_columns(&self) -> Vec<String> {
         let mut cols = Vec::new();
 
-        // One column per BIDS entity, keyed by its short `name`.
-        if let Some(entities) = self.schema["objects"]["entities"].as_object() {
-            let mut ents: Vec<(&str, &str)> = entities
-                .values()
-                .filter_map(|e| {
-                    let name = e.get("name")?.as_str()?;
-                    let valpat = match e.get("format").and_then(|f| f.as_str()) {
-                        Some("index") => "[0-9]+",
-                        _ => "[0-9A-Za-z]+",
-                    };
-                    Some((name, valpat))
-                })
-                .collect();
-            ents.sort_by(|a, b| a.0.cmp(b.0)); // deterministic DDL
-            for (name, valpat) in ents {
-                cols.push(format!(
-                    "\"{name}\" VARCHAR GENERATED ALWAYS AS (NULLIF(regexp_extract(file_path, '(?:^|[_/]){name}-({valpat})', 1), '')) VIRTUAL"
-                ));
-            }
+        // One column per BIDS entity, keyed by its short `name`. Entity set comes
+        // from the shared `bids-schema` owner (already sorted for deterministic
+        // DDL), so it can't diverge from the Python-generated `Entity` Literal.
+        for e in bids_schema::datatypes::entities(&self.schema) {
+            let valpat = if e.format.as_deref() == Some("index") {
+                "[0-9]+"
+            } else {
+                "[0-9A-Za-z]+"
+            };
+            let name = &e.name;
+            cols.push(format!(
+                "\"{name}\" VARCHAR GENERATED ALWAYS AS (NULLIF(regexp_extract(file_path, '(?:^|[_/]){name}-({valpat})', 1), '')) VIRTUAL"
+            ));
         }
 
-        // datatype directory (func/anat/dwi/...).
-        if let Some(dts) = self.schema["objects"]["datatypes"].as_object() {
-            let mut keys: Vec<&str> = dts.keys().map(|k| k.as_str()).collect();
-            keys.sort();
-            if !keys.is_empty() {
-                let alt = keys.join("|");
-                cols.push(format!(
-                    "datatype VARCHAR GENERATED ALWAYS AS (NULLIF(regexp_extract(file_path, '/({alt})/', 1), '')) VIRTUAL"
-                ));
-            }
+        // datatype directory (func/anat/dwi/...), from the shared owner.
+        let datatypes = bids_schema::datatypes::datatypes(&self.schema);
+        if !datatypes.is_empty() {
+            let alt = datatypes.join("|");
+            cols.push(format!(
+                "datatype VARCHAR GENERATED ALWAYS AS (NULLIF(regexp_extract(file_path, '/({alt})/', 1), '')) VIRTUAL"
+            ));
         }
 
         // suffix (trailing _<suffix> before the extension) and extension.
@@ -444,28 +435,26 @@ impl Schema {
         }
 
         // modality (mri/eeg/...) mapped from the datatype dir via rules.modalities.
-        if let Some(mods) = self.schema["rules"]["modalities"].as_object() {
-            let mut keys: Vec<&str> = mods.keys().map(|k| k.as_str()).collect();
-            keys.sort();
-            let mut whens = Vec::new();
-            for m in keys {
-                if let Some(dts) = mods[m]["datatypes"].as_array() {
-                    let alt: Vec<&str> = dts.iter().filter_map(|d| d.as_str()).collect();
-                    if !alt.is_empty() {
-                        whens.push(format!(
-                            "WHEN regexp_matches(file_path, '/({})/') THEN '{}'",
-                            alt.join("|"),
-                            m
-                        ));
-                    }
+        // Modality set (sorted) comes from the shared owner; the per-modality
+        // datatype list is still read from the schema for the CASE arms.
+        let mut whens = Vec::new();
+        for m in bids_schema::datatypes::modalities(&self.schema) {
+            if let Some(dts) = self.schema["rules"]["modalities"][&m]["datatypes"].as_array() {
+                let alt: Vec<&str> = dts.iter().filter_map(|d| d.as_str()).collect();
+                if !alt.is_empty() {
+                    whens.push(format!(
+                        "WHEN regexp_matches(file_path, '/({})/') THEN '{}'",
+                        alt.join("|"),
+                        m
+                    ));
                 }
             }
-            if !whens.is_empty() {
-                cols.push(format!(
-                    "modality VARCHAR GENERATED ALWAYS AS (CASE {} ELSE NULL END) VIRTUAL",
-                    whens.join(" ")
-                ));
-            }
+        }
+        if !whens.is_empty() {
+            cols.push(format!(
+                "modality VARCHAR GENERATED ALWAYS AS (CASE {} ELSE NULL END) VIRTUAL",
+                whens.join(" ")
+            ));
         }
 
         cols
@@ -504,7 +493,7 @@ impl Schema {
         let mut sorted_fields: Vec<_> = metadata_fields.into_iter().collect();
         sorted_fields.sort_by(|a, b| a.0.cmp(&b.0));
 
-        for (field_name, (sql_type, _nullable)) in sorted_fields {
+        for (field_name, sql_type) in sorted_fields {
             // Keep the verbatim BIDS field name as the column (only bidslake-internal
             // columns are snake_case), so the DB column, the `metadata` dict key, and
             // the BIDS spec all agree. Dedup case-insensitively because DuckDB folds
@@ -660,8 +649,8 @@ impl Schema {
     }
 
     #[allow(dead_code)]
-    pub fn get_create_sql(&self, table_name: &str) -> Option<&String> {
-        self.table_definitions.get(table_name)
+    pub fn get_create_sql(&self, table_name: &str) -> Option<&str> {
+        self.table_definitions.get(table_name).map(String::as_str)
     }
 
     pub fn insert(&self, conn: &Connection, table_name: &str, data: &Value) -> Result<()> {
@@ -843,6 +832,22 @@ fn is_temporal_type(col_type: &str) -> bool {
 /// case-sensitive (`HED`), so they must be quoted wherever they appear in SQL.
 pub(crate) fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// A SQL string literal: single-quoted, with embedded `'` doubled. Lives next to
+/// [`quote_ident`] so one place owns SQL literal- and identifier-escaping.
+pub(crate) fn sql_lit(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+/// The comma-joined SQL string-literal list for an `IN (…)` clause, each item
+/// escaped via [`sql_lit`].
+pub(crate) fn sql_in_list<'a>(items: impl IntoIterator<Item = &'a str>) -> String {
+    items
+        .into_iter()
+        .map(sql_lit)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Map a BIDS schema field/column definition to a DuckDB column type.
