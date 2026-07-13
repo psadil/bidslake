@@ -46,7 +46,7 @@ fn ingest_once(path: &Path) {
         let schema = Schema::load(None).expect("load schema");
         db.create_tables(&schema).expect("create tables");
         let fs = Box::new(LocalFileSystem::new(path.to_path_buf()));
-        let mut parser = BidsParser::new(fs, None, schema, None);
+        let mut parser = BidsParser::new(fs, None, schema, None, true);
         parser.parse(&db).await.expect("parse");
     });
 }
@@ -93,6 +93,7 @@ fn ingest_s3_once(dataset: &str) {
                 region: region.clone(),
                 anonymous: true,
             }),
+            true,
         );
         parser.parse(&db).await.expect("parse");
     });

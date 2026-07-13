@@ -71,7 +71,7 @@ async fn test_participants_tsv_na() -> anyhow::Result<()> {
     assert!(found_sex, "Sex column not found in participants table");
 
     let fs = Box::new(LocalFileSystem::new(dataset_path));
-    let mut parser = BidsParser::new(fs, None, schema, None);
+    let mut parser = BidsParser::new(fs, None, schema, None, true);
 
     // This should fail if age is numeric and n/a is not handled
     parser.parse(&db).await?;

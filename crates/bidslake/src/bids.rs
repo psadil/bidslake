@@ -100,6 +100,10 @@ pub struct BidsParser {
     /// [`Self::parse`]. `None` for local datasets.
     s3_httpfs: Option<S3Httpfs>,
     ignore_set: Gitignore,
+    /// Whether to honor the dataset's `.bidsignore`. False (via `--no-bidsignore`)
+    /// walks and classifies every file, so overlay-described derivative outputs a
+    /// pipeline hides (e.g. fMRIPrep's `*_timeseries.tsv`, `*_xfm.*`) are indexed.
+    apply_bidsignore: bool,
     pending_associations: Vec<FileAssociation>,
     pending_diffusion: HashMap<String, PendingDiffusion>,
     schema: Schema,
@@ -206,6 +210,7 @@ impl BidsParser {
         dataset_id: Option<String>,
         schema: Schema,
         s3_httpfs: Option<S3Httpfs>,
+        apply_bidsignore: bool,
     ) -> Self {
         let datatypes = schema.datatypes().into_iter().collect();
         Self {
@@ -213,6 +218,7 @@ impl BidsParser {
             dataset_id,
             s3_httpfs,
             ignore_set: Gitignore::empty(),
+            apply_bidsignore,
             pending_associations: Vec::new(),
             pending_diffusion: HashMap::new(),
             schema,
@@ -277,8 +283,11 @@ impl BidsParser {
         // later phases are timed against a rolling `phase_start`.
         let t_walk = self.phase_timer.mark();
 
-        // Load .bidsignore patterns before parsing
-        self.load_bidsignore().await?;
+        // Load .bidsignore patterns before parsing (unless `--no-bidsignore`, which
+        // leaves `ignore_set` empty so nothing is filtered on the parser side either).
+        if self.apply_bidsignore {
+            self.load_bidsignore().await?;
+        }
 
         // Collect all file paths first
         let mut dataset_description: Vec<std::path::PathBuf> = Vec::new();
@@ -289,7 +298,8 @@ impl BidsParser {
         // Pseudo-file extensions (`.ds/`, `.ome.zarr/`, …) from the schema, so opaque BIDS
         // directories are emitted as single files (and become association sources).
         let pseudo_exts = bids_schema::pseudo_file_extensions(self.schema.raw());
-        let files: Vec<std::path::PathBuf> = self.fs.walk(&pseudo_exts).await?;
+        let files: Vec<std::path::PathBuf> =
+            self.fs.walk(&pseudo_exts, self.apply_bidsignore).await?;
 
         for path in files {
             let file_name = path.file_name().unwrap().to_str().unwrap();

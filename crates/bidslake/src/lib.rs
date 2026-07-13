@@ -39,7 +39,7 @@
 //!
 //! let dataset = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/bids-examples/ds001");
 //! let fs = Box::new(LocalFileSystem::new(dataset));
-//! BidsParser::new(fs, None, schema, None).parse(&db).await?;
+//! BidsParser::new(fs, None, schema, None, true).parse(&db).await?;
 //!
 //! let mut stmt = db.conn.prepare(
 //!     "SELECT s.file_path \

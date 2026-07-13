@@ -24,7 +24,7 @@ pub async fn ingest(dataset_path: impl AsRef<Path>) -> Result<BidsDb> {
     db.create_tables(&schema)?;
 
     let fs = Box::new(LocalFileSystem::new(dataset_path.as_ref().to_path_buf()));
-    let mut parser = BidsParser::new(fs, None, schema, None);
+    let mut parser = BidsParser::new(fs, None, schema, None, true);
     let txn = db.conn.unchecked_transaction()?;
     parser.parse(&db).await?;
     txn.commit()?;
@@ -37,7 +37,7 @@ pub async fn ingest_with_schema(dataset_path: impl AsRef<Path>, schema: Schema) 
     let db = BidsDb::new(":memory:")?;
     db.create_tables(&schema)?;
     let fs = Box::new(LocalFileSystem::new(dataset_path.as_ref().to_path_buf()));
-    let mut parser = BidsParser::new(fs, None, schema, None);
+    let mut parser = BidsParser::new(fs, None, schema, None, true);
     let txn = db.conn.unchecked_transaction()?;
     parser.parse(&db).await?;
     txn.commit()?;
@@ -59,7 +59,7 @@ pub fn count(db: &BidsDb, table: &str) -> Result<i64> {
 pub fn walk_tabular(root: &Path) -> Vec<String> {
     let schema: serde_json::Value = serde_json::from_str(bids_schema::SCHEMA_JSON).unwrap();
     let pseudo_exts = bids_schema::pseudo_file_extensions(&schema);
-    let tree = bids_core::filetree::read_file_tree(root, &pseudo_exts)
+    let tree = bids_core::filetree::read_file_tree(root, &pseudo_exts, true)
         .unwrap_or_else(|e| panic!("read_file_tree({}) failed: {e}", root.display()));
     tree.walk_files()
         .map(|f| f.path.trim_start_matches('/').to_string())

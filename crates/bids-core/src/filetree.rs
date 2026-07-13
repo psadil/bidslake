@@ -61,11 +61,18 @@ fn get_mut_subtree<'a>(tree: &'a mut FileTree, rel_path: &str) -> Option<&'a mut
     Some(current)
 }
 
-/// Read a directory into a `FileTree`, respecting `.bidsignore` patterns.
+/// Read a directory into a `FileTree`, respecting `.bidsignore` patterns unless
+/// `apply_bidsignore` is false.
 ///
 /// The `root` path should point to the top of the BIDS dataset (the directory
-/// containing `dataset_description.json`).
-pub fn read_file_tree(root: &Path, pseudo_exts: &[String]) -> Result<FileTree, std::io::Error> {
+/// containing `dataset_description.json`). Passing `apply_bidsignore = false` walks
+/// every file regardless of `.bidsignore` — used to index "bidsish" derivative
+/// outputs a pipeline's `.bidsignore` hides (see bidslake's `--no-bidsignore`).
+pub fn read_file_tree(
+    root: &Path,
+    pseudo_exts: &[String],
+    apply_bidsignore: bool,
+) -> Result<FileTree, std::io::Error> {
     let mut root_tree = FileTree {
         name: root
             .file_name()
@@ -87,7 +94,6 @@ pub fn read_file_tree(root: &Path, pseudo_exts: &[String]) -> Result<FileTree, s
     let mut builder = ignore::WalkBuilder::new(root);
     builder
         .standard_filters(false)
-        .add_custom_ignore_filename(".bidsignore")
         .hidden(false)
         .git_global(false)
         .git_ignore(false)
@@ -95,6 +101,9 @@ pub fn read_file_tree(root: &Path, pseudo_exts: &[String]) -> Result<FileTree, s
         .ignore(false)
         .overrides(always_ignore)
         .sort_by_file_name(|a, b| a.cmp(b));
+    if apply_bidsignore {
+        builder.add_custom_ignore_filename(".bidsignore");
+    }
 
     let walker = builder.build();
 
@@ -352,7 +361,7 @@ mod tests {
         std::fs::create_dir_all(&sub).unwrap();
         std::fs::write(sub.join("sub-01_T1w.nii.gz"), "data").unwrap();
 
-        let tree = read_file_tree(root, &[]).unwrap();
+        let tree = read_file_tree(root, &[], true).unwrap();
 
         // The always-ignored directories must not appear
         for pattern in ALWAYS_IGNORE {

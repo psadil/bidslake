@@ -16,7 +16,13 @@ pub trait BidsFileSystem: Send + Sync {
     /// List all files in the dataset (recursively), as paths relative to the dataset root.
     /// `pseudo_exts` are the schema's pseudo-file extensions (e.g. `.ds/`, `.ome.zarr/`);
     /// directories matching them are emitted as single files rather than descended into.
-    fn walk(&self, pseudo_exts: &[String]) -> BoxFuture<'_, Result<Vec<PathBuf>>>;
+    /// `apply_bidsignore = false` walks every file regardless of `.bidsignore` (see
+    /// bidslake's `--no-bidsignore`, for indexing overlay-described derivative outputs).
+    fn walk(
+        &self,
+        pseudo_exts: &[String],
+        apply_bidsignore: bool,
+    ) -> BoxFuture<'_, Result<Vec<PathBuf>>>;
 
     /// Read file content as string
     fn read_to_string(&self, path: &Path) -> BoxFuture<'_, Result<String>>;
@@ -67,20 +73,24 @@ impl LocalFileSystem {
 }
 
 impl BidsFileSystem for LocalFileSystem {
-    fn walk(&self, pseudo_exts: &[String]) -> BoxFuture<'_, Result<Vec<PathBuf>>> {
+    fn walk(
+        &self,
+        pseudo_exts: &[String],
+        apply_bidsignore: bool,
+    ) -> BoxFuture<'_, Result<Vec<PathBuf>>> {
         let root = self.root.clone();
         let pseudo: Vec<String> = pseudo_exts.to_vec();
         Box::pin(async move {
             // Delegate to the shared `bids-core` walker: it applies `.bidsignore`
-            // (including nested ones), hidden-file, and always-ignore (`.git`,
-            // `.datalad`, …) rules during the walk. `pseudo_exts` (from the schema)
-            // makes opaque directories like `.ds`/`.ome.zarr` come through as single
-            // files rather than being descended into. `read_file_tree` is synchronous,
-            // so run it on a blocking thread. The returned paths are root-relative with
-            // a leading `/`, which we strip to match the dataset-relative frame the rest
-            // of the pipeline expects.
+            // (including nested ones) unless `apply_bidsignore` is false, plus
+            // hidden-file and always-ignore (`.git`, `.datalad`, …) rules during the
+            // walk. `pseudo_exts` (from the schema) makes opaque directories like
+            // `.ds`/`.ome.zarr` come through as single files rather than being
+            // descended into. `read_file_tree` is synchronous, so run it on a blocking
+            // thread. The returned paths are root-relative with a leading `/`, which we
+            // strip to match the dataset-relative frame the rest of the pipeline expects.
             let tree = tokio::task::spawn_blocking(move || {
-                bids_core::filetree::read_file_tree(&root, &pseudo)
+                bids_core::filetree::read_file_tree(&root, &pseudo, apply_bidsignore)
             })
             .await??;
             // Flatten to the dataset-relative paths the pipeline expects (strip the

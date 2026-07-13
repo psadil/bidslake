@@ -162,7 +162,7 @@ async fn multi_dataset_coexistence() -> anyhow::Result<()> {
         use bidslake::{bids::BidsParser, fs::LocalFileSystem, schema::Schema};
         let schema = Schema::load(None).unwrap();
         let fs = Box::new(LocalFileSystem::new(common::bids_example("ds114")));
-        let mut parser = BidsParser::new(fs, None, schema, None);
+        let mut parser = BidsParser::new(fs, None, schema, None, true);
         parser.parse(&db).await?;
     }
 

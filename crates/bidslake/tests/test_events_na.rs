@@ -37,7 +37,7 @@ async fn test_events_tsv_na() -> anyhow::Result<()> {
     db.create_tables(&schema)?;
 
     let fs = Box::new(LocalFileSystem::new(dataset_path));
-    let mut parser = BidsParser::new(fs, None, schema, None);
+    let mut parser = BidsParser::new(fs, None, schema, None, true);
 
     // This should fail if onset is FLOAT and n/a is not handled
     parser.parse(&db).await?;
