@@ -185,6 +185,50 @@ async fn catalog_files_land_in_scans_and_labels_join() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A dataset ingested through an adapter has no `dataset_description.json` — that is what
+/// makes it non-BIDS — but it must still record a `root_uri`, because that is what turns a
+/// stored dataset-relative `file_path` back into an openable URI for a client (e.g.
+/// bidslake-py's `BidsFile.local_path`). Without the synthesized row its files are
+/// unresolvable.
+#[tokio::test]
+async fn adapter_dataset_records_a_root_uri() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_fs_tree(dir.path());
+    assert!(
+        !dir.path().join("dataset_description.json").exists(),
+        "the FreeSurfer fixture has no dataset_description.json — that is the point"
+    );
+
+    let db = ingest_with_adapters(dir.path(), &["freesurfer"]).await?;
+
+    let rows: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM dataset_description", [], |r| r.get(0))?;
+    assert_eq!(rows, 1, "exactly one synthesized dataset_description row");
+
+    let root: String = db
+        .conn
+        .query_row("SELECT root_uri FROM dataset_description", [], |r| r.get(0))?;
+    assert!(
+        root.starts_with("file://"),
+        "root_uri should be a file:// URI, got {root}"
+    );
+
+    // It must actually resolve: root_uri + a stored file_path is a real file on disk.
+    let file_path: String = db.conn.query_row(
+        "SELECT file_path FROM scans WHERE file_path LIKE '%mri/aseg.mgz' LIMIT 1",
+        [],
+        |r| r.get(0),
+    )?;
+    let resolved = std::path::Path::new(root.trim_start_matches("file://")).join(&file_path);
+    assert!(
+        resolved.is_file(),
+        "root_uri + file_path should resolve to a real file, got {}",
+        resolved.display()
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn without_adapter_freesurfer_tables_absent() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;

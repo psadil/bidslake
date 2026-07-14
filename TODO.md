@@ -19,10 +19,14 @@ as issues. Roughly ordered by value.
   rewriting the two manual `duckdb::Error::ToSqlConversionFailure` constructions in
   `crates/bidslake/src/schema/dynamic.rs`.
 
-- [ ] **Implicit-insert vs `participants.tsv` ordering** (`eh-04` note). Under the
-  `WHERE NOT EXISTS` guard, whichever of the implicit participant/session insert vs the
-  `participants.tsv`/`sessions.tsv` ingest runs first wins — so a bare implicit row can shadow the
-  richer tabular row. A real, distinct correctness concern worth its own investigation.
+- [ ] **First-writer-wins rows under the `WHERE NOT EXISTS` guard** (`eh-04` note). Whichever of
+  the implicit participant/session insert vs the `participants.tsv`/`sessions.tsv` ingest runs
+  first wins — so a bare implicit row can shadow the richer tabular row. `dataset_description` now
+  has the same shape: the synthesized `{dataset_id, root_uri}` row for adapter datasets is ordered
+  *after* the walk so it can never shadow a real `dataset_description.json` **within** a run, but
+  across runs into one database the table is still first-writer-wins on `dataset_id` (no upsert),
+  so re-ingesting a dataset whose description was added later will not refresh it. A real, distinct
+  correctness concern worth its own investigation (an upsert/`ON CONFLICT DO UPDATE` path).
 
 - [ ] **Recording bare-table const consolidation** (`pat-02`). `crates/bidslake/src/schema/dynamic.rs`'s
   hardcoded `["motion", "stim"]` bare-table list could fold into the shared recording descriptor

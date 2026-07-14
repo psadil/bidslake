@@ -112,6 +112,11 @@ pub struct BidsParser {
     schema: Schema,
     imaging_files: Vec<ImagingFile>,
     has_scans_tsv: bool,
+    /// Whether a `dataset_description.json` was found and inserted. When it wasn't — the
+    /// normal case for a dataset ingested through a layout adapter, which by definition
+    /// has none — a minimal row is synthesized at the end of the walk so the dataset still
+    /// records its `root_uri`.
+    has_dataset_description: bool,
     sidecars: Vec<SidecarInfo>,
     /// `dataset_description.json`'s `DatasetType` (`raw`/`derivative`), needed to
     /// evaluate the `derivatives.*` tabular selectors (e.g. `dseg` lookups).
@@ -233,6 +238,7 @@ impl BidsParser {
             schema,
             imaging_files: Vec::new(),
             has_scans_tsv: false,
+            has_dataset_description: false,
             sidecars: Vec::new(),
             dataset_type: None,
             datatypes,
@@ -455,6 +461,29 @@ impl BidsParser {
 
         let d_process = t_process.map(|t| t.elapsed());
         let t_finalize = self.phase_timer.mark();
+
+        // Every ingested dataset must record a `root_uri`: it is what turns a stored
+        // dataset-relative `file_path` back into an openable `file://`/`s3://` URI, and it
+        // lives on `dataset_description`. A dataset ingested through a layout adapter
+        // (FreeSurfer `recon-all`, …) has no `dataset_description.json` by definition, so
+        // without this its files could not be resolved by a client at all. Synthesize the
+        // minimal row.
+        //
+        // This runs *after* the walk deliberately: the insert carries a `WHERE NOT EXISTS`
+        // primary-key guard, so a bare row written up front would shadow a real
+        // `dataset_description.json` and silently drop its metadata.
+        if !self.has_dataset_description {
+            let mut row = serde_json::Map::new();
+            row.insert(
+                "dataset_id".to_string(),
+                Value::String(dataset_id.to_string()),
+            );
+            row.insert("root_uri".to_string(), Value::String(self.fs.root()));
+            db.insert(&self.schema, "dataset_description", &Value::Object(row))
+                .with_context(|| {
+                    format!("inserting synthesized dataset_description for {dataset_id}")
+                })?;
+        }
 
         // File associations: the `IntendedFor` rows collected during the walk, plus the schema's
         // structural associations (events↔bold, bval/bvec↔dwi, channels↔eeg, …) resolved via the
@@ -1123,6 +1152,7 @@ impl BidsParser {
 
         db.insert(&self.schema, "dataset_description", &json_value)
             .with_context(|| format!("inserting dataset_description for {dataset_id}"))?;
+        self.has_dataset_description = true;
         Ok(())
     }
 
