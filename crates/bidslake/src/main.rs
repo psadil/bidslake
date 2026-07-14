@@ -266,7 +266,13 @@ fn resolve_adapters(names: &[String]) -> Result<AdapterBundle> {
         term_map_provenance: Vec::new(),
         ingestion_provenance: Vec::new(),
     };
-    let mut ingestion_sources: Vec<String> = Vec::new();
+    // Every ingest starts from the base BIDS ingestion policy (e.g. `events` ordering),
+    // then layers on each adapter's fragment.
+    let mut ingestion_sources: Vec<String> = vec![
+        bids_schema::bundled_ingestion_source("base")
+            .expect("base ingestion")
+            .to_string(),
+    ];
     for name in names {
         let overlay = bids_schema::overlay::bundled_overlay(name).ok_or_else(|| {
             anyhow::anyhow!(

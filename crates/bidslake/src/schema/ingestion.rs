@@ -52,10 +52,8 @@ pub struct TablePolicy {
     /// virtual regex-over-path columns). Presence marks the table materialized.
     #[serde(default)]
     pub concepts: Vec<String>,
-    /// Whether source row order is load-bearing (see bids-2-devel#98). Consumed when the
-    /// BIDS tabular special-cases migrate onto this schema (plan phase P3).
+    /// Whether source row order is load-bearing (see bids-2-devel#98).
     #[serde(default)]
-    #[allow(dead_code)]
     pub ordered: Option<bool>,
 }
 
@@ -97,6 +95,25 @@ impl Ingestion {
             ingestion.tables.extend(file.tables);
         }
         Ok(ingestion)
+    }
+
+    /// The base ingestion policy bidslake applies to every ingest (BIDS defaults), even
+    /// without an adapter — e.g. `events` rows are order-insensitive.
+    pub fn base() -> Self {
+        Self::from_sources(&[
+            bids_schema::bundled_ingestion_source("base").expect("bundled base ingestion")
+        ])
+        .expect("base ingestion is build-tested")
+    }
+
+    /// Whether a table's source row order is load-bearing (default `true` — order matters and
+    /// rows are read sequentially). `events` is the one BIDS table declared order-insensitive
+    /// (rows carry `onset`); see bids-standard/bids-2-devel#98.
+    pub fn ordered(&self, table: &str) -> bool {
+        self.tables
+            .get(table)
+            .and_then(|p| p.ordered)
+            .unwrap_or(true)
     }
 
     /// The first rule whose selectors all pass for `ctx`, or `None`.

@@ -94,7 +94,7 @@ impl Schema {
         schema_path: Option<&str>,
         overlays: &[AppliedOverlay],
     ) -> anyhow::Result<Self> {
-        Self::load_full(schema_path, overlays, Ingestion::default())
+        Self::load_full(schema_path, overlays, Ingestion::base())
     }
 
     /// Like [`Self::load_with_overlays`], but also attaches an [`Ingestion`] policy. Tables

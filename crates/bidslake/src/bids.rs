@@ -1368,8 +1368,9 @@ impl BidsParser {
         let sub = entities.get("sub").map(|s| s.as_str());
         // Positional per-row tables (`*timeseries.tsv` &c., reached here when the file
         // has a literal `filename` column) must keep TSV line order so `row_idx` is a
-        // faithful row number; see `is_order_insensitive` / bids-2-devel#98.
-        let preserve_order = !is_order_insensitive(&spec.table);
+        // faithful row number; the ordering policy lives in the ingestion schema
+        // (`Ingestion::ordered`); see bids-2-devel#98.
+        let preserve_order = self.schema.ingestion().ordered(&spec.table);
         let sql = build_tabular_insert_sql(
             spec,
             &local,
@@ -1455,10 +1456,10 @@ impl BidsParser {
             // Row order matters for positional tabular files — notably derivative
             // `*timeseries.tsv` (e.g. fMRIPrep confounds), where row N aligns with
             // volume N of the associated 4D image — so their line order is preserved
-            // and `row_idx` records the row number. BIDS has no schema field to
-            // express this yet, so the policy is hardcoded in `is_order_insensitive`;
+            // and `row_idx` records the row number. The ordering policy lives in the
+            // ingestion schema (`Ingestion::ordered`);
             // see https://github.com/bids-standard/bids-2-devel/issues/98.
-            let preserve_order = !is_order_insensitive(&spec.table);
+            let preserve_order = self.schema.ingestion().ordered(&spec.table);
             let select =
                 build_tabular_batch_select(spec, &dataset_id, &files, columns, preserve_order);
             let sql = format!("INSERT INTO {} BY NAME {select}", spec.table);
@@ -1679,7 +1680,7 @@ impl BidsParser {
 
         let sub = rec.entities.get("sub").map(|s| s.as_str());
         // Recordings are positional (row N is sample N), so preserve line order.
-        let preserve_order = !is_order_insensitive(&spec.table);
+        let preserve_order = self.schema.ingestion().ordered(&spec.table);
         let sql = build_tabular_insert_sql(
             &spec,
             &local,
@@ -2176,8 +2177,8 @@ fn build_tabular_insert_sql(
 /// - `row_idx`: when `preserve_order`, a **global** `row_number()` (assigned in
 ///   physical read order — `parallel=false` makes that TSV line order) minus each
 ///   file's first, so it is the same 0-based per-file line index the single-file
-///   path produces. When not (order-insensitive tables — see
-///   [`is_order_insensitive`]), a per-file `row_number()` under the default
+///   path produces. When not (order-insensitive tables — see the ingestion
+///   schema `ordered` policy), a per-file `row_number()` under the default
 ///   parallel read: still a unique 0-based key, but in arbitrary order, which lets
 ///   DuckDB read the batch's files concurrently (a network-FS win).
 /// - data columns `TRY_CAST` to their declared type; every remaining header column
@@ -2264,28 +2265,6 @@ fn build_tabular_batch_select(
          JOIN (VALUES {map_values}) AS m(abs, rel) ON raw.filename = m.abs",
         selects = selects.join(", "),
     )
-}
-
-/// Whether a per-row tabular table's rows may be read out of order (letting the batch
-/// be read in parallel — a network-FS win) instead of in TSV line order.
-///
-/// This encodes BIDS row-order semantics that the schema cannot yet express, so it is
-/// deliberately **hardcoded** (a `row_order` field is proposed upstream:
-/// <https://github.com/bids-standard/bids-2-devel/issues/98>). The policy:
-///
-/// - `events` is order-*insensitive*: its rows are sorted by the `onset` column, so
-///   physical position is incidental and the batch may be read concurrently.
-/// - Every other tabular table is order-*sensitive* and preserves physical line order,
-///   so `row_idx` records the row number. This is the required treatment for
-///   *positional* files, whose row N corresponds to element N of an associated series:
-///   continuous recordings (`*_physio`/`*_channels`/`*_electrodes`/`*_optodes`) and
-///   derivative time series such as `*timeseries.tsv` (e.g. fMRIPrep confounds, one row
-///   per functional volume).
-fn is_order_insensitive(table: &str) -> bool {
-    // Only `events` may be reordered (it has an `onset` ordering column); everything
-    // else — including positional `*timeseries.tsv` derivatives — must keep line order.
-    // Hardcoded pending a schema field; see bids-standard/bids-2-devel#98.
-    table == "events"
 }
 
 /// Parse a TSV file's header from its first line — read in Rust (via

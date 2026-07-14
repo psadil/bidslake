@@ -62,6 +62,7 @@ pub const BUNDLED_INGESTION_NAMES: &[&str] = &["freesurfer"];
 /// The raw JSON of a bundled ingestion fragment, or `None` if `name` is not bundled.
 pub fn bundled_ingestion_source(name: &str) -> Option<&'static str> {
     Some(match name {
+        "base" => include_str!("../data/ingestion/base.json"),
         "freesurfer" => include_str!("../data/ingestion/freesurfer.json"),
         _ => return None,
     })

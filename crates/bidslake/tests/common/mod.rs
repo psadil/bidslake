@@ -58,7 +58,11 @@ pub async fn ingest_with_adapters(
 
     let mut overlays: Vec<AppliedOverlay> = Vec::new();
     let mut term_maps: Vec<TermMap> = Vec::new();
-    let mut ingestion_sources: Vec<String> = Vec::new();
+    let mut ingestion_sources: Vec<String> = vec![
+        bids_schema::bundled_ingestion_source("base")
+            .unwrap()
+            .to_string(),
+    ];
     let mut term_map_prov: Vec<(String, serde_json::Value)> = Vec::new();
     let mut ingestion_prov: Vec<(String, serde_json::Value)> = Vec::new();
     for name in adapter_names {
