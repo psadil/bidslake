@@ -893,20 +893,14 @@ impl BidsParser {
         }
 
         // Primary data files — imaging plus non-NIfTI datafiles (EEG/MEG/iEEG/NIRS/
-        // microscopy/…, including pseudo-files like `.ds`) — are tracked in `scans` so
-        // they are queryable by concept. They are recognized *structurally* (they carry a
-        // datatype and are not tabular/diffusion companions) and short-circuit here, before
-        // the ingestion dispatch below.
-        //
-        // PERF short-circuit (droppable once selector ASTs are cached): this early return
-        // also keeps `Ingestion::classify`'s per-file selector evaluation off the
-        // imaging-file hot path — imaging files are the bulk of a dataset and match no base
-        // ingestion rule, so classifying them would be pure waste. `classify` re-parses each
-        // selector with oxc on every call (no AST cache yet — see TODO.md "Cache parsed
-        // selector expressions"). Once that lands, classify is cheap for every file and this
-        // early return is no longer perf-load-bearing: it may then move back below the
-        // dispatch as a plain structural catalog step, or stay as a clarity boundary. Grep
-        // `PERF short-circuit` when that caching lands.
+        // microscopy/…, including pseudo-files like `.ds`) — are tracked in `scans` so they
+        // are queryable by concept. They are recognized *structurally* (they carry a datatype
+        // and are not tabular/diffusion companions) and short-circuit here, before the
+        // ingestion dispatch below: imaging files are cataloged by structure, not by ingestion
+        // policy. This also spares them `Ingestion::classify`'s selector evaluation — now a
+        // minor saving rather than load-bearing (selector ASTs are cached in
+        // `bids_schema::expression`), but imaging files are the bulk of a dataset and match no
+        // base ingestion rule, so running classify on them would be waste either way.
         if is_datafile(rel_path, &extension, self.schema.raw()) {
             self.imaging_files.push(ImagingFile {
                 dataset_id: dataset_id.to_string(),

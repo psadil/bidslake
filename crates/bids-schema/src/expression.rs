@@ -16,6 +16,8 @@ use oxc_parser::Parser;
 use oxc_span::SourceType;
 use serde_json::Value;
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock, RwLock};
 
 // ============================================================================
 // Value Extension Trait
@@ -80,7 +82,7 @@ impl ValueExt for Value {
 /// (`suffix == "bold"`, `"RepetitionTime" in sidecar`, `intersects(dataset.modalities, …)`).
 /// Pairing such an expression with this environment forms something like a
 /// *quosure*, and evaluating it is *data-masking*: an identifier names a slot in
-/// the bound data rather than a lexical variable. [`eval_expr`] performs that
+/// the bound data rather than a lexical variable. [`eval_ir`] performs that
 /// masking, resolving each identifier against the bindings below.
 ///
 /// The bindings come from two scopes, held by reference:
@@ -141,36 +143,16 @@ impl<'a> EvalContext<'a> {
 // ============================================================================
 
 /// Parse and evaluate a BIDS schema expression, returning its value.
+///
+/// The expression is parsed and lowered to an owned [`Expr`] exactly once — the result is
+/// cached per source string (see [`compile_expression`]) — so evaluating the same selector
+/// across thousands of files walks the cached tree without re-invoking the oxc parser.
 pub fn evaluate(expr_str: &str, context: &EvalContext) -> Result<Value, String> {
     if expr_str.trim().is_empty() {
         return Ok(Value::Null);
     }
-    // Double backslashes so that JS string-literal unescaping in the parser preserves regex
-    // escapes such as `\S` and `\.` (otherwise `'\S'` would decode to the literal `S`). This
-    // mirrors the TS validator, which compiles `expr.replace(/\\/g, '\\\\')`.
-    let escaped = expr_str.replace('\\', "\\\\");
-    let allocator = Allocator::default();
-    let parser = Parser::new(&allocator, &escaped, SourceType::default());
-    let ret = parser.parse();
-    if !ret.diagnostics.is_empty() {
-        return Err(format!(
-            "Parse error for '{}': {:?}",
-            expr_str, ret.diagnostics[0]
-        ));
-    }
-
-    if ret.program.body.is_empty() {
-        if let Some(dir) = ret.program.directives.first() {
-            return Ok(Value::String(dir.directive.to_string()));
-        }
-        return Ok(Value::Null);
-    }
-
-    if let Statement::ExpressionStatement(expr_stmt) = &ret.program.body[0] {
-        eval_expr(&expr_stmt.expression, context).map(|c| c.into_owned())
-    } else {
-        Err("Expected an expression statement".to_string())
-    }
+    let compiled = compile_expression(expr_str)?;
+    eval_ir(&compiled, context).map(|c| c.into_owned())
 }
 
 /// Evaluate a BIDS schema expression and return whether the result is truthy.
@@ -329,41 +311,232 @@ fn value_to_sort_string(v: &Value) -> String {
 // AST Evaluation
 // ============================================================================
 
-/// Walk an OXC [`Expression`] node, resolving its identifiers against `ctx`
+// ── Owned expression IR ─────────────────────────────────────────────────────
+//
+// The oxc AST borrows its arena, so it cannot outlive a parse. To evaluate a selector
+// across many files without re-parsing, the supported oxc `Expression` subset is lowered
+// into this arena-free tree once (cached by `compile_expression`) and walked per file by
+// `eval_ir`. Operator enums are reused from oxc (fieldless, `Copy`, `'static`), so their
+// semantics stay identical to the parser's.
+#[derive(Debug)]
+enum Expr {
+    Bool(bool),
+    Num(f64),
+    Str(String),
+    Null,
+    Ident(String),
+    StaticMember {
+        object: Box<Expr>,
+        property: String,
+    },
+    ComputedMember {
+        object: Box<Expr>,
+        index: Box<Expr>,
+    },
+    Binary {
+        op: BinaryOperator,
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+    Logical {
+        op: LogicalOperator,
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+    Unary {
+        op: UnaryOperator,
+        argument: Box<Expr>,
+    },
+    Call {
+        name: String,
+        args: Vec<Expr>,
+    },
+    Array(Vec<Expr>),
+    Object(Vec<(String, Expr)>),
+}
+
+/// Parse and lower a selector to an owned [`Expr`], caching the result per source string.
+///
+/// The oxc parse + lowering happens once per unique expression; every later call is a map
+/// lookup and an `Arc` clone. Lowering *errors* (parse failures, unsupported syntax) are
+/// cached too, so a malformed selector is diagnosed once rather than re-parsed per file. The
+/// cache is process-global and read-mostly (a schema's selector set is fixed), so it uses an
+/// `RwLock` to keep concurrent evaluation — ingest and validation both run files in parallel
+/// — off a single mutex.
+fn compile_expression(expr_str: &str) -> Result<Arc<Expr>, String> {
+    /// Source string → its compiled IR (or the cached lowering error).
+    type ExprCache = RwLock<HashMap<String, Result<Arc<Expr>, String>>>;
+    static CACHE: OnceLock<ExprCache> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+
+    if let Some(hit) = cache.read().unwrap().get(expr_str) {
+        return hit.clone();
+    }
+    let compiled = compile_uncached(expr_str).map(Arc::new);
+    cache
+        .write()
+        .unwrap()
+        .insert(expr_str.to_string(), compiled.clone());
+    compiled
+}
+
+/// Parse one expression string with oxc and lower it to an owned [`Expr`] (no caching).
+fn compile_uncached(expr_str: &str) -> Result<Expr, String> {
+    // Double backslashes so that JS string-literal unescaping in the parser preserves regex
+    // escapes such as `\S` and `\.` (otherwise `'\S'` would decode to the literal `S`). This
+    // mirrors the TS validator, which compiles `expr.replace(/\\/g, '\\\\')`.
+    let escaped = expr_str.replace('\\', "\\\\");
+    let allocator = Allocator::default();
+    let parser = Parser::new(&allocator, &escaped, SourceType::default());
+    let ret = parser.parse();
+    if !ret.diagnostics.is_empty() {
+        return Err(format!(
+            "Parse error for '{}': {:?}",
+            expr_str, ret.diagnostics[0]
+        ));
+    }
+
+    if ret.program.body.is_empty() {
+        if let Some(dir) = ret.program.directives.first() {
+            return Ok(Expr::Str(dir.directive.to_string()));
+        }
+        return Ok(Expr::Null);
+    }
+
+    if let Statement::ExpressionStatement(expr_stmt) = &ret.program.body[0] {
+        lower(&expr_stmt.expression)
+    } else {
+        Err("Expected an expression statement".to_string())
+    }
+}
+
+/// Lower a supported oxc [`Expression`] node to the owned [`Expr`] IR. Structural errors
+/// (spread, non-identifier callee, computed object keys, unsupported node kinds) surface
+/// here; operand/operator-specific errors stay in [`eval_ir`] — both still reach the caller
+/// as an `Err` from [`evaluate`], matching the previous single-pass evaluator.
+fn lower(expr: &Expression) -> Result<Expr, String> {
+    match expr {
+        // OXC keeps parentheses as their own AST node; unwrap to the inner expression.
+        Expression::ParenthesizedExpression(paren) => lower(&paren.expression),
+
+        // ── Literals ────────────────────────────────────────────────────
+        Expression::BooleanLiteral(lit) => Ok(Expr::Bool(lit.value)),
+        Expression::NumericLiteral(lit) => Ok(Expr::Num(lit.value)),
+        Expression::StringLiteral(lit) => Ok(Expr::Str(lit.value.to_string())),
+        Expression::NullLiteral(_) => Ok(Expr::Null),
+
+        // ── Identifiers & member access ─────────────────────────────────
+        Expression::Identifier(id) => Ok(Expr::Ident(id.name.to_string())),
+        Expression::StaticMemberExpression(member) => Ok(Expr::StaticMember {
+            object: Box::new(lower(&member.object)?),
+            property: member.property.name.to_string(),
+        }),
+        Expression::ComputedMemberExpression(member) => Ok(Expr::ComputedMember {
+            object: Box::new(lower(&member.object)?),
+            index: Box::new(lower(&member.expression)?),
+        }),
+
+        // ── Operators (evaluated in `eval_ir`) ──────────────────────────
+        Expression::BinaryExpression(bin) => Ok(Expr::Binary {
+            op: bin.operator,
+            left: Box::new(lower(&bin.left)?),
+            right: Box::new(lower(&bin.right)?),
+        }),
+        Expression::LogicalExpression(log) => Ok(Expr::Logical {
+            op: log.operator,
+            left: Box::new(lower(&log.left)?),
+            right: Box::new(lower(&log.right)?),
+        }),
+        Expression::UnaryExpression(unary) => Ok(Expr::Unary {
+            op: unary.operator,
+            argument: Box::new(lower(&unary.argument)?),
+        }),
+
+        // ── Function calls ──────────────────────────────────────────────
+        Expression::CallExpression(call) => {
+            let name = match &call.callee {
+                Expression::Identifier(id) => id.name.to_string(),
+                _ => return Err("Expected identifier for function call".to_string()),
+            };
+            let args = call
+                .arguments
+                .iter()
+                .map(|arg| {
+                    arg.as_expression()
+                        .ok_or_else(|| "Spread arguments not supported".to_string())
+                        .and_then(lower)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Expr::Call { name, args })
+        }
+
+        // ── Array literals ──────────────────────────────────────────────
+        Expression::ArrayExpression(arr) => {
+            let elems = arr
+                .elements
+                .iter()
+                .map(|elem| {
+                    elem.as_expression()
+                        .ok_or_else(|| "Spread elements not supported".to_string())
+                        .and_then(lower)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Expr::Array(elems))
+        }
+
+        Expression::ObjectExpression(obj) => {
+            let mut props = Vec::with_capacity(obj.properties.len());
+            for prop in &obj.properties {
+                let ObjectPropertyKind::ObjectProperty(p) = prop else {
+                    return Err("Spread properties not supported".to_string());
+                };
+                let key = p
+                    .key
+                    .static_name()
+                    .ok_or_else(|| "Computed object keys not supported".to_string())?;
+                props.push((key.to_string(), lower(&p.value)?));
+            }
+            Ok(Expr::Object(props))
+        }
+
+        other => Err(format!(
+            "Unsupported expression type: {}",
+            std::any::type_name_of_val(other)
+        )),
+    }
+}
+
+/// Walk the owned [`Expr`] IR, resolving its identifiers against `ctx`
 /// (the data-masking step; see [`EvalContext`]).
 ///
 /// The result is a [`Cow`]: an identifier or `obj.field` access yields a borrow
 /// into the bound context, and a computed result (arithmetic, a function call, an
 /// array/object literal) yields an owned value.
-fn eval_expr<'a>(expr: &Expression, ctx: &EvalContext<'a>) -> Result<Cow<'a, Value>, String> {
+fn eval_ir<'a>(expr: &Expr, ctx: &EvalContext<'a>) -> Result<Cow<'a, Value>, String> {
     match expr {
-        // OXC keeps parentheses as their own AST node, so `!("x" in sidecar)` and `(null)`
-        // arrive here wrapped. Unwrap to the inner expression.
-        Expression::ParenthesizedExpression(paren) => eval_expr(&paren.expression, ctx),
-
         // ── Literals ────────────────────────────────────────────────────
-        Expression::BooleanLiteral(lit) => Ok(Cow::Owned(Value::Bool(lit.value))),
-        Expression::NumericLiteral(lit) => Ok(Cow::Owned(to_json_number(lit.value))),
-        Expression::StringLiteral(lit) => Ok(Cow::Owned(Value::String(lit.value.to_string()))),
-        Expression::NullLiteral(_) => Ok(Cow::Owned(Value::Null)),
+        Expr::Bool(b) => Ok(Cow::Owned(Value::Bool(*b))),
+        Expr::Num(n) => Ok(Cow::Owned(to_json_number(*n))),
+        Expr::Str(s) => Ok(Cow::Owned(Value::String(s.clone()))),
+        Expr::Null => Ok(Cow::Owned(Value::Null)),
 
         // ── Identifiers & member access ─────────────────────────────────
-        Expression::Identifier(id) => resolve_ident(&id.name, ctx),
-        Expression::StaticMemberExpression(member) => {
-            let obj = eval_expr(&member.object, ctx)?;
-            resolve_field(obj, &member.property.name)
+        Expr::Ident(name) => resolve_ident(name, ctx),
+        Expr::StaticMember { object, property } => {
+            let obj = eval_ir(object, ctx)?;
+            resolve_field(obj, property)
         }
-        Expression::ComputedMemberExpression(member) => {
-            let obj = eval_expr(&member.object, ctx)?;
-            let idx = eval_expr(&member.expression, ctx)?;
+        Expr::ComputedMember { object, index } => {
+            let obj = eval_ir(object, ctx)?;
+            let idx = eval_ir(index, ctx)?;
             resolve_index(obj, idx)
         }
 
         // ── Binary operators (inlined — no string indirection) ──────────
-        Expression::BinaryExpression(bin) => {
-            let left = eval_expr(&bin.left, ctx)?;
-            let right = eval_expr(&bin.right, ctx)?;
-            match bin.operator {
+        Expr::Binary { op, left, right } => {
+            let left = eval_ir(left, ctx)?;
+            let right = eval_ir(right, ctx)?;
+            match op {
                 // Equality (loose and strict treated identically for JSON values)
                 BinaryOperator::Equality | BinaryOperator::StrictEquality => {
                     Ok(Cow::Owned(Value::Bool(*left == *right)))
@@ -426,7 +599,7 @@ fn eval_expr<'a>(expr: &Expression, ctx: &EvalContext<'a>) -> Result<Cow<'a, Val
                     numeric_binop!(left, right, |a, b| Some(a.powf(b))).map(Cow::Owned)
                 }
 
-                _ => Err(format!("Unsupported binary operator {:?}", bin.operator)),
+                _ => Err(format!("Unsupported binary operator {op:?}")),
             }
         }
 
@@ -434,12 +607,12 @@ fn eval_expr<'a>(expr: &Expression, ctx: &EvalContext<'a>) -> Result<Cow<'a, Val
         // JavaScript semantics: short-circuit, and the *operand* is the result, not a boolean.
         // This is what makes `false && null` be `false` while `null && true` is `null`, and it
         // is how `null` propagates through `&&`/`||` without a special case.
-        Expression::LogicalExpression(log) => {
-            let left = eval_expr(&log.left, ctx)?;
-            match log.operator {
+        Expr::Logical { op, left, right } => {
+            let left = eval_ir(left, ctx)?;
+            match op {
                 LogicalOperator::And => {
                     if left.is_truthy() {
-                        eval_expr(&log.right, ctx)
+                        eval_ir(right, ctx)
                     } else {
                         Ok(left)
                     }
@@ -448,100 +621,66 @@ fn eval_expr<'a>(expr: &Expression, ctx: &EvalContext<'a>) -> Result<Cow<'a, Val
                     if left.is_truthy() {
                         Ok(left)
                     } else {
-                        eval_expr(&log.right, ctx)
+                        eval_ir(right, ctx)
                     }
                 }
-                _ => Err(format!("Unsupported logical operator {:?}", log.operator)),
+                _ => Err(format!("Unsupported logical operator {op:?}")),
             }
         }
 
-        // ── Unary `!` ──────────────────────────────────────────────────
-        // `!null` is `true`, not `null` — negation always yields a boolean (`meta.expression_tests`).
-        Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::LogicalNot => {
-            let val = eval_expr(&unary.argument, ctx)?;
-            Ok(Cow::Owned(Value::Bool(!val.is_truthy())))
-        }
-        // ── Unary `-` / `+` ────────────────────────────────────────────
-        Expression::UnaryExpression(unary)
-            if matches!(
-                unary.operator,
-                UnaryOperator::UnaryNegation | UnaryOperator::UnaryPlus
-            ) =>
-        {
-            let val = eval_expr(&unary.argument, ctx)?;
-            if val.is_null() {
-                return Ok(Cow::Owned(Value::Null));
+        // ── Unary operators ─────────────────────────────────────────────
+        Expr::Unary { op, argument } => match op {
+            // `!null` is `true`, not `null` — negation always yields a boolean.
+            UnaryOperator::LogicalNot => {
+                let val = eval_ir(argument, ctx)?;
+                Ok(Cow::Owned(Value::Bool(!val.is_truthy())))
             }
-            let n = val
-                .coerce_f64()
-                .ok_or_else(|| format!("Cannot apply unary {:?} to {}", unary.operator, *val))?;
-            let n = if unary.operator == UnaryOperator::UnaryNegation {
-                -n
-            } else {
-                n
-            };
-            Ok(Cow::Owned(to_json_number(n)))
-        }
-        Expression::UnaryExpression(unary) => {
-            Err(format!("Unsupported unary operator {:?}", unary.operator))
-        }
+            UnaryOperator::UnaryNegation | UnaryOperator::UnaryPlus => {
+                let val = eval_ir(argument, ctx)?;
+                if val.is_null() {
+                    return Ok(Cow::Owned(Value::Null));
+                }
+                let n = val
+                    .coerce_f64()
+                    .ok_or_else(|| format!("Cannot apply unary {op:?} to {}", *val))?;
+                let n = if *op == UnaryOperator::UnaryNegation {
+                    -n
+                } else {
+                    n
+                };
+                Ok(Cow::Owned(to_json_number(n)))
+            }
+            _ => Err(format!("Unsupported unary operator {op:?}")),
+        },
 
         // ── Function calls ──────────────────────────────────────────────
-        Expression::CallExpression(call) => {
-            let name = match &call.callee {
-                Expression::Identifier(id) => id.name.as_str(),
-                _ => return Err("Expected identifier for function call".to_string()),
-            };
-            // DSL functions take owned values, so collect the arguments. These are small
-            // (a single field, a literal array) — the large `dataset`/`schema` subtrees are
-            // reached by identifier resolution, which borrows them.
-            let args: Result<Vec<Value>, String> = call
-                .arguments
+        Expr::Call { name, args } => {
+            // DSL functions take owned values, so collect the arguments. These are small (a
+            // single field, a literal array) — large `dataset`/`schema` subtrees are reached
+            // by identifier resolution, which borrows them.
+            let args: Result<Vec<Value>, String> = args
                 .iter()
-                .map(|arg| {
-                    arg.as_expression()
-                        .ok_or_else(|| "Spread arguments not supported".to_string())
-                        .and_then(|e| eval_expr(e, ctx))
-                        .map(|c| c.into_owned())
-                })
+                .map(|e| eval_ir(e, ctx).map(|c| c.into_owned()))
                 .collect();
             eval_function(name, &args?, ctx).map(Cow::Owned)
         }
 
         // ── Array literals ──────────────────────────────────────────────
-        Expression::ArrayExpression(arr) => {
-            let vals: Result<Vec<Value>, String> = arr
-                .elements
+        Expr::Array(elems) => {
+            let vals: Result<Vec<Value>, String> = elems
                 .iter()
-                .map(|elem| {
-                    elem.as_expression()
-                        .ok_or_else(|| "Spread elements not supported".to_string())
-                        .and_then(|e| eval_expr(e, ctx))
-                        .map(|c| c.into_owned())
-                })
+                .map(|e| eval_ir(e, ctx).map(|c| c.into_owned()))
                 .collect();
             Ok(Cow::Owned(Value::Array(vals?)))
         }
 
-        Expression::ObjectExpression(obj) => {
+        Expr::Object(props) => {
             let mut map = serde_json::Map::new();
-            for prop in &obj.properties {
-                let ObjectPropertyKind::ObjectProperty(p) = prop else {
-                    return Err("Spread properties not supported".to_string());
-                };
-                let key = p
-                    .key
-                    .static_name()
-                    .ok_or_else(|| "Computed object keys not supported".to_string())?;
-                map.insert(key.to_string(), eval_expr(&p.value, ctx)?.into_owned());
+            for (key, value) in props {
+                map.insert(key.clone(), eval_ir(value, ctx)?.into_owned());
             }
             Ok(Cow::Owned(Value::Object(map)))
         }
-
-        other => Err(format!(
-            "Unsupported expression type: {}",
-            std::any::type_name_of_val(other)
-        )),
     }
 }
 

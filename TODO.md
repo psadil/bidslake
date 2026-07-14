@@ -9,16 +9,6 @@ as issues. Roughly ordered by value.
   (now documented in the docstring). When the PyO3 PyCapsule stream bridge lands
   (`crates/bidslake-py/src/lib.rs`), stream Arrow batches so `get()` is O(1) memory.
 
-- [ ] **Cache parsed selector expressions** (`idiom-04` note). Each rule's `selectors_raw` is
-  re-`replace`d, re-allocated, and re-parsed by oxc on every `Tabular::route` and
-  `Ingestion::classify` (`crates/bids-schema/src/expression.rs::evaluate` — the oxc AST borrows
-  its arena, so caching needs an owned IR: lower `oxc::Expression` → an owned `Expr` enum once
-  per unique string, then walk that). Caching the parsed AST is the real ingest perf win (34
-  eval call-sites across the validator + ingest); the loop-hoist already applied does not address
-  it. When it lands, the `PERF short-circuit` in `crates/bidslake/src/bids.rs::process_file`
-  (imaging files skipping the ingestion dispatch) is no longer perf-load-bearing and can be
-  reconsidered.
-
 - [ ] **Eliminate the per-file entity-map rebuild** (`dup-02` follow-up). `entity_name_to_key`
   is now shared, but `build_file_context` (`crates/bids-schema/src/context.rs`) still rebuilds
   the map on every file, and the two per-file loops (`crates/bids-validator-rs/src/context.rs`,
