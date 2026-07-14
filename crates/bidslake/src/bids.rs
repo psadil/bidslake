@@ -26,11 +26,14 @@
 
 use crate::db::{BidsDb, FileAssociation, TabularStatus};
 use crate::fs::BidsFileSystem;
+use crate::readers::{self, ContentReader};
 use crate::schema::Schema;
 use crate::schema::dynamic::{quote_ident, sql_in_list, sql_lit};
+use crate::schema::ingestion::Disposition;
 use crate::schema::tabular::{ColumnSpec, FileContext, RowIdentity, TableSpec};
 use anyhow::{Context, Result};
 use bids_core::entities::read_entities;
+use bids_schema::term_map::{FileFacts, TermMap};
 use duckdb::Connection;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use serde_json::Value;
@@ -145,6 +148,12 @@ pub struct BidsParser {
     json_content: HashMap<String, String>,
     /// Prefetched TSV headers (rel path → parsed header), same rationale.
     tabular_header: HashMap<String, Option<(String, Vec<String>)>>,
+    /// Term maps (FreeSurfer, …) that recognize standardized non-BIDS files. Empty for an
+    /// ordinary BIDS ingest, so `process_file` pays only one `is_empty()` check per file.
+    term_maps: Vec<TermMap>,
+    /// Content readers keyed by name (`fs_stats`, …); parse a recognized file's body into
+    /// rows. Selected by the ingestion schema's `reader`.
+    readers: HashMap<String, Box<dyn ContentReader>>,
 }
 
 #[derive(Clone)]
@@ -236,7 +245,17 @@ impl BidsParser {
             phase_timer: PhaseTimer::new(),
             json_content: HashMap::new(),
             tabular_header: HashMap::new(),
+            term_maps: Vec::new(),
+            readers: readers::default_readers(),
         }
+    }
+
+    /// Attach term maps that recognize standardized non-BIDS files (FreeSurfer, …).
+    /// Ordinary BIDS ingestion configures none, so the classify hot path in
+    /// [`Self::process_file`] short-circuits on an empty term-map list.
+    pub fn with_term_maps(mut self, term_maps: Vec<TermMap>) -> Self {
+        self.term_maps = term_maps;
+        self
     }
 
     /// Enable httpfs on the read-preflight [`Self::validator`] connection (from the
@@ -793,6 +812,18 @@ impl BidsParser {
             return Ok(());
         }
 
+        // Standardized non-BIDS files (FreeSurfer, …) are recognized by a term map and
+        // handled by the schema-driven ingestion path — they never fall through to BIDS
+        // processing (a term map never claims a BIDS-named file). Consulted only when a term
+        // map is configured, so an ordinary BIDS ingest pays one `is_empty()` check per file.
+        if !self.term_maps.is_empty()
+            && let Some(facts) = self.term_maps.iter().find_map(|tm| tm.classify(rel_path))
+        {
+            self.ingest_projected(db, dataset_id, rel_path, path, facts)
+                .await?;
+            return Ok(());
+        }
+
         // Parse BIDS filename entities + extension via the shared bids-core parser.
         let parts = read_entities(file_name);
         let extension = parts.extension;
@@ -876,6 +907,96 @@ impl BidsParser {
             });
         }
 
+        Ok(())
+    }
+
+    /// Ingest a file recognized by a term map: project → build the routing context → let the
+    /// ingestion schema decide read / catalog / ignore. `read` parses the body with the named
+    /// content reader and bulk-inserts the rows (and registers the file); `catalog` registers
+    /// the file in `scans` (contents unread, left on disk); `ignore` skips it. Every failure
+    /// is non-fatal (logged, then skipped) so one bad file can't poison the ingest txn.
+    async fn ingest_projected(
+        &mut self,
+        db: &BidsDb,
+        dataset_id: &str,
+        rel_path: &str,
+        path: &Path,
+        facts: FileFacts,
+    ) -> Result<()> {
+        // The ingestion selectors run over the projected concepts. `path` is dataset-relative
+        // with a leading slash, matching the tabular selector convention.
+        let leading = format!("/{rel_path}");
+        let dataset_type = self.dataset_type.clone();
+        let (disposition, reader) = {
+            let ctx = FileContext {
+                path: &leading,
+                datatype: facts.datatype.as_deref(),
+                suffix: facts.suffix.as_deref(),
+                extension: facts.extension.as_deref(),
+                sidecar: &Value::Null,
+                dataset_type: dataset_type.as_deref(),
+            };
+            match self.schema.ingestion().classify(&ctx) {
+                Some(rule) => (rule.disposition, rule.reader.clone()),
+                None => return Ok(()), // recognized but no ingestion rule -> leave it alone
+            }
+        };
+
+        // `read` and `catalog` both register the file in the standard `scans` registry.
+        if matches!(disposition, Disposition::Read | Disposition::Catalog) {
+            self.imaging_files.push(ImagingFile {
+                dataset_id: dataset_id.to_string(),
+                file_path: rel_path.to_string(),
+            });
+        }
+
+        if disposition != Disposition::Read {
+            return Ok(());
+        }
+
+        let Some(reader_name) = reader else {
+            eprintln!("Warning: `read` rule for {rel_path} has no reader; skipping");
+            return Ok(());
+        };
+        let content = match self.read_cached(path, rel_path).await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Warning: cannot read {rel_path}: {e}");
+                return Ok(());
+            }
+        };
+        let Some(rdr) = self.readers.get(&reader_name) else {
+            eprintln!("Warning: reader `{reader_name}` is not registered; skipping {rel_path}");
+            return Ok(());
+        };
+        match rdr.read(dataset_id, rel_path, &content, &facts) {
+            Ok(batches) => {
+                let mut total = 0i64;
+                let mut primary: Option<String> = None;
+                for batch in &batches {
+                    match db.append_rows(&self.schema, &batch.table, &batch.rows) {
+                        Ok(()) => {
+                            total += batch.rows.len() as i64;
+                            primary.get_or_insert_with(|| batch.table.clone());
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "Warning: insert into {} failed for {rel_path}: {e}",
+                                batch.table
+                            )
+                        }
+                    }
+                }
+                let _ = db.record_tabular_file(
+                    dataset_id,
+                    rel_path,
+                    primary.as_deref(),
+                    total,
+                    TabularStatus::Ingested,
+                );
+            }
+            Err(e) => eprintln!("Warning: reader `{reader_name}` failed on {rel_path}: {e}"),
+        }
         Ok(())
     }
 

@@ -130,8 +130,10 @@
 //! values are raw, so join to `participants` with `'sub-' || s.sub = p.participant_id`.
 
 pub mod dynamic;
+pub mod ingestion;
 pub mod tabular;
 pub use dynamic::{AppliedOverlay, Schema};
+pub use ingestion::Ingestion;
 
 // Provenance for the tabular-data invariant: one row per tabular file the walk
 // encountered (minus `.bidsignore`d ones), so nothing is silently dropped.

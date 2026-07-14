@@ -6,6 +6,7 @@ use std::path::PathBuf;
 mod bids;
 mod db;
 mod fs;
+mod readers;
 mod s3;
 mod schema;
 
@@ -54,6 +55,14 @@ enum Commands {
         #[arg(long = "overlay")]
         overlay: Vec<String>,
 
+        /// Layout adapter for indexing a standardized *non-BIDS* dataset (e.g. FreeSurfer
+        /// `recon-all` derivatives, whose files have no BIDS entities). Either a bundled
+        /// name (`freesurfer`, `freesurfer-long`) or a path to an adapter JSON file.
+        /// Repeatable. Distinct from `--overlay`, which extends the schema for
+        /// BIDS-*named* derivatives.
+        #[arg(long = "adapter")]
+        adapter: Vec<String>,
+
         /// Walk and route the dataset without writing a database, then report how
         /// each tabular file would be handled (ingested vs skipped). Use it to check
         /// whether an overlay captures the files you expect.
@@ -75,6 +84,11 @@ enum Commands {
         /// Repeatable; applied left to right.
         #[arg(long = "overlay")]
         overlay: Vec<String>,
+
+        /// Layout adapter whose tables to include (bundled name or adapter JSON path).
+        /// Repeatable.
+        #[arg(long = "adapter")]
+        adapter: Vec<String>,
 
         /// Show only the tables and columns the overlays add versus the base schema.
         #[arg(long)]
@@ -115,6 +129,7 @@ async fn main() -> Result<()> {
             no_sign_request,
             schema_path,
             overlay,
+            adapter,
             dry_run,
             no_bidsignore,
         } => {
@@ -130,27 +145,38 @@ async fn main() -> Result<()> {
             // `--overlay` flags still take effect. Additive merge makes the order moot
             // for the result, but it keeps provenance in dataset-then-flag order.
             let overlay = discover_embedded_overlay(&input, overlay);
-            let schema = if overlay.is_empty() {
-                Schema::load(schema_path_str)?
-            } else {
-                let overlays = resolve_overlays(&overlay)?;
-                Schema::load_with_overlays(schema_path_str, &overlays)?
-            };
+            let mut overlays = resolve_overlays(&overlay)?;
+            // `--adapter <name>` contributes an overlay (tables), a term map (projection),
+            // and an ingestion fragment (read/catalog/ignore policy).
+            let bundle = resolve_adapters(&adapter)?;
+            overlays.extend(bundle.overlays);
+            let schema = Schema::load_full(schema_path_str, &overlays, bundle.ingestion)?;
             run_indexer(
                 input,
                 output,
                 dataset_id,
                 no_sign_request,
                 schema,
+                bundle.term_maps,
+                bundle.term_map_provenance,
+                bundle.ingestion_provenance,
                 dry_run,
                 !no_bidsignore,
             )
             .await
         }
-        Commands::Schema { overlay, diff } => {
-            let overlays = resolve_overlays(&overlay)?;
-            let augmented = Schema::load_with_overlays(None, &overlays)?;
+        Commands::Schema {
+            overlay,
+            adapter,
+            diff,
+        } => {
+            let mut overlays = resolve_overlays(&overlay)?;
+            let bundle = resolve_adapters(&adapter)?;
+            overlays.extend(bundle.overlays);
+            let augmented = Schema::load_full(None, &overlays, bundle.ingestion)?;
             if diff {
+                // Adapter overlays add tables/columns, so a diff against a base *without*
+                // them shows the adapter's additions.
                 print_schema_diff(&Schema::load(None)?, &augmented)
             } else {
                 print_schema(&augmented)
@@ -217,12 +243,78 @@ fn resolve_overlays(specs: &[String]) -> Result<Vec<schema::AppliedOverlay>> {
         .collect()
 }
 
+/// A resolved adapter bundle: `--adapter <name>` resolves to a trio of standard artifacts —
+/// a BIDS overlay (tables), a BEP-043 term map (path→concept projection), and a bidslake
+/// ingestion fragment (read/catalog/ignore policy) — plus their provenance for the
+/// self-describing stamps.
+struct AdapterBundle {
+    overlays: Vec<schema::AppliedOverlay>,
+    term_maps: Vec<bids_schema::term_map::TermMap>,
+    ingestion: schema::Ingestion,
+    term_map_provenance: Vec<(String, serde_json::Value)>,
+    ingestion_provenance: Vec<(String, serde_json::Value)>,
+}
+
+/// Resolve each `--adapter` bundled name (e.g. `freesurfer`) into its overlay + term-map +
+/// ingestion trio, validating each artifact against its metaschema.
+fn resolve_adapters(names: &[String]) -> Result<AdapterBundle> {
+    use anyhow::Context as _;
+    let mut bundle = AdapterBundle {
+        overlays: Vec::new(),
+        term_maps: Vec::new(),
+        ingestion: schema::Ingestion::default(),
+        term_map_provenance: Vec::new(),
+        ingestion_provenance: Vec::new(),
+    };
+    let mut ingestion_sources: Vec<String> = Vec::new();
+    for name in names {
+        let overlay = bids_schema::overlay::bundled_overlay(name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "unknown adapter {name:?}; bundled adapters are {:?}",
+                bids_schema::term_map::BUNDLED_TERM_MAP_NAMES
+            )
+        })?;
+        bundle.overlays.push(schema::AppliedOverlay {
+            source: name.clone(),
+            content: overlay,
+        });
+
+        let tm_src = bids_schema::term_map::bundled_term_map_source(name)
+            .ok_or_else(|| anyhow::anyhow!("adapter {name:?} has no bundled term map"))?;
+        bundle.term_maps.push(
+            bids_schema::term_map::bundled_term_map(name)
+                .with_context(|| format!("compiling term map {name:?}"))?,
+        );
+        bundle
+            .term_map_provenance
+            .push((name.clone(), serde_json::from_str(tm_src)?));
+
+        let ing_src = bids_schema::bundled_ingestion_source(name)
+            .ok_or_else(|| anyhow::anyhow!("adapter {name:?} has no bundled ingestion schema"))?;
+        ingestion_sources.push(ing_src.to_string());
+        bundle
+            .ingestion_provenance
+            .push((name.clone(), serde_json::from_str(ing_src)?));
+    }
+    bundle.ingestion = schema::Ingestion::from_sources(
+        &ingestion_sources
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+    )?;
+    Ok(bundle)
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run_indexer(
     input: String,
     output: String,
     dataset_id: Option<String>,
     no_sign_request: bool,
     schema: Schema,
+    term_maps: Vec<bids_schema::term_map::TermMap>,
+    term_map_provenance: Vec<(String, serde_json::Value)>,
+    ingestion_provenance: Vec<(String, serde_json::Value)>,
     dry_run: bool,
     apply_bidsignore: bool,
 ) -> Result<()> {
@@ -238,6 +330,8 @@ async fn run_indexer(
 
     let db = BidsDb::new(db_path)?;
     db.create_tables(&schema)?;
+    db.stamp_term_maps(&term_map_provenance)?;
+    db.stamp_ingestion(&ingestion_provenance)?;
 
     // Region/anonymous settings for httpfs, when the input is S3.
     let mut s3_httpfs: Option<(String, bool)> = None;
@@ -276,7 +370,8 @@ async fn run_indexer(
             anonymous: *anonymous,
         });
     let mut parser: BidsParser =
-        BidsParser::new(fs, dataset_id, schema, s3_httpfs_cfg, apply_bidsignore);
+        BidsParser::new(fs, dataset_id, schema, s3_httpfs_cfg, apply_bidsignore)
+            .with_term_maps(term_maps);
 
     // Wrap the whole ingest in one transaction. DuckDB otherwise autocommits
     // every statement, fsyncing per row on a file-backed database — the single

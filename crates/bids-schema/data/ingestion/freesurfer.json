@@ -1,0 +1,14 @@
+{
+  "IngestionSchemaVersion": "0.1.0",
+  "rules": [
+    { "selectors": ["intersects([suffix], [\"segstats\", \"parcstats\"])"], "disposition": "read", "reader": "fs_stats" },
+    { "selectors": ["suffix == \"fslabels\""], "disposition": "read", "reader": "fs_ctab" },
+    { "selectors": ["datatype == \"anat\""], "disposition": "catalog" }
+  ],
+  "tables": {
+    "freesurfer_aseg": { "concepts": ["sub", "ses", "seg"] },
+    "freesurfer_aparc": { "concepts": ["sub", "ses", "hemi", "parc"] },
+    "freesurfer_measures": { "concepts": ["sub", "ses"] },
+    "freesurfer_labels": { "concepts": ["sub", "ses"] }
+  }
+}

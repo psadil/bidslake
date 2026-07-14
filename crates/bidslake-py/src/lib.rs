@@ -199,6 +199,42 @@ impl PyLake {
             .map_err(anyhow_err_from)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(anyhow_err_from)
     }
+
+    /// The applied term maps' provenance `(idx, source, sha256)` in application order, or an
+    /// empty list if the DB was indexed without any (mirrors [`overlays`]).
+    fn term_maps(&self) -> PyResult<Vec<(i64, String, String)>> {
+        self.provenance("bidslake_term_maps")
+    }
+
+    /// The applied ingestion fragments' provenance `(idx, source, sha256)`.
+    fn ingestion(&self) -> PyResult<Vec<(i64, String, String)>> {
+        self.provenance("bidslake_ingestion")
+    }
+}
+
+impl PyLake {
+    /// Read a `bidslake_<kind>` provenance table (empty if absent).
+    fn provenance(&self, table: &str) -> PyResult<Vec<(i64, String, String)>> {
+        let guard = self.locked_conn();
+        let conn = guard
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("operation on closed BidsLake"))?;
+        let sql = format!("SELECT idx, source, sha256 FROM {table} ORDER BY idx");
+        let mut stmt = match conn.prepare(&sql) {
+            Ok(stmt) => stmt,
+            Err(_) => return Ok(Vec::new()),
+        };
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i32>(0)? as i64,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(anyhow_err_from)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(anyhow_err_from)
+    }
 }
 
 impl PyLake {

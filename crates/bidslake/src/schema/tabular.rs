@@ -329,7 +329,7 @@ impl Default for FileContext<'_> {
 impl FileContext<'_> {
     /// The `(file, dataset)` selector bindings for the shared expression evaluator. Only the
     /// fields BIDS tabular selectors reference are populated; `schema`/`subject` are left null.
-    fn eval_bindings(&self) -> (Value, Value) {
+    pub(crate) fn eval_bindings(&self) -> (Value, Value) {
         let file = json!({
             "path": self.path,
             "suffix": self.suffix,

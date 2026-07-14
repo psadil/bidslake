@@ -39,6 +39,7 @@
 //! The static tables `diffusion` and `file_associations` live in the parent
 //! [`crate::schema`] module, not here.
 
+use super::ingestion::Ingestion;
 use super::tabular::{RowIdentity, TableSpec, Tabular};
 use duckdb::{Connection, Result};
 use serde_json::Value;
@@ -70,6 +71,9 @@ pub struct Schema {
     insert_sql: HashMap<String, String>, // table -> prebuilt INSERT statement
     /// The overlays merged into this schema, in application order (empty if none).
     overlays: Vec<AppliedOverlay>,
+    /// Ingestion policy (read/catalog/ignore + per-table materialized concepts). Empty for a
+    /// plain BIDS ingest, in which case every table uses the virtual regex concept columns.
+    ingestion: Ingestion,
 }
 
 impl Schema {
@@ -89,6 +93,18 @@ impl Schema {
     pub fn load_with_overlays(
         schema_path: Option<&str>,
         overlays: &[AppliedOverlay],
+    ) -> anyhow::Result<Self> {
+        Self::load_full(schema_path, overlays, Ingestion::default())
+    }
+
+    /// Like [`Self::load_with_overlays`], but also attaches an [`Ingestion`] policy. Tables
+    /// whose ingestion policy declares materialized `concepts` get physical concept columns
+    /// (adapter data tables); all other tables keep the virtual regex columns. The policy
+    /// must be set before table generation, so it is threaded in here.
+    pub fn load_full(
+        schema_path: Option<&str>,
+        overlays: &[AppliedOverlay],
+        ingestion: Ingestion,
     ) -> anyhow::Result<Self> {
         use anyhow::Context as _;
         let mut schema: Value = match schema_path {
@@ -122,6 +138,7 @@ impl Schema {
             primary_keys: HashMap::new(),
             insert_sql: HashMap::new(),
             overlays: overlays.to_vec(),
+            ingestion,
         };
         instance.generate_definitions();
         instance.build_insert_statements();
@@ -131,6 +148,11 @@ impl Schema {
     /// The overlays merged into this schema, in application order (empty if none).
     pub fn overlays(&self) -> &[AppliedOverlay] {
         &self.overlays
+    }
+
+    /// The ingestion policy attached to this schema (empty for a plain BIDS ingest).
+    pub fn ingestion(&self) -> &Ingestion {
+        &self.ingestion
     }
 
     /// The schema-driven tabular model — which tables exist and their columns,
@@ -351,7 +373,22 @@ impl Schema {
 
         // Virtual BIDS-concept columns (derived from file_path) for file-based
         // tables, computed on read and never written.
-        if spec.file_based {
+        // Concept columns are either MATERIALIZED (physical, adapter-populated — for data
+        // tables fed by a term-map projection, whose paths don't encode BIDS entities) or
+        // VIRTUAL (regex over `file_path` — for BIDS-native, file_based tables). Never both:
+        // the ingestion policy decides, per table.
+        let concepts: Vec<String> = self.ingestion.materialized_concepts(&spec.table).to_vec();
+        if !concepts.is_empty() {
+            let existing: std::collections::HashSet<String> =
+                fields.iter().map(|(n, _, _)| n.clone()).collect();
+            for c in concepts {
+                if existing.contains(&c) {
+                    continue; // already a base/rule column (e.g. row_idx, a data column)
+                }
+                columns.push(format!("{} TEXT", quote_ident(&c)));
+                fields.push((c.clone(), "TEXT".to_string(), c));
+            }
+        } else if spec.file_based {
             columns.extend(self.generated_bids_columns());
         }
 

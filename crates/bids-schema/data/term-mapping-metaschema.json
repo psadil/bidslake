@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bidslake.dev/schemas/term-mapping-metaschema.json",
+  "title": "BIDS Term-Mapping document",
+  "description": "Validates a BEP-043-style BIDS Term Mapping document: a set of rules that project relative file paths onto BIDS concepts (entities, datatype, suffix, metadata). Path templates are PCRE (Perl-compatible regular expressions) with named capture groups, one of the two syntaxes BEP-043 floats. A strict BEP-043 core is required; implementation extensions are permitted only under `^x_`-prefixed keys.",
+  "type": "object",
+  "properties": {
+    "BIDSVersion": { "type": "string" },
+    "BIDSMapVersion": { "type": "string" },
+    "Mappings": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/mapping" }
+    }
+  },
+  "required": ["BIDSVersion", "BIDSMapVersion", "Mappings"],
+  "patternProperties": { "^x_": {} },
+  "unevaluatedProperties": false,
+  "$defs": {
+    "mapping": {
+      "type": "object",
+      "properties": {
+        "Template": {
+          "type": "string",
+          "format": "regex",
+          "description": "A PCRE matched against a dataset-relative POSIX path. Named capture groups `(?P<name>...)` bind BIDS entities (e.g. `subject`, `session`, `hemi`)."
+        },
+        "Entities": {
+          "type": "object",
+          "description": "BIDS entity -> literal value (constant entities not captured by the template).",
+          "patternProperties": { "^[a-zA-Z0-9]+$": { "type": "string" } },
+          "additionalProperties": false
+        },
+        "Concepts": {
+          "type": "object",
+          "properties": {
+            "datatype": { "type": "string" },
+            "suffix": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        "Metadata": { "type": "object" }
+      },
+      "required": ["Template"],
+      "patternProperties": { "^x_": {} },
+      "unevaluatedProperties": false
+    }
+  }
+}

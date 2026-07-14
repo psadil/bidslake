@@ -1,0 +1,441 @@
+{
+  "objects": {
+    "entities": {
+      "hemi": {
+        "name": "hemi",
+        "display_name": "Hemi",
+        "description": "Cortical hemisphere (`lh`/`rh`).",
+        "type": "string",
+        "format": "label"
+      },
+      "seg": {
+        "name": "seg",
+        "display_name": "Seg",
+        "description": "FreeSurfer volumetric segmentation (`aseg`/`wmparc`).",
+        "type": "string",
+        "format": "label"
+      },
+      "parc": {
+        "name": "parc",
+        "display_name": "Parc",
+        "description": "FreeSurfer cortical parcellation atlas.",
+        "type": "string",
+        "format": "label"
+      }
+    },
+    "suffixes": {
+      "segstats": {
+        "value": "segstats",
+        "display_name": "segstats",
+        "description": "Per-structure volumetric segmentation statistics (aseg/wmparc)."
+      },
+      "parcstats": {
+        "value": "parcstats",
+        "display_name": "parcstats",
+        "description": "Per-region cortical parcellation morphometry (aparc family)."
+      },
+      "fsmeasures": {
+        "value": "fsmeasures",
+        "display_name": "fsmeasures",
+        "description": "Whole-brain/hemisphere scalar measures from .stats headers (reader-populated; not a routing target)."
+      },
+      "fslabels": {
+        "value": "fslabels",
+        "display_name": "fslabels",
+        "description": "FreeSurfer color lookup table (id -> name/RGBA)."
+      }
+    },
+    "extensions": {
+      "stats": {
+        "value": ".stats",
+        "display_name": ".stats",
+        "description": "FreeSurfer statistics table."
+      },
+      "ctab": {
+        "value": ".ctab",
+        "display_name": ".ctab",
+        "description": "FreeSurfer color lookup table."
+      }
+    },
+    "columns": {
+      "Index__fs_aseg": {
+        "name": "Index",
+        "display_name": "Index",
+        "description": "Row index",
+        "type": "integer"
+      },
+      "SegId__fs_aseg": {
+        "name": "SegId",
+        "display_name": "SegId",
+        "description": "Segmentation ID (FreeSurferColorLUT)",
+        "type": "integer"
+      },
+      "NVoxels__fs_aseg": {
+        "name": "NVoxels",
+        "display_name": "NVoxels",
+        "description": "Number of voxels",
+        "type": "integer"
+      },
+      "Volume_mm3__fs_aseg": {
+        "name": "Volume_mm3",
+        "display_name": "Volume_mm3",
+        "description": "Volume",
+        "type": "number",
+        "unit": "mm^3"
+      },
+      "StructName__fs_aseg": {
+        "name": "StructName",
+        "display_name": "StructName",
+        "description": "Structure name",
+        "type": "string"
+      },
+      "normMean__fs_aseg": {
+        "name": "normMean",
+        "display_name": "normMean",
+        "description": "Mean intensity in norm.mgz",
+        "type": "number"
+      },
+      "normStdDev__fs_aseg": {
+        "name": "normStdDev",
+        "display_name": "normStdDev",
+        "description": "Std dev intensity in norm.mgz",
+        "type": "number"
+      },
+      "normMin__fs_aseg": {
+        "name": "normMin",
+        "display_name": "normMin",
+        "description": "Min intensity",
+        "type": "number"
+      },
+      "normMax__fs_aseg": {
+        "name": "normMax",
+        "display_name": "normMax",
+        "description": "Max intensity",
+        "type": "number"
+      },
+      "normRange__fs_aseg": {
+        "name": "normRange",
+        "display_name": "normRange",
+        "description": "Intensity range",
+        "type": "number"
+      },
+      "StructName__fs_aparc": {
+        "name": "StructName",
+        "display_name": "StructName",
+        "description": "Region name",
+        "type": "string"
+      },
+      "NumVert__fs_aparc": {
+        "name": "NumVert",
+        "display_name": "NumVert",
+        "description": "Number of vertices",
+        "type": "integer"
+      },
+      "SurfArea__fs_aparc": {
+        "name": "SurfArea",
+        "display_name": "SurfArea",
+        "description": "Surface area",
+        "type": "integer",
+        "unit": "mm^2"
+      },
+      "GrayVol__fs_aparc": {
+        "name": "GrayVol",
+        "display_name": "GrayVol",
+        "description": "Gray-matter volume",
+        "type": "integer",
+        "unit": "mm^3"
+      },
+      "ThickAvg__fs_aparc": {
+        "name": "ThickAvg",
+        "display_name": "ThickAvg",
+        "description": "Average thickness",
+        "type": "number",
+        "unit": "mm"
+      },
+      "ThickStd__fs_aparc": {
+        "name": "ThickStd",
+        "display_name": "ThickStd",
+        "description": "Thickness std dev",
+        "type": "number",
+        "unit": "mm"
+      },
+      "MeanCurv__fs_aparc": {
+        "name": "MeanCurv",
+        "display_name": "MeanCurv",
+        "description": "Integrated rectified mean curvature",
+        "type": "number"
+      },
+      "GausCurv__fs_aparc": {
+        "name": "GausCurv",
+        "display_name": "GausCurv",
+        "description": "Integrated rectified Gaussian curvature",
+        "type": "number"
+      },
+      "FoldInd__fs_aparc": {
+        "name": "FoldInd",
+        "display_name": "FoldInd",
+        "description": "Folding index",
+        "type": "integer"
+      },
+      "CurvInd__fs_aparc": {
+        "name": "CurvInd",
+        "display_name": "CurvInd",
+        "description": "Intrinsic curvature index",
+        "type": "number"
+      },
+      "BrainSegVol__fs_measures": {
+        "name": "BrainSegVol",
+        "display_name": "BrainSegVol",
+        "description": "BrainSegVol",
+        "type": "number",
+        "unit": "mm^3"
+      },
+      "BrainSegVolNotVent__fs_measures": {
+        "name": "BrainSegVolNotVent",
+        "display_name": "BrainSegVolNotVent",
+        "description": "BrainSegVolNotVent",
+        "type": "number",
+        "unit": "mm^3"
+      },
+      "CortexVol__fs_measures": {
+        "name": "CortexVol",
+        "display_name": "CortexVol",
+        "description": "CortexVol",
+        "type": "number",
+        "unit": "mm^3"
+      },
+      "lhCortexVol__fs_measures": {
+        "name": "lhCortexVol",
+        "display_name": "lhCortexVol",
+        "description": "lhCortexVol",
+        "type": "number",
+        "unit": "mm^3"
+      },
+      "rhCortexVol__fs_measures": {
+        "name": "rhCortexVol",
+        "display_name": "rhCortexVol",
+        "description": "rhCortexVol",
+        "type": "number",
+        "unit": "mm^3"
+      },
+      "CerebralWhiteMatterVol__fs_measures": {
+        "name": "CerebralWhiteMatterVol",
+        "display_name": "CerebralWhiteMatterVol",
+        "description": "CerebralWhiteMatterVol",
+        "type": "number",
+        "unit": "mm^3"
+      },
+      "lhCerebralWhiteMatterVol__fs_measures": {
+        "name": "lhCerebralWhiteMatterVol",
+        "display_name": "lhCerebralWhiteMatterVol",
+        "description": "lhCerebralWhiteMatterVol",
+        "type": "number",
+        "unit": "mm^3"
+      },
+      "rhCerebralWhiteMatterVol__fs_measures": {
+        "name": "rhCerebralWhiteMatterVol",
+        "display_name": "rhCerebralWhiteMatterVol",
+        "description": "rhCerebralWhiteMatterVol",
+        "type": "number",
+        "unit": "mm^3"
+      },
+      "SubCortGrayVol__fs_measures": {
+        "name": "SubCortGrayVol",
+        "display_name": "SubCortGrayVol",
+        "description": "SubCortGrayVol",
+        "type": "number",
+        "unit": "mm^3"
+      },
+      "TotalGrayVol__fs_measures": {
+        "name": "TotalGrayVol",
+        "display_name": "TotalGrayVol",
+        "description": "TotalGrayVol",
+        "type": "number",
+        "unit": "mm^3"
+      },
+      "SupraTentorialVol__fs_measures": {
+        "name": "SupraTentorialVol",
+        "display_name": "SupraTentorialVol",
+        "description": "SupraTentorialVol",
+        "type": "number",
+        "unit": "mm^3"
+      },
+      "MaskVol__fs_measures": {
+        "name": "MaskVol",
+        "display_name": "MaskVol",
+        "description": "MaskVol",
+        "type": "number",
+        "unit": "mm^3"
+      },
+      "eTIV__fs_measures": {
+        "name": "eTIV",
+        "display_name": "eTIV",
+        "description": "eTIV",
+        "type": "number",
+        "unit": "mm^3"
+      },
+      "WhiteSurfArea__fs_measures": {
+        "name": "WhiteSurfArea",
+        "display_name": "WhiteSurfArea",
+        "description": "White surface total area",
+        "type": "number",
+        "unit": "mm^2"
+      },
+      "MeanThickness__fs_measures": {
+        "name": "MeanThickness",
+        "display_name": "MeanThickness",
+        "description": "Mean thickness",
+        "type": "number",
+        "unit": "mm"
+      },
+      "NumVert__fs_measures": {
+        "name": "NumVert",
+        "display_name": "NumVert",
+        "description": "Number of vertices",
+        "type": "integer"
+      },
+      "lhSurfaceHoles__fs_measures": {
+        "name": "lhSurfaceHoles",
+        "display_name": "lhSurfaceHoles",
+        "description": "Left surface holes",
+        "type": "integer"
+      },
+      "rhSurfaceHoles__fs_measures": {
+        "name": "rhSurfaceHoles",
+        "display_name": "rhSurfaceHoles",
+        "description": "Right surface holes",
+        "type": "integer"
+      },
+      "SurfaceHoles__fs_measures": {
+        "name": "SurfaceHoles",
+        "display_name": "SurfaceHoles",
+        "description": "Total surface holes",
+        "type": "integer"
+      },
+      "seg_id__fs_labels": {
+        "name": "seg_id",
+        "display_name": "seg_id",
+        "description": "Segmentation/label ID",
+        "type": "integer"
+      },
+      "struct_name__fs_labels": {
+        "name": "struct_name",
+        "display_name": "struct_name",
+        "description": "Structure name",
+        "type": "string"
+      },
+      "r__fs_labels": {
+        "name": "r",
+        "display_name": "r",
+        "description": "Red 0-255",
+        "type": "integer"
+      },
+      "g__fs_labels": {
+        "name": "g",
+        "display_name": "g",
+        "description": "Green 0-255",
+        "type": "integer"
+      },
+      "b__fs_labels": {
+        "name": "b",
+        "display_name": "b",
+        "description": "Blue 0-255",
+        "type": "integer"
+      },
+      "a__fs_labels": {
+        "name": "a",
+        "display_name": "a",
+        "description": "Alpha 0-255",
+        "type": "integer"
+      }
+    }
+  },
+  "rules": {
+    "tabular_data": {
+      "freesurfer": {
+        "freesurfer_aseg": {
+          "selectors": [
+            "datatype == \"anat\"",
+            "extension == \".stats\"",
+            "suffix == \"segstats\""
+          ],
+          "additional_columns": "allowed",
+          "columns": {
+            "Index__fs_aseg": "optional",
+            "SegId__fs_aseg": "optional",
+            "NVoxels__fs_aseg": "optional",
+            "Volume_mm3__fs_aseg": "optional",
+            "StructName__fs_aseg": "optional",
+            "normMean__fs_aseg": "optional",
+            "normStdDev__fs_aseg": "optional",
+            "normMin__fs_aseg": "optional",
+            "normMax__fs_aseg": "optional",
+            "normRange__fs_aseg": "optional"
+          }
+        },
+        "freesurfer_aparc": {
+          "selectors": [
+            "datatype == \"anat\"",
+            "extension == \".stats\"",
+            "suffix == \"parcstats\""
+          ],
+          "additional_columns": "allowed",
+          "columns": {
+            "StructName__fs_aparc": "optional",
+            "NumVert__fs_aparc": "optional",
+            "SurfArea__fs_aparc": "optional",
+            "GrayVol__fs_aparc": "optional",
+            "ThickAvg__fs_aparc": "optional",
+            "ThickStd__fs_aparc": "optional",
+            "MeanCurv__fs_aparc": "optional",
+            "GausCurv__fs_aparc": "optional",
+            "FoldInd__fs_aparc": "optional",
+            "CurvInd__fs_aparc": "optional"
+          }
+        },
+        "freesurfer_measures": {
+          "selectors": [
+            "suffix == \"fsmeasures\""
+          ],
+          "additional_columns": "allowed",
+          "columns": {
+            "BrainSegVol__fs_measures": "optional",
+            "BrainSegVolNotVent__fs_measures": "optional",
+            "CortexVol__fs_measures": "optional",
+            "lhCortexVol__fs_measures": "optional",
+            "rhCortexVol__fs_measures": "optional",
+            "CerebralWhiteMatterVol__fs_measures": "optional",
+            "lhCerebralWhiteMatterVol__fs_measures": "optional",
+            "rhCerebralWhiteMatterVol__fs_measures": "optional",
+            "SubCortGrayVol__fs_measures": "optional",
+            "TotalGrayVol__fs_measures": "optional",
+            "SupraTentorialVol__fs_measures": "optional",
+            "MaskVol__fs_measures": "optional",
+            "eTIV__fs_measures": "optional",
+            "WhiteSurfArea__fs_measures": "optional",
+            "MeanThickness__fs_measures": "optional",
+            "NumVert__fs_measures": "optional",
+            "lhSurfaceHoles__fs_measures": "optional",
+            "rhSurfaceHoles__fs_measures": "optional",
+            "SurfaceHoles__fs_measures": "optional"
+          }
+        },
+        "freesurfer_labels": {
+          "selectors": [
+            "extension == \".ctab\"",
+            "suffix == \"fslabels\""
+          ],
+          "additional_columns": "allowed",
+          "columns": {
+            "seg_id__fs_labels": "optional",
+            "struct_name__fs_labels": "optional",
+            "r__fs_labels": "optional",
+            "g__fs_labels": "optional",
+            "b__fs_labels": "optional",
+            "a__fs_labels": "optional"
+          }
+        }
+      }
+    }
+  }
+}

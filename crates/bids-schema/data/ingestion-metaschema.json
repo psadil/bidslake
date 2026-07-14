@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bidslake.dev/schemas/ingestion-metaschema.json",
+  "title": "bidslake ingestion schema",
+  "description": "A bidslake-specific (not BIDS) schema that decides, for files already projected onto BIDS concepts, what bidslake does with each: read its contents into a data table, catalog it in the file registry, or ignore it. It selects with the BIDS selector-expression language over projected concepts (datatype/suffix/extension/…), and declares per-table policy for the data tables that readers populate. It replaces bidslake's previously-hardcoded read-vs-catalog logic (the `.tsv` gate, `.bval`/`.bvec` handling, recording/ordering rules).",
+  "type": "object",
+  "properties": {
+    "IngestionSchemaVersion": { "type": "string" },
+    "rules": {
+      "type": "array",
+      "description": "Ordered file-disposition rules; the first whose selectors all pass decides the file.",
+      "items": { "$ref": "#/$defs/rule" }
+    },
+    "tables": {
+      "type": "object",
+      "description": "Per-data-table policy (materialized concepts, row ordering), keyed by table name. Only tables that a reader populates need an entry; the file registry (`scans`) and BIDS entity tables are not configured here.",
+      "patternProperties": { "^[a-zA-Z0-9_]+$": { "$ref": "#/$defs/tablePolicy" } },
+      "additionalProperties": false
+    }
+  },
+  "required": ["IngestionSchemaVersion"],
+  "patternProperties": { "^x_": {} },
+  "unevaluatedProperties": false,
+  "$defs": {
+    "rule": {
+      "type": "object",
+      "properties": {
+        "selectors": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "BIDS selector expressions over the file's projected concepts; all must pass for the rule to apply."
+        },
+        "disposition": {
+          "description": "What bidslake does with a matched file.",
+          "oneOf": [
+            {
+              "const": "read",
+              "description": "Parse the file's contents into rows of a data table via `reader` (e.g. a `.tsv` via `csv`, a FreeSurfer `.stats` via `fs_stats`). The file is also recorded in the registry, as with `catalog`."
+            },
+            {
+              "const": "catalog",
+              "description": "Record the file as one row — its path plus projected BIDS concepts — in the standard file registry (`scans`, surfaced as the `files` view): the same registry populated for ordinary BIDS files, created even when no adapter is used. Contents are NOT parsed; the file stays on disk. This is how non-tabular data files (images, surfaces, `recon-all.log`) become discoverable."
+            },
+            {
+              "const": "ignore",
+              "description": "Recognize the file but do nothing with it — neither read nor register it. The declarative way to exclude files (the role `.bidsignore` plays for BIDS tools): bidslake walks files a pipeline's `.bidsignore` hid, and `ignore` rules skip the ones that should stay out of the catalog."
+            }
+          ]
+        },
+        "reader": { "type": "string", "description": "Reader name (required when disposition is `read`); validated against the compiled-in reader registry." }
+      },
+      "required": ["selectors", "disposition"],
+      "additionalProperties": false
+    },
+    "tablePolicy": {
+      "type": "object",
+      "properties": {
+        "concepts": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "BIDS concept names materialized as physical columns on this data table, populated from the projection (e.g. `sub`, `ses`, `hemi`, `parc`). Presence marks the table as materialized-concept rather than the virtual-regex-over-path columns used by registry/BIDS-native tables — required because a non-BIDS path doesn't encode entities in its name."
+        },
+        "ordered": {
+          "type": "boolean",
+          "description": "Whether the source row order is load-bearing and must be preserved (rows read sequentially). When false, rows carry no meaningful order and may be read in parallel. Follows the BIDS row-order proposal (bids-standard/bids-2-devel#98); consumers sort by a canonical column (e.g. `onset`) when needed, so no sort column is specified."
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
