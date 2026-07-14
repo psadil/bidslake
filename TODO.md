@@ -74,11 +74,6 @@ accessors; and the opt-in `python -m bidslake.stubgen`. Remaining follow-ups:
 - [ ] **Consider filtering `bidslake_*` meta tables** from the generated `COLUMNS`/`C` typed surface
   (they are internal provenance tables; `bidslake_meta`/`bidslake_schema` currently appear there).
 
-- [ ] **Schema-driven ordering, once BIDS has `row_order`**. `bids::is_order_insensitive` hardcodes
-  the row-order policy (only `events` is reorderable). If bids-standard/bids-2-devel#98 lands, drive
-  it from the schema and drop the hardcode. Related: declarable `row_identity` (blocked on the same
-  "no invented schema concepts" constraint).
-
 - [ ] **Batched-insert crash on empty header columns** (pre-existing, unrelated to overlays). A TSV
   with a trailing tab (an empty-string column name) makes the batched insert emit
   `json_object('', raw."")`, a "zero-length delimited identifier" parser error that drops the file

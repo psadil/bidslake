@@ -72,6 +72,16 @@ METASCHEMA_JSON}`). Builds stay fully offline.
 
 ### 6. Row-order stays upstream; positional handling stays hardcoded
 
+> **Superseded by [ADR 0002](0002-layout-adapters.md) §4 (2026-07-14).** The conclusion below
+> — that the only alternatives were "invent a BIDS concept" or "hardcode it" — was a false
+> dichotomy. Read-vs-catalog and row-order are not BIDS questions at all (BIDS has no
+> database), so they needed no *BIDS* concept; they needed a **bidslake** schema. They now
+> live in the formal, metaschema-validated **ingestion schema**
+> (`data/ingestion/base.json` declares `events` as `{"ordered": false}`), and
+> `bids::is_order_insensitive` no longer exists. The reasoning about not inventing *BIDS*
+> concepts still stands, and bids-2-devel#98 remains the upstream home for row-order if BIDS
+> ever wants it — but bidslake no longer waits on it. Retained below as written.
+
 Some tabular files raised a real gap: `*_desc-confounds_timeseries.tsv` rows are
 positional (row N == volume N), so their order must be preserved. BIDS has no schema
 field to express row-order semantics. We deliberately do **not** invent one, nor
@@ -112,5 +122,7 @@ whenever an overlay is present is a reasonable future default; see the TODO).
   validation is against the live `information_schema`.
 - bidslake honors only what the metaschema (as vendored) permits; it will not accept
   overlays that invent new schema constructs until those land upstream.
-- The ordering hardcode is a known, documented exception to bidslake's
-  "everything is schema-driven" design, tracked against bids-2-devel#98.
+- ~~The ordering hardcode is a known, documented exception to bidslake's
+  "everything is schema-driven" design, tracked against bids-2-devel#98.~~ Resolved: the
+  exception is gone. The ordering policy (and read-vs-catalog generally) is now driven by the
+  **ingestion schema** — see [ADR 0002](0002-layout-adapters.md) §4.
