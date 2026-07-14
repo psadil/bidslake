@@ -824,8 +824,9 @@ impl BidsParser {
             return Ok(());
         }
 
-        // Parse BIDS filename entities + extension via the shared bids-core parser.
+        // Parse BIDS filename entities + suffix + extension via the shared bids-core parser.
         let parts = read_entities(file_name);
+        let suffix = parts.suffix;
         let extension = parts.extension;
         let entities = parts.entities;
 
@@ -878,33 +879,92 @@ impl BidsParser {
             }
         }
 
-        // Specific file processing
+        // JSON (sidecars + `dataset_description.json`) is handled directly: it is neither
+        // read into a data table nor cataloged, but drives inheritance and associations.
         if file_name == "dataset_description.json" {
             self.process_dataset_description(path, db, dataset_id)
                 .await?;
-        } else if file_name.ends_with(".bval") || file_name.ends_with(".bvec") {
-            // For bval/bvec, we need to find the corresponding NIfTI file
-            self.process_diffusion_file(path, db, rel_path, file_name, dataset_id)
-                .await?;
-        } else if file_name.ends_with(".json") {
+            return Ok(());
+        }
+        if file_name.ends_with(".json") {
             self.process_json_file(path, db, dataset_id, rel_path, &entities)
                 .await?;
-        } else if is_tabular_file(file_name) {
-            // Every .tsv/.tsv.gz is routed to a table by the schema-driven tabular
-            // model — participants, scans, events, channels, … — so all tabular
-            // data lives in the database. See `process_tabular_file`.
-            self.process_tabular_file(db, rel_path, file_name, dataset_id, &entities)
-                .await?;
+            return Ok(());
         }
 
-        // Track primary data files for the `scans` table — imaging plus non-NIfTI datafiles
-        // (EEG/MEG/iEEG/NIRS/microscopy/…, including pseudo-files like `.ds`), so they are
-        // queryable by concept.
+        // Primary data files — imaging plus non-NIfTI datafiles (EEG/MEG/iEEG/NIRS/
+        // microscopy/…, including pseudo-files like `.ds`) — are tracked in `scans` so
+        // they are queryable by concept. They are recognized *structurally* (they carry a
+        // datatype and are not tabular/diffusion companions) and short-circuit here, before
+        // the ingestion dispatch below.
+        //
+        // PERF short-circuit (droppable once selector ASTs are cached): this early return
+        // also keeps `Ingestion::classify`'s per-file selector evaluation off the
+        // imaging-file hot path — imaging files are the bulk of a dataset and match no base
+        // ingestion rule, so classifying them would be pure waste. `classify` re-parses each
+        // selector with oxc on every call (no AST cache yet — see TODO.md "Cache parsed
+        // selector expressions"). Once that lands, classify is cheap for every file and this
+        // early return is no longer perf-load-bearing: it may then move back below the
+        // dispatch as a plain structural catalog step, or stay as a clarity boundary. Grep
+        // `PERF short-circuit` when that caching lands.
         if is_datafile(rel_path, &extension, self.schema.raw()) {
             self.imaging_files.push(ImagingFile {
                 dataset_id: dataset_id.to_string(),
                 file_path: rel_path.to_string(), // Use rel_path not file_name
             });
+            return Ok(());
+        }
+
+        // Tabular + diffusion companions: the ingestion schema selects on the projected
+        // concepts (extension/suffix) and returns the disposition + reader, replacing the
+        // former hardcoded `.tsv`/`.bval`/`.bvec` gates. `read` runs the named reader
+        // (`csv` = the batched tabular ingest, `diffusion` = the bval/bvec accumulator);
+        // `catalog` records the file in the `tabular_files` registry with its contents
+        // left on disk (chiefly compressed continuous recordings, read later with tools
+        // like polars); `ignore` skips it. `datatype` is intentionally not bound here so a
+        // configured adapter's datatype-keyed rules can't claim ordinary BIDS files.
+        let path_with_slash = format!("/{rel_path}");
+        let null = Value::Null;
+        let disposition = {
+            let ctx = FileContext {
+                path: &path_with_slash,
+                datatype: None,
+                suffix: Some(&suffix),
+                extension: Some(&extension),
+                sidecar: &null,
+                dataset_type: self.dataset_type.as_deref(),
+            };
+            self.schema
+                .ingestion()
+                .classify(&ctx)
+                .map(|r| (r.disposition, r.reader.clone()))
+        };
+        match disposition {
+            Some((Disposition::Read, reader)) => match reader.as_deref() {
+                Some("diffusion") => {
+                    self.process_diffusion_file(path, db, rel_path, file_name, dataset_id)
+                        .await?;
+                }
+                Some("csv") => {
+                    self.process_tabular_file(db, rel_path, file_name, dataset_id, &entities)
+                        .await?;
+                }
+                other => {
+                    eprintln!(
+                        "Warning: ingestion `read` rule for {rel_path} names unknown reader {other:?}; skipping"
+                    );
+                }
+            },
+            Some((Disposition::Catalog, _)) => {
+                // Left on disk, recorded in the tabular registry so queries surface it
+                // (chiefly compressed continuous recordings `*_physio.tsv.gz`).
+                let table = recording_table_of(&suffix);
+                db.record_tabular_file(dataset_id, rel_path, table, 0, TabularStatus::OnDisk)?;
+            }
+            Some((Disposition::Ignore, _)) => {}
+            // A non-datafile, non-JSON file with no ingestion rule (READMEs, CHANGES, …):
+            // nothing to ingest.
+            None => {}
         }
 
         Ok(())
@@ -1170,13 +1230,15 @@ impl BidsParser {
         Ok((x, y, z))
     }
 
-    /// Route one tabular file to its table and ingest it with DuckDB `read_csv`.
+    /// Route one header-bearing tabular file to its table and ingest it with DuckDB
+    /// `read_csv`. This is the ingestion schema's `csv` reader — reached only for `.tsv`
+    /// files the dispatch classified as `read` (compressed `.tsv.gz` recordings are
+    /// `catalog`ed upstream, before this point).
     ///
-    /// The file's `(path, suffix, extension, datatype, dataset_type)` are matched
-    /// against `rules.tabular_data`. Header-bearing `.tsv` files are ingested
-    /// directly; gzipped continuous recordings (`*_physio.tsv.gz`, …) are headerless
-    /// and handled separately. Every tabular file — ingested, deferred, or
-    /// unmatched — is recorded in `tabular_files` so nothing is silently dropped.
+    /// The file's `(path, suffix, extension, datatype, dataset_type)` are matched against
+    /// `rules.tabular_data`. Uncompressed headerless recordings (`*_motion`, …) are
+    /// deferred to the recordings flush; every other tabular file — ingested, deferred,
+    /// or unmatched — is recorded in `tabular_files` so nothing is silently dropped.
     async fn process_tabular_file(
         &mut self,
         db: &BidsDb,
@@ -1188,17 +1250,6 @@ impl BidsParser {
         let (suffix, extension) = split_suffix_ext(file_name);
         if suffix == "scans" {
             self.has_scans_tsv = true;
-        }
-
-        // Compressed continuous recordings (`*_physio.tsv.gz`, `*_stim.tsv.gz`,
-        // `*_physioevents.tsv.gz`) are stored one row per sample and dwarf the
-        // metadata, so as a deliberate size policy they are left on disk rather
-        // than ingested — recorded here so they are still tracked. See the README
-        // roadmap for where this line is likely to move.
-        if extension == ".tsv.gz" {
-            let table = recording_table_of(&suffix);
-            db.record_tabular_file(dataset_id, rel_path, table, 0, TabularStatus::OnDisk)?;
-            return Ok(());
         }
 
         // Uncompressed headerless recordings — chiefly the motion time-series —
@@ -1931,11 +1982,6 @@ impl BidsParser {
         }
         out
     }
-}
-
-/// Whether a file is a BIDS tabular data file (all such data lives in the database).
-fn is_tabular_file(file_name: &str) -> bool {
-    file_name.ends_with(".tsv") || file_name.ends_with(".tsv.gz")
 }
 
 /// How one headerless continuous-recording suffix maps to a table and how its
