@@ -9,11 +9,6 @@ as issues. Roughly ordered by value.
   (now documented in the docstring). When the PyO3 PyCapsule stream bridge lands
   (`crates/bidslake-py/src/lib.rs`), stream Arrow batches so `get()` is O(1) memory.
 
-- [ ] **Eliminate the per-file entity-map rebuild** (`dup-02` follow-up). `entity_name_to_key`
-  is now shared, but `build_file_context` (`crates/bids-schema/src/context.rs`) still rebuilds
-  the map on every file, and the two per-file loops (`crates/bids-validator-rs/src/context.rs`,
-  `crates/bidslake/src/bids.rs`) trigger it. Hoist/memoize so it is computed once per schema.
-
 - [ ] **Push `materialize` scheme-branching behind the trait** (`abstraction-01` secondary).
   Have each `BidsFileSystem` impl return a `read_csv`-ready source string (absolute local path,
   or `s3://` URL) so the `starts_with("s3://")` branch at the call sites can be deleted;

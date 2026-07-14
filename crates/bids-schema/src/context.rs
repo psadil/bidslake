@@ -38,12 +38,18 @@ pub fn entity_name_to_key(schema: &Value) -> HashMap<String, String> {
 
 /// Build the file-level selector context for `file` against `schema` (the raw schema JSON).
 ///
-/// `entities` are resolved into the schema's key namespace (e.g. `subject`, not `sub`); the
-/// shared `dataset`/`schema`/`subject` scopes are left to the caller's [`crate::expression::EvalContext`].
-pub fn build_file_context(file: &BidsFile, schema: &Value) -> Value {
+/// `name_to_key` is the entity-abbreviation → schema-key map from [`entity_name_to_key`]. It
+/// depends only on the schema, not the file, so callers compute it **once** and pass it in for
+/// every file rather than rebuilding it per file. `entities` are resolved into the schema's key
+/// namespace (e.g. `subject`, not `sub`); the shared `dataset`/`schema`/`subject` scopes are left
+/// to the caller's [`crate::expression::EvalContext`].
+pub fn build_file_context(
+    file: &BidsFile,
+    schema: &Value,
+    name_to_key: &HashMap<String, String>,
+) -> Value {
     let parts = read_entities(&file.name);
-    let name_to_key = entity_name_to_key(schema);
-    let entities = resolve_entities(&parts.entities, &name_to_key);
+    let entities = resolve_entities(&parts.entities, name_to_key);
     let datatype = find_datatype(&file.path, schema);
     let modality = datatype.as_deref().and_then(|dt| find_modality(dt, schema));
 

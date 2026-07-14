@@ -1954,6 +1954,9 @@ impl BidsParser {
         };
         let schema = self.schema.raw();
         let meta_assoc = self.schema.associations();
+        // The entity abbreviation→key map depends only on the schema, so derive it once here
+        // instead of rebuilding it inside `build_file_context` for every file in the tree.
+        let name_to_key = bids_schema::context::entity_name_to_key(schema);
 
         let mut out = Vec::new();
         for file in tree.walk_files() {
@@ -1962,7 +1965,7 @@ impl BidsParser {
             if bids_schema::datatypes::find_datatype(&file.path, schema).is_none() {
                 continue;
             }
-            let file_ctx = bids_schema::context::build_file_context(file, schema);
+            let file_ctx = bids_schema::context::build_file_context(file, schema, &name_to_key);
             for h in
                 bids_schema::associations::resolve_associations(meta_assoc, file, &tree, &file_ctx)
             {
