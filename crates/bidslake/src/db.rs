@@ -170,6 +170,44 @@ impl BidsDb {
         Ok(())
     }
 
+    /// Record provenance rows (`idx`, `source`, `sha256`, `content`) in a `bidslake_<kind>`
+    /// table so the catalog stays self-describing. No-op when empty; idempotent across
+    /// re-indexing (insert only if the idx is absent). `table` is a fixed internal name.
+    fn stamp_provenance(&self, table: &str, items: &[(String, Value)]) -> Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        self.conn.execute(
+            &format!(
+                "CREATE TABLE IF NOT EXISTS {table} \
+                 (idx INTEGER, source TEXT, sha256 TEXT, content JSON)"
+            ),
+            [],
+        )?;
+        for (i, (source, content)) in items.iter().enumerate() {
+            let content_str = serde_json::to_string(content).unwrap_or_default();
+            let sha = sha256_hex(content_str.as_bytes());
+            self.conn.execute(
+                &format!(
+                    "INSERT INTO {table} (idx, source, sha256, content) \
+                     SELECT ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM {table} WHERE idx = ?)"
+                ),
+                params![i as i32, source, sha, content_str, i as i32],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Record the applied term maps (`bidslake_term_maps`), for a self-describing catalog.
+    pub fn stamp_term_maps(&self, term_maps: &[(String, Value)]) -> Result<()> {
+        self.stamp_provenance("bidslake_term_maps", term_maps)
+    }
+
+    /// Record the applied ingestion fragments (`bidslake_ingestion`).
+    pub fn stamp_ingestion(&self, ingestion: &[(String, Value)]) -> Result<()> {
+        self.stamp_provenance("bidslake_ingestion", ingestion)
+    }
+
     /// Record a tabular file's [`TabularStatus`] disposition. Backs the
     /// tabular-data invariant. `INSERT OR REPLACE` keeps it correct across
     /// re-indexing.

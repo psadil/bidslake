@@ -397,7 +397,8 @@ impl BidsContext {
         // Resolve the schema's `meta.associations` for this file via the shared, pure resolver
         // in `bids-schema` (selector eval + tree search, no content reads), then build the typed
         // `BidsAssociations` on top (the content reads stay here).
-        let ctx_value = bids_schema::context::build_file_context(file, &schema.raw);
+        let ctx_value =
+            bids_schema::context::build_file_context(file, &schema.raw, &schema.entity_name_to_key);
         let hits = bids_schema::associations::resolve_associations(
             schema.associations(),
             file,

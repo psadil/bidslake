@@ -13,6 +13,10 @@ pub struct ValidatorConfig {
     /// and a network fetch (mirroring hed-python).
     #[serde(default)]
     pub hed_schema_dir: Option<PathBuf>,
+    /// Bundled layout adapters (e.g. `freesurfer`) whose BEP-043 term maps recognize
+    /// standardized *non-BIDS* files, so they are not flagged as "not part of BIDS".
+    #[serde(default)]
+    pub adapters: Vec<String>,
 }
 
 /// Represents a specific issue code to ignore during validation.

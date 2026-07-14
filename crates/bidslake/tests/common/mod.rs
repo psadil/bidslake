@@ -8,6 +8,8 @@
 #![allow(dead_code)]
 
 use anyhow::Result;
+use bids_schema::term_map::{TermMap, bundled_term_map};
+use bidslake::schema::{AppliedOverlay, Ingestion};
 use bidslake::{bids::BidsParser, db::BidsDb, fs::LocalFileSystem, schema::Schema};
 use std::path::{Path, PathBuf};
 
@@ -38,6 +40,57 @@ pub async fn ingest_with_schema(dataset_path: impl AsRef<Path>, schema: Schema) 
     db.create_tables(&schema)?;
     let fs = Box::new(LocalFileSystem::new(dataset_path.as_ref().to_path_buf()));
     let mut parser = BidsParser::new(fs, None, schema, None, true);
+    let txn = db.conn.unchecked_transaction()?;
+    parser.parse(&db).await?;
+    txn.commit()?;
+    Ok(db)
+}
+
+/// Ingest a standardized *non-BIDS* dataset with one or more bundled adapters (e.g.
+/// `freesurfer`), mirroring `main::run_indexer`: each adapter contributes an overlay
+/// (tables), a term map (projection), and an ingestion fragment (read/catalog policy),
+/// which the schema-driven pipeline uses. Provenance is stamped.
+pub async fn ingest_with_adapters(
+    dataset_path: impl AsRef<Path>,
+    adapter_names: &[&str],
+) -> Result<BidsDb> {
+    let db = BidsDb::new(":memory:")?;
+
+    let mut overlays: Vec<AppliedOverlay> = Vec::new();
+    let mut term_maps: Vec<TermMap> = Vec::new();
+    let mut ingestion_sources: Vec<String> = vec![
+        bids_schema::bundled_ingestion_source("base")
+            .unwrap()
+            .to_string(),
+    ];
+    let mut term_map_prov: Vec<(String, serde_json::Value)> = Vec::new();
+    let mut ingestion_prov: Vec<(String, serde_json::Value)> = Vec::new();
+    for name in adapter_names {
+        overlays.push(AppliedOverlay {
+            source: name.to_string(),
+            content: bids_schema::overlay::bundled_overlay(name).expect("bundled overlay"),
+        });
+        term_maps.push(bundled_term_map(name).expect("bundled term map"));
+        let ing = bids_schema::bundled_ingestion_source(name).expect("bundled ingestion");
+        ingestion_sources.push(ing.to_string());
+        ingestion_prov.push((name.to_string(), serde_json::from_str(ing).unwrap()));
+        let tm = bids_schema::term_map::bundled_term_map_source(name).unwrap();
+        term_map_prov.push((name.to_string(), serde_json::from_str(tm).unwrap()));
+    }
+    let ingestion = Ingestion::from_sources(
+        &ingestion_sources
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+    )?;
+    let schema = Schema::load_full(None, &overlays, ingestion)?;
+
+    db.create_tables(&schema)?;
+    db.stamp_term_maps(&term_map_prov)?;
+    db.stamp_ingestion(&ingestion_prov)?;
+
+    let fs = Box::new(LocalFileSystem::new(dataset_path.as_ref().to_path_buf()));
+    let mut parser = BidsParser::new(fs, None, schema, None, true).with_term_maps(term_maps);
     let txn = db.conn.unchecked_transaction()?;
     parser.parse(&db).await?;
     txn.commit()?;

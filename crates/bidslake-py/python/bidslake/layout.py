@@ -148,6 +148,26 @@ class BidsLake:
         """
         return self._lake.overlays()
 
+    @property
+    def term_maps(self) -> list[tuple[int, str, str]]:
+        """The BEP-043 term maps applied when this database was indexed, as
+        ``(index, source, sha256)`` in application order — empty if none.
+
+        An adapter (``--adapter freesurfer``) projects a standardized *non-BIDS* dataset
+        onto BIDS concepts via a term map, declares its tables via a BIDS overlay (see
+        :attr:`overlays`), and its read/catalog policy via an ingestion schema (see
+        :attr:`ingestion`). The resulting tables are queryable with no extra step
+        (``lake.table("freesurfer_aparc")``); this is for provenance/introspection.
+        """
+        return self._lake.term_maps()
+
+    @property
+    def ingestion(self) -> list[tuple[int, str, str]]:
+        """The ingestion schemas applied when this database was indexed, as
+        ``(index, source, sha256)`` in application order — empty if none.
+        """
+        return self._lake.ingestion()
+
     def effective_schema(self) -> dict[str, Any] | None:
         """The full effective (base + overlays) BIDS schema stamped into the
         database, or ``None`` for a database that predates the stamp. Every database

@@ -172,7 +172,8 @@ mod tests {
             )],
         );
 
-        let bold_ctx = crate::context::build_file_context(&bold, &schema);
+        let name_to_key = crate::context::entity_name_to_key(&schema);
+        let bold_ctx = crate::context::build_file_context(&bold, &schema, &name_to_key);
         let bold_hits = resolve_associations(meta, &bold, &tree, &bold_ctx);
         assert!(
             bold_hits
@@ -182,7 +183,7 @@ mod tests {
             bold_hits.iter().map(|h| &h.name).collect::<Vec<_>>()
         );
 
-        let dwi_ctx = crate::context::build_file_context(&dwi, &schema);
+        let dwi_ctx = crate::context::build_file_context(&dwi, &schema, &name_to_key);
         let dwi_hits = resolve_associations(meta, &dwi, &tree, &dwi_ctx);
         assert!(
             dwi_hits.iter().any(|h| h.name == "bval"),

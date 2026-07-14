@@ -14,6 +14,7 @@ pub mod context;
 pub mod datatypes;
 pub mod expression;
 pub mod overlay;
+pub mod term_map;
 
 use serde_json::Value;
 
@@ -46,3 +47,40 @@ pub const SCHEMA_JSON: &str = include_str!(concat!(env!("OUT_DIR"), "/schema.jso
 /// [`overlay::validate_effective`], which accounts for the metaschema lagging the
 /// schema slightly.
 pub const METASCHEMA_JSON: &str = include_str!(concat!(env!("OUT_DIR"), "/metaschema.json"));
+
+/// The hand-written JSON-Schema metaschema (draft 2020-12) for bidslake **ingestion
+/// schemas** — the bidslake-specific documents that decide read/catalog/ignore + reader +
+/// per-table policy for files already projected onto BIDS concepts. Unlike the BIDS
+/// metaschema this is bidslake's own (BIDS has no database to read into); it is embedded here
+/// only because the bundled data lives in this crate. The [`crate::term_map`] engine is
+/// shared; the ingestion *model* lives in `bidslake`.
+pub const INGESTION_METASCHEMA_JSON: &str = include_str!("../data/ingestion-metaschema.json");
+
+/// Ingestion fragments bidslake ships, addressable by name.
+pub const BUNDLED_INGESTION_NAMES: &[&str] = &["freesurfer"];
+
+/// The raw JSON of a bundled ingestion fragment, or `None` if `name` is not bundled.
+pub fn bundled_ingestion_source(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "base" => include_str!("../data/ingestion/base.json"),
+        "freesurfer" => include_str!("../data/ingestion/freesurfer.json"),
+        _ => return None,
+    })
+}
+
+/// Validate an ingestion document against [`INGESTION_METASCHEMA_JSON`], returning the list
+/// of violations (empty on success). Lives here because this crate owns the `jsonschema`
+/// dependency and the embedded metaschema; the ingestion *model* lives in `bidslake`.
+pub fn validate_ingestion(document: &Value) -> Vec<String> {
+    let metaschema: Value =
+        serde_json::from_str(INGESTION_METASCHEMA_JSON).expect("ingestion metaschema must parse");
+    let validator = jsonschema::validator_for(&metaschema)
+        .expect("ingestion metaschema must compile as a JSON Schema");
+    let mut violations: Vec<String> = validator
+        .iter_errors(document)
+        .map(|e| format!("  at `{}`: {e}", e.instance_path()))
+        .collect();
+    violations.sort();
+    violations.dedup();
+    violations
+}

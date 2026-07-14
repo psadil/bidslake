@@ -1,0 +1,36 @@
+{
+  "BIDSVersion": "1.11.1",
+  "BIDSMapVersion": "0.1.0",
+  "Mappings": [
+    {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/stats/aseg\\.stats",
+      "Entities": { "seg": "aseg" },
+      "Concepts": { "datatype": "anat", "suffix": "segstats" }
+    },
+    {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/stats/wmparc\\.stats",
+      "Entities": { "seg": "wmparc" },
+      "Concepts": { "datatype": "anat", "suffix": "segstats" }
+    },
+    {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/stats/(?P<hemi>[lr]h)\\.(?P<parc>aparc\\.a2009s|aparc\\.DKTatlas|aparc\\.pial|BA_exvivo\\.thresh|BA_exvivo|aparc)\\.stats",
+      "Concepts": { "datatype": "anat", "suffix": "parcstats" }
+    },
+    {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/label/[^/]+\\.ctab",
+      "Concepts": { "datatype": "anat", "suffix": "fslabels" }
+    },
+    {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/label/(?P<hemi>[lr]h)\\.[^/]+\\.annot",
+      "Concepts": { "datatype": "anat" }
+    },
+    {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/surf/(?P<hemi>[lr]h)\\.[^/]+",
+      "Concepts": { "datatype": "anat" }
+    },
+    {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/mri/[^/]+\\.mgz",
+      "Concepts": { "datatype": "anat" }
+    }
+  ]
+}

@@ -26,11 +26,14 @@
 
 use crate::db::{BidsDb, FileAssociation, TabularStatus};
 use crate::fs::BidsFileSystem;
+use crate::readers::{self, ContentReader};
 use crate::schema::Schema;
 use crate::schema::dynamic::{quote_ident, sql_in_list, sql_lit};
+use crate::schema::ingestion::Disposition;
 use crate::schema::tabular::{ColumnSpec, FileContext, RowIdentity, TableSpec};
 use anyhow::{Context, Result};
 use bids_core::entities::read_entities;
+use bids_schema::term_map::{FileFacts, TermMap};
 use duckdb::Connection;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use serde_json::Value;
@@ -109,6 +112,11 @@ pub struct BidsParser {
     schema: Schema,
     imaging_files: Vec<ImagingFile>,
     has_scans_tsv: bool,
+    /// Whether a `dataset_description.json` was found and inserted. When it wasn't — the
+    /// normal case for a dataset ingested through a layout adapter, which by definition
+    /// has none — a minimal row is synthesized at the end of the walk so the dataset still
+    /// records its `root_uri`.
+    has_dataset_description: bool,
     sidecars: Vec<SidecarInfo>,
     /// `dataset_description.json`'s `DatasetType` (`raw`/`derivative`), needed to
     /// evaluate the `derivatives.*` tabular selectors (e.g. `dseg` lookups).
@@ -145,6 +153,12 @@ pub struct BidsParser {
     json_content: HashMap<String, String>,
     /// Prefetched TSV headers (rel path → parsed header), same rationale.
     tabular_header: HashMap<String, Option<(String, Vec<String>)>>,
+    /// Term maps (FreeSurfer, …) that recognize standardized non-BIDS files. Empty for an
+    /// ordinary BIDS ingest, so `process_file` pays only one `is_empty()` check per file.
+    term_maps: Vec<TermMap>,
+    /// Content readers keyed by name (`fs_stats`, …); parse a recognized file's body into
+    /// rows. Selected by the ingestion schema's `reader`.
+    readers: HashMap<String, Box<dyn ContentReader>>,
 }
 
 #[derive(Clone)]
@@ -224,6 +238,7 @@ impl BidsParser {
             schema,
             imaging_files: Vec::new(),
             has_scans_tsv: false,
+            has_dataset_description: false,
             sidecars: Vec::new(),
             dataset_type: None,
             datatypes,
@@ -236,7 +251,17 @@ impl BidsParser {
             phase_timer: PhaseTimer::new(),
             json_content: HashMap::new(),
             tabular_header: HashMap::new(),
+            term_maps: Vec::new(),
+            readers: readers::default_readers(),
         }
+    }
+
+    /// Attach term maps that recognize standardized non-BIDS files (FreeSurfer, …).
+    /// Ordinary BIDS ingestion configures none, so the classify hot path in
+    /// [`Self::process_file`] short-circuits on an empty term-map list.
+    pub fn with_term_maps(mut self, term_maps: Vec<TermMap>) -> Self {
+        self.term_maps = term_maps;
+        self
     }
 
     /// Enable httpfs on the read-preflight [`Self::validator`] connection (from the
@@ -436,6 +461,29 @@ impl BidsParser {
 
         let d_process = t_process.map(|t| t.elapsed());
         let t_finalize = self.phase_timer.mark();
+
+        // Every ingested dataset must record a `root_uri`: it is what turns a stored
+        // dataset-relative `file_path` back into an openable `file://`/`s3://` URI, and it
+        // lives on `dataset_description`. A dataset ingested through a layout adapter
+        // (FreeSurfer `recon-all`, …) has no `dataset_description.json` by definition, so
+        // without this its files could not be resolved by a client at all. Synthesize the
+        // minimal row.
+        //
+        // This runs *after* the walk deliberately: the insert carries a `WHERE NOT EXISTS`
+        // primary-key guard, so a bare row written up front would shadow a real
+        // `dataset_description.json` and silently drop its metadata.
+        if !self.has_dataset_description {
+            let mut row = serde_json::Map::new();
+            row.insert(
+                "dataset_id".to_string(),
+                Value::String(dataset_id.to_string()),
+            );
+            row.insert("root_uri".to_string(), Value::String(self.fs.root()));
+            db.insert(&self.schema, "dataset_description", &Value::Object(row))
+                .with_context(|| {
+                    format!("inserting synthesized dataset_description for {dataset_id}")
+                })?;
+        }
 
         // File associations: the `IntendedFor` rows collected during the walk, plus the schema's
         // structural associations (events↔bold, bval/bvec↔dwi, channels↔eeg, …) resolved via the
@@ -793,8 +841,21 @@ impl BidsParser {
             return Ok(());
         }
 
-        // Parse BIDS filename entities + extension via the shared bids-core parser.
+        // Standardized non-BIDS files (FreeSurfer, …) are recognized by a term map and
+        // handled by the schema-driven ingestion path — they never fall through to BIDS
+        // processing (a term map never claims a BIDS-named file). Consulted only when a term
+        // map is configured, so an ordinary BIDS ingest pays one `is_empty()` check per file.
+        if !self.term_maps.is_empty()
+            && let Some(facts) = self.term_maps.iter().find_map(|tm| tm.classify(rel_path))
+        {
+            self.ingest_projected(db, dataset_id, rel_path, path, facts)
+                .await?;
+            return Ok(());
+        }
+
+        // Parse BIDS filename entities + suffix + extension via the shared bids-core parser.
         let parts = read_entities(file_name);
+        let suffix = parts.suffix;
         let extension = parts.extension;
         let entities = parts.entities;
 
@@ -847,35 +908,178 @@ impl BidsParser {
             }
         }
 
-        // Specific file processing
+        // JSON (sidecars + `dataset_description.json`) is handled directly: it is neither
+        // read into a data table nor cataloged, but drives inheritance and associations.
         if file_name == "dataset_description.json" {
             self.process_dataset_description(path, db, dataset_id)
                 .await?;
-        } else if file_name.ends_with(".bval") || file_name.ends_with(".bvec") {
-            // For bval/bvec, we need to find the corresponding NIfTI file
-            self.process_diffusion_file(path, db, rel_path, file_name, dataset_id)
-                .await?;
-        } else if file_name.ends_with(".json") {
+            return Ok(());
+        }
+        if file_name.ends_with(".json") {
             self.process_json_file(path, db, dataset_id, rel_path, &entities)
                 .await?;
-        } else if is_tabular_file(file_name) {
-            // Every .tsv/.tsv.gz is routed to a table by the schema-driven tabular
-            // model — participants, scans, events, channels, … — so all tabular
-            // data lives in the database. See `process_tabular_file`.
-            self.process_tabular_file(db, rel_path, file_name, dataset_id, &entities)
-                .await?;
+            return Ok(());
         }
 
-        // Track primary data files for the `scans` table — imaging plus non-NIfTI datafiles
-        // (EEG/MEG/iEEG/NIRS/microscopy/…, including pseudo-files like `.ds`), so they are
-        // queryable by concept.
+        // Primary data files — imaging plus non-NIfTI datafiles (EEG/MEG/iEEG/NIRS/
+        // microscopy/…, including pseudo-files like `.ds`) — are tracked in `scans` so they
+        // are queryable by concept. They are recognized *structurally* (they carry a datatype
+        // and are not tabular/diffusion companions) and short-circuit here, before the
+        // ingestion dispatch below: imaging files are cataloged by structure, not by ingestion
+        // policy. This also spares them `Ingestion::classify`'s selector evaluation — now a
+        // minor saving rather than load-bearing (selector ASTs are cached in
+        // `bids_schema::expression`), but imaging files are the bulk of a dataset and match no
+        // base ingestion rule, so running classify on them would be waste either way.
         if is_datafile(rel_path, &extension, self.schema.raw()) {
             self.imaging_files.push(ImagingFile {
                 dataset_id: dataset_id.to_string(),
                 file_path: rel_path.to_string(), // Use rel_path not file_name
             });
+            return Ok(());
         }
 
+        // Tabular + diffusion companions: the ingestion schema selects on the projected
+        // concepts (extension/suffix) and returns the disposition + reader, replacing the
+        // former hardcoded `.tsv`/`.bval`/`.bvec` gates. `read` runs the named reader
+        // (`csv` = the batched tabular ingest, `diffusion` = the bval/bvec accumulator);
+        // `catalog` records the file in the `tabular_files` registry with its contents
+        // left on disk (chiefly compressed continuous recordings, read later with tools
+        // like polars); `ignore` skips it. `datatype` is intentionally not bound here so a
+        // configured adapter's datatype-keyed rules can't claim ordinary BIDS files.
+        let path_with_slash = format!("/{rel_path}");
+        let null = Value::Null;
+        let disposition = {
+            let ctx = FileContext {
+                path: &path_with_slash,
+                datatype: None,
+                suffix: Some(&suffix),
+                extension: Some(&extension),
+                sidecar: &null,
+                dataset_type: self.dataset_type.as_deref(),
+            };
+            self.schema
+                .ingestion()
+                .classify(&ctx)
+                .map(|r| (r.disposition, r.reader.clone()))
+        };
+        match disposition {
+            Some((Disposition::Read, reader)) => match reader.as_deref() {
+                Some("diffusion") => {
+                    self.process_diffusion_file(path, db, rel_path, file_name, dataset_id)
+                        .await?;
+                }
+                Some("csv") => {
+                    self.process_tabular_file(db, rel_path, file_name, dataset_id, &entities)
+                        .await?;
+                }
+                other => {
+                    eprintln!(
+                        "Warning: ingestion `read` rule for {rel_path} names unknown reader {other:?}; skipping"
+                    );
+                }
+            },
+            Some((Disposition::Catalog, _)) => {
+                // Left on disk, recorded in the tabular registry so queries surface it
+                // (chiefly compressed continuous recordings `*_physio.tsv.gz`).
+                let table = recording_table_of(&suffix);
+                db.record_tabular_file(dataset_id, rel_path, table, 0, TabularStatus::OnDisk)?;
+            }
+            Some((Disposition::Ignore, _)) => {}
+            // A non-datafile, non-JSON file with no ingestion rule (READMEs, CHANGES, …):
+            // nothing to ingest.
+            None => {}
+        }
+
+        Ok(())
+    }
+
+    /// Ingest a file recognized by a term map: project → build the routing context → let the
+    /// ingestion schema decide read / catalog / ignore. `read` parses the body with the named
+    /// content reader and bulk-inserts the rows (and registers the file); `catalog` registers
+    /// the file in `scans` (contents unread, left on disk); `ignore` skips it. Every failure
+    /// is non-fatal (logged, then skipped) so one bad file can't poison the ingest txn.
+    async fn ingest_projected(
+        &mut self,
+        db: &BidsDb,
+        dataset_id: &str,
+        rel_path: &str,
+        path: &Path,
+        facts: FileFacts,
+    ) -> Result<()> {
+        // The ingestion selectors run over the projected concepts. `path` is dataset-relative
+        // with a leading slash, matching the tabular selector convention.
+        let leading = format!("/{rel_path}");
+        let dataset_type = self.dataset_type.clone();
+        let (disposition, reader) = {
+            let ctx = FileContext {
+                path: &leading,
+                datatype: facts.datatype.as_deref(),
+                suffix: facts.suffix.as_deref(),
+                extension: facts.extension.as_deref(),
+                sidecar: &Value::Null,
+                dataset_type: dataset_type.as_deref(),
+            };
+            match self.schema.ingestion().classify(&ctx) {
+                Some(rule) => (rule.disposition, rule.reader.clone()),
+                None => return Ok(()), // recognized but no ingestion rule -> leave it alone
+            }
+        };
+
+        // `read` and `catalog` both register the file in the standard `scans` registry.
+        if matches!(disposition, Disposition::Read | Disposition::Catalog) {
+            self.imaging_files.push(ImagingFile {
+                dataset_id: dataset_id.to_string(),
+                file_path: rel_path.to_string(),
+            });
+        }
+
+        if disposition != Disposition::Read {
+            return Ok(());
+        }
+
+        let Some(reader_name) = reader else {
+            eprintln!("Warning: `read` rule for {rel_path} has no reader; skipping");
+            return Ok(());
+        };
+        let content = match self.read_cached(path, rel_path).await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Warning: cannot read {rel_path}: {e}");
+                return Ok(());
+            }
+        };
+        let Some(rdr) = self.readers.get(&reader_name) else {
+            eprintln!("Warning: reader `{reader_name}` is not registered; skipping {rel_path}");
+            return Ok(());
+        };
+        match rdr.read(dataset_id, rel_path, &content, &facts) {
+            Ok(batches) => {
+                let mut total = 0i64;
+                let mut primary: Option<String> = None;
+                for batch in &batches {
+                    match db.append_rows(&self.schema, &batch.table, &batch.rows) {
+                        Ok(()) => {
+                            total += batch.rows.len() as i64;
+                            primary.get_or_insert_with(|| batch.table.clone());
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "Warning: insert into {} failed for {rel_path}: {e}",
+                                batch.table
+                            )
+                        }
+                    }
+                }
+                let _ = db.record_tabular_file(
+                    dataset_id,
+                    rel_path,
+                    primary.as_deref(),
+                    total,
+                    TabularStatus::Ingested,
+                );
+            }
+            Err(e) => eprintln!("Warning: reader `{reader_name}` failed on {rel_path}: {e}"),
+        }
         Ok(())
     }
 
@@ -948,6 +1152,7 @@ impl BidsParser {
 
         db.insert(&self.schema, "dataset_description", &json_value)
             .with_context(|| format!("inserting dataset_description for {dataset_id}"))?;
+        self.has_dataset_description = true;
         Ok(())
     }
 
@@ -1049,13 +1254,15 @@ impl BidsParser {
         Ok((x, y, z))
     }
 
-    /// Route one tabular file to its table and ingest it with DuckDB `read_csv`.
+    /// Route one header-bearing tabular file to its table and ingest it with DuckDB
+    /// `read_csv`. This is the ingestion schema's `csv` reader — reached only for `.tsv`
+    /// files the dispatch classified as `read` (compressed `.tsv.gz` recordings are
+    /// `catalog`ed upstream, before this point).
     ///
-    /// The file's `(path, suffix, extension, datatype, dataset_type)` are matched
-    /// against `rules.tabular_data`. Header-bearing `.tsv` files are ingested
-    /// directly; gzipped continuous recordings (`*_physio.tsv.gz`, …) are headerless
-    /// and handled separately. Every tabular file — ingested, deferred, or
-    /// unmatched — is recorded in `tabular_files` so nothing is silently dropped.
+    /// The file's `(path, suffix, extension, datatype, dataset_type)` are matched against
+    /// `rules.tabular_data`. Uncompressed headerless recordings (`*_motion`, …) are
+    /// deferred to the recordings flush; every other tabular file — ingested, deferred,
+    /// or unmatched — is recorded in `tabular_files` so nothing is silently dropped.
     async fn process_tabular_file(
         &mut self,
         db: &BidsDb,
@@ -1067,17 +1274,6 @@ impl BidsParser {
         let (suffix, extension) = split_suffix_ext(file_name);
         if suffix == "scans" {
             self.has_scans_tsv = true;
-        }
-
-        // Compressed continuous recordings (`*_physio.tsv.gz`, `*_stim.tsv.gz`,
-        // `*_physioevents.tsv.gz`) are stored one row per sample and dwarf the
-        // metadata, so as a deliberate size policy they are left on disk rather
-        // than ingested — recorded here so they are still tracked. See the README
-        // roadmap for where this line is likely to move.
-        if extension == ".tsv.gz" {
-            let table = recording_table_of(&suffix);
-            db.record_tabular_file(dataset_id, rel_path, table, 0, TabularStatus::OnDisk)?;
-            return Ok(());
         }
 
         // Uncompressed headerless recordings — chiefly the motion time-series —
@@ -1247,8 +1443,9 @@ impl BidsParser {
         let sub = entities.get("sub").map(|s| s.as_str());
         // Positional per-row tables (`*timeseries.tsv` &c., reached here when the file
         // has a literal `filename` column) must keep TSV line order so `row_idx` is a
-        // faithful row number; see `is_order_insensitive` / bids-2-devel#98.
-        let preserve_order = !is_order_insensitive(&spec.table);
+        // faithful row number; the ordering policy lives in the ingestion schema
+        // (`Ingestion::ordered`); see bids-2-devel#98.
+        let preserve_order = self.schema.ingestion().ordered(&spec.table);
         let sql = build_tabular_insert_sql(
             spec,
             &local,
@@ -1334,10 +1531,10 @@ impl BidsParser {
             // Row order matters for positional tabular files — notably derivative
             // `*timeseries.tsv` (e.g. fMRIPrep confounds), where row N aligns with
             // volume N of the associated 4D image — so their line order is preserved
-            // and `row_idx` records the row number. BIDS has no schema field to
-            // express this yet, so the policy is hardcoded in `is_order_insensitive`;
+            // and `row_idx` records the row number. The ordering policy lives in the
+            // ingestion schema (`Ingestion::ordered`);
             // see https://github.com/bids-standard/bids-2-devel/issues/98.
-            let preserve_order = !is_order_insensitive(&spec.table);
+            let preserve_order = self.schema.ingestion().ordered(&spec.table);
             let select =
                 build_tabular_batch_select(spec, &dataset_id, &files, columns, preserve_order);
             let sql = format!("INSERT INTO {} BY NAME {select}", spec.table);
@@ -1558,7 +1755,7 @@ impl BidsParser {
 
         let sub = rec.entities.get("sub").map(|s| s.as_str());
         // Recordings are positional (row N is sample N), so preserve line order.
-        let preserve_order = !is_order_insensitive(&spec.table);
+        let preserve_order = self.schema.ingestion().ordered(&spec.table);
         let sql = build_tabular_insert_sql(
             &spec,
             &local,
@@ -1787,6 +1984,9 @@ impl BidsParser {
         };
         let schema = self.schema.raw();
         let meta_assoc = self.schema.associations();
+        // The entity abbreviation→key map depends only on the schema, so derive it once here
+        // instead of rebuilding it inside `build_file_context` for every file in the tree.
+        let name_to_key = bids_schema::context::entity_name_to_key(schema);
 
         let mut out = Vec::new();
         for file in tree.walk_files() {
@@ -1795,7 +1995,7 @@ impl BidsParser {
             if bids_schema::datatypes::find_datatype(&file.path, schema).is_none() {
                 continue;
             }
-            let file_ctx = bids_schema::context::build_file_context(file, schema);
+            let file_ctx = bids_schema::context::build_file_context(file, schema, &name_to_key);
             for h in
                 bids_schema::associations::resolve_associations(meta_assoc, file, &tree, &file_ctx)
             {
@@ -1809,11 +2009,6 @@ impl BidsParser {
         }
         out
     }
-}
-
-/// Whether a file is a BIDS tabular data file (all such data lives in the database).
-fn is_tabular_file(file_name: &str) -> bool {
-    file_name.ends_with(".tsv") || file_name.ends_with(".tsv.gz")
 }
 
 /// How one headerless continuous-recording suffix maps to a table and how its
@@ -2055,8 +2250,8 @@ fn build_tabular_insert_sql(
 /// - `row_idx`: when `preserve_order`, a **global** `row_number()` (assigned in
 ///   physical read order — `parallel=false` makes that TSV line order) minus each
 ///   file's first, so it is the same 0-based per-file line index the single-file
-///   path produces. When not (order-insensitive tables — see
-///   [`is_order_insensitive`]), a per-file `row_number()` under the default
+///   path produces. When not (order-insensitive tables — see the ingestion
+///   schema `ordered` policy), a per-file `row_number()` under the default
 ///   parallel read: still a unique 0-based key, but in arbitrary order, which lets
 ///   DuckDB read the batch's files concurrently (a network-FS win).
 /// - data columns `TRY_CAST` to their declared type; every remaining header column
@@ -2143,28 +2338,6 @@ fn build_tabular_batch_select(
          JOIN (VALUES {map_values}) AS m(abs, rel) ON raw.filename = m.abs",
         selects = selects.join(", "),
     )
-}
-
-/// Whether a per-row tabular table's rows may be read out of order (letting the batch
-/// be read in parallel — a network-FS win) instead of in TSV line order.
-///
-/// This encodes BIDS row-order semantics that the schema cannot yet express, so it is
-/// deliberately **hardcoded** (a `row_order` field is proposed upstream:
-/// <https://github.com/bids-standard/bids-2-devel/issues/98>). The policy:
-///
-/// - `events` is order-*insensitive*: its rows are sorted by the `onset` column, so
-///   physical position is incidental and the batch may be read concurrently.
-/// - Every other tabular table is order-*sensitive* and preserves physical line order,
-///   so `row_idx` records the row number. This is the required treatment for
-///   *positional* files, whose row N corresponds to element N of an associated series:
-///   continuous recordings (`*_physio`/`*_channels`/`*_electrodes`/`*_optodes`) and
-///   derivative time series such as `*timeseries.tsv` (e.g. fMRIPrep confounds, one row
-///   per functional volume).
-fn is_order_insensitive(table: &str) -> bool {
-    // Only `events` may be reordered (it has an `onset` ordering column); everything
-    // else — including positional `*timeseries.tsv` derivatives — must keep line order.
-    // Hardcoded pending a schema field; see bids-standard/bids-2-devel#98.
-    table == "events"
 }
 
 /// Parse a TSV file's header from its first line — read in Rust (via

@@ -1,0 +1,11 @@
+{
+  "IngestionSchemaVersion": "0.1.0",
+  "rules": [
+    { "selectors": ["intersects([extension], [\".bval\", \".bvec\"])"], "disposition": "read", "reader": "diffusion" },
+    { "selectors": ["extension == \".tsv.gz\""], "disposition": "catalog" },
+    { "selectors": ["extension == \".tsv\""], "disposition": "read", "reader": "csv" }
+  ],
+  "tables": {
+    "events": { "ordered": false }
+  }
+}

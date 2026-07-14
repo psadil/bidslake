@@ -60,6 +60,17 @@ pub async fn validate(
         }
     }
 
+    // Compile any configured layout-adapter term maps; files they recognize (standardized
+    // non-BIDS layouts, e.g. FreeSurfer) are not flagged as "not part of BIDS".
+    let term_maps: Vec<bids_schema::term_map::TermMap> = config
+        .map(|cfg| {
+            cfg.adapters
+                .iter()
+                .filter_map(|name| bids_schema::term_map::bundled_term_map(name))
+                .collect()
+        })
+        .unwrap_or_default();
+
     // Read the file tree
     let pseudo_exts = schema.pseudo_file_extensions();
     let tree = read_file_tree(dataset_path, &pseudo_exts, true).map_err(|source| {
@@ -116,7 +127,14 @@ pub async fn validate(
 
             check_dataset_metadata_rules(&context, &ctx, schema, &mut local_issues);
 
-            check_file_rules(&mut context, &ctx, &dataset_ctx, schema, &mut local_issues);
+            check_file_rules(
+                &mut context,
+                &ctx,
+                &dataset_ctx,
+                schema,
+                &term_maps,
+                &mut local_issues,
+            );
             check_expression_rules(&context, &ctx, &mut local_issues, schema);
             check_sidecar_rules(&context, &ctx, schema, &mut local_issues);
             check_sidecar_overrides(&context, &mut local_issues);
