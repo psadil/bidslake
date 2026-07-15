@@ -11,18 +11,31 @@
 //! `BIDSLAKE_S3_BENCH=1` (and optionally `BIDSLAKE_S3_DATASET=ds000001`) to run it.
 //! Pair it with `BIDSLAKE_TIMING=1` on a real `index` run for the phase breakdown.
 //!
+//! The `ingest_latency` group ingests a synthetic diffusion-rich tree through
+//! [`SlowFs`], which injects a fixed per-read delay to simulate network RTT
+//! deterministically (no network). It guards the concurrent Rust-side reads: the
+//! prefetch issues the bval/bvec/sidecar reads concurrently, so wall time tracks
+//! `ceil(reads / 16) * delay`, not `reads * delay` — a regression alarm if those
+//! reads ever go sequential again. This win is invisible on warm local disk, hence
+//! the injected latency.
+//!
 //! Run with `cargo bench` (requires `git submodule update --init`).
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
+use anyhow::Result;
+use bids_core::filetree::FileTree;
 use bidslake::{
     bids::{BidsParser, S3Httpfs},
     db::BidsDb,
-    fs::LocalFileSystem,
+    fs::{BidsFileSystem, LocalFileSystem},
     s3,
     schema::Schema,
 };
 use criterion::{Criterion, criterion_group, criterion_main};
+use futures::future::BoxFuture;
 
 /// Datasets chosen to exercise the cost drivers: `ds001`/`ds002`/`ds114` cover
 /// the common paths (anat/func, sessions, events, inheritance); `ds108` is
@@ -113,5 +126,126 @@ fn bench_ingest_s3(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_ingest, bench_ingest_s3);
+/// A [`LocalFileSystem`] that sleeps `delay` before each Rust-side read
+/// (`read_to_string` / `read_head` — the reads the prefetch parallelizes),
+/// simulating network round-trip latency deterministically. `walk` and
+/// `read_csv_source` (DuckDB's, not the prefetch's) delegate without delay.
+struct SlowFs {
+    inner: LocalFileSystem,
+    delay: Duration,
+}
+
+impl SlowFs {
+    fn new(inner: LocalFileSystem, delay: Duration) -> Self {
+        Self { inner, delay }
+    }
+}
+
+impl BidsFileSystem for SlowFs {
+    fn walk(
+        &self,
+        pseudo_exts: &[String],
+        apply_bidsignore: bool,
+    ) -> BoxFuture<'_, Result<Vec<PathBuf>>> {
+        self.inner.walk(pseudo_exts, apply_bidsignore)
+    }
+
+    fn read_to_string(&self, path: &Path) -> BoxFuture<'_, Result<String>> {
+        let delay = self.delay;
+        let inner = &self.inner;
+        let path = path.to_path_buf();
+        Box::pin(async move {
+            tokio::time::sleep(delay).await;
+            inner.read_to_string(&path).await
+        })
+    }
+
+    fn read_head(&self, path: &Path, max_bytes: usize) -> BoxFuture<'_, Result<String>> {
+        let delay = self.delay;
+        let inner = &self.inner;
+        let path = path.to_path_buf();
+        Box::pin(async move {
+            tokio::time::sleep(delay).await;
+            inner.read_head(&path, max_bytes).await
+        })
+    }
+
+    fn read_csv_source(&self, path: &Path) -> BoxFuture<'_, Result<String>> {
+        self.inner.read_csv_source(path)
+    }
+
+    fn root(&self) -> String {
+        self.inner.root()
+    }
+
+    fn file_tree(&self) -> Option<Arc<FileTree>> {
+        self.inner.file_tree()
+    }
+}
+
+/// Build a synthetic diffusion dataset: `n` subjects, each a `dwi/*_dwi.{bval,bvec,json}`
+/// triple. That is `3n` bodies the passes read in Rust (bval + bvec + sidecar), so the
+/// concurrent prefetch's win over sequential reads is clear once `SlowFs` adds latency.
+fn write_diffusion_tree(root: &Path, n: usize) {
+    std::fs::write(
+        root.join("dataset_description.json"),
+        br#"{"Name": "slowfs-bench", "BIDSVersion": "1.8.0"}"#,
+    )
+    .expect("write dataset_description");
+    for i in 0..n {
+        let sub = format!("sub-{:03}", i + 1);
+        let dwi = root.join(&sub).join("dwi");
+        std::fs::create_dir_all(&dwi).expect("mkdir dwi");
+        let base = format!("{sub}_dwi");
+        // 4 volumes; bvec is 3 rows (x/y/z) of 4 — a valid, minimal pair.
+        std::fs::write(dwi.join(format!("{base}.bval")), b"0 1000 2000 3000\n").expect("bval");
+        std::fs::write(
+            dwi.join(format!("{base}.bvec")),
+            b"0 1 0 0\n0 0 1 0\n0 0 0 1\n",
+        )
+        .expect("bvec");
+        std::fs::write(
+            dwi.join(format!("{base}.json")),
+            br#"{"PhaseEncodingDirection": "j-"}"#,
+        )
+        .expect("sidecar");
+    }
+}
+
+/// Ingest one dataset into a fresh in-memory database through an arbitrary backend.
+fn ingest_through(fs: Box<dyn BidsFileSystem>) {
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    rt.block_on(async {
+        let db = BidsDb::new(":memory:").expect("open db");
+        let schema = Schema::load(None).expect("load schema");
+        db.create_tables(&schema).expect("create tables");
+        let mut parser = BidsParser::new(fs, None, schema, None, true);
+        parser.parse(&db).await.expect("parse");
+    });
+}
+
+fn bench_ingest_latency(c: &mut Criterion) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let n = 32;
+    write_diffusion_tree(dir.path(), n);
+    // 5 ms/read over `3n` reads: concurrent (cap 16) ≈ ceil(3n/16)·5 ms on top of
+    // the fixed schema/DuckDB cost; a regression to sequential would add ~3n·5 ms
+    // (here ~480 ms), an unmistakable jump.
+    let delay = Duration::from_millis(5);
+
+    let mut group = c.benchmark_group("ingest_latency");
+    group.sample_size(10);
+    group.bench_function(format!("dwi_{n}subj_{}ms", delay.as_millis()), |b| {
+        b.iter(|| {
+            let fs = Box::new(SlowFs::new(
+                LocalFileSystem::new(dir.path().to_path_buf()),
+                delay,
+            ));
+            ingest_through(fs);
+        })
+    });
+    group.finish();
+}
+
+criterion_group!(benches, bench_ingest, bench_ingest_s3, bench_ingest_latency);
 criterion_main!(benches);

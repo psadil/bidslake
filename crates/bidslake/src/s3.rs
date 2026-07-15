@@ -224,7 +224,7 @@ impl BidsFileSystem for S3Client {
         })
     }
 
-    fn materialize(&self, path: &Path) -> future::BoxFuture<'_, Result<PathBuf>> {
+    fn read_csv_source(&self, path: &Path) -> future::BoxFuture<'_, Result<String>> {
         // DuckDB's httpfs reads `s3://` directly (see `configure_httpfs`), so hand
         // back the fully-qualified S3 URL for `read_csv` to open — no download.
         let url = format!(
@@ -233,7 +233,7 @@ impl BidsFileSystem for S3Client {
             self.prefix,
             path.to_string_lossy()
         );
-        Box::pin(async move { Ok(PathBuf::from(url)) })
+        Box::pin(async move { Ok(url) })
     }
 
     fn root(&self) -> String {

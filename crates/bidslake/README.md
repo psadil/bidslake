@@ -49,7 +49,7 @@ cargo run --release -- index \
     --output dataset.duckdb
 ```
 
-The input may also be an S3 URI (`s3://bucket/prefix`); pass `--no-sign-request` for anonymous access to public buckets like OpenNeuro. (S3 datasets currently get their JSON metadata but not their `.tsv` contents — tabular ingest is local-only until the DuckDB `httpfs` extension is wired in.)
+The input may also be an S3 URI (`s3://bucket/prefix`); pass `--no-sign-request` for anonymous access to public buckets like OpenNeuro. S3 ingest is full-fidelity: object listing and JSON metadata go through the AWS SDK, and `.tsv` contents stream straight into DuckDB via its `httpfs` extension — so working with a dataset on S3 is the same as one on local disk. (The first S3 ingest runs `INSTALL httpfs`, which needs network; the region comes from `AWS_REGION`, default `us-east-1`.)
 
 Then open it and query:
 
@@ -100,4 +100,4 @@ cargo test
 
 In managed mode the likely answer is the DuckLake split applied one level down: small tabular data stays in the catalog, while large continuous recordings are written to partitioned Parquet (or [Vortex](https://vortex.dev/)) files on disk and exposed as views, so SQL still sees one table. **We do not yet know how to draw that line well.** Candidate signals — row count, byte size, sampling rate from the sidecar, or simply the file's BIDS suffix — all have failure modes, and the choice interacts with the (stubbed) `transcode` and `verify` commands. The `*.tsv.gz` rule is a placeholder until it is settled.
 
-**S3.** Reading `.tsv` contents from S3 is not yet supported — it waits on DuckDB's `httpfs` extension so `read_csv` can stream `s3://` directly. S3 datasets currently get their JSON metadata but not their tabular contents.
+**S3.** Ingesting a dataset straight from S3 works end-to-end: object listing and JSON metadata via the AWS SDK, `.tsv` contents streamed into DuckDB via the `httpfs` extension (`read_csv` opens `s3://` directly), and Rust-side reads (JSON sidecars, `.bval`/`.bvec`) issued concurrently to overlap network latency. Remaining gaps are minor: dataset-embedded overlay auto-discovery (`.bidslake/overlay.json`) is skipped for remote inputs, and the S3 integration tests are network-gated (`#[ignore]`, run with `cargo test --test s3_ingest -- --ignored`).
