@@ -38,11 +38,12 @@ pub trait BidsFileSystem: Send + Sync {
     }
 
     /// Resolve a dataset-relative path to a source string DuckDB's `read_csv` can
-    /// open directly: an absolute local path for [`LocalFileSystem`] (a no-op join
-    /// onto the root), or an `s3://` URL for the S3 backend — served via httpfs, not
-    /// downloaded to a temp file. Used by the tabular ingest, which lets DuckDB parse
-    /// TSVs natively. (Despite the name, nothing is materialized to disk for S3.)
-    fn materialize(&self, path: &Path) -> BoxFuture<'_, Result<PathBuf>>;
+    /// open directly, ready to use verbatim — the canonical absolute local path for
+    /// [`LocalFileSystem`], or an `s3://` URL for the S3 backend (served via httpfs,
+    /// not downloaded to a temp file). Each impl returns a final source string so
+    /// callers never inspect the scheme. Used by the tabular ingest, which lets
+    /// DuckDB parse TSVs natively.
+    fn read_csv_source(&self, path: &Path) -> BoxFuture<'_, Result<String>>;
 
     /// Get the root path/URI of the dataset
     fn root(&self) -> String;
@@ -127,10 +128,17 @@ impl BidsFileSystem for LocalFileSystem {
         })
     }
 
-    fn materialize(&self, path: &Path) -> BoxFuture<'_, Result<PathBuf>> {
-        // Already local: hand back the absolute path for DuckDB to read directly.
+    fn read_csv_source(&self, path: &Path) -> BoxFuture<'_, Result<String>> {
+        // Already local: hand back the canonical absolute path for DuckDB to read
+        // directly. Canonicalize best-effort (fall back to the joined path) so the
+        // source is stable regardless of the process's working directory.
         let full_path = self.root.join(path);
-        Box::pin(async move { Ok(full_path) })
+        Box::pin(async move {
+            let canonical = tokio::fs::canonicalize(&full_path)
+                .await
+                .unwrap_or(full_path);
+            Ok(canonical.to_string_lossy().into_owned())
+        })
     }
 
     fn root(&self) -> String {

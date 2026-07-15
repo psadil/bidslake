@@ -147,10 +147,12 @@ pub struct BidsParser {
     seen_sessions: HashSet<(String, String, String)>, // (dataset_id, participant_id, session_id)
     /// Opt-in wall-time accountant (`BIDSLAKE_TIMING`); zero-overhead otherwise.
     phase_timer: PhaseTimer,
-    /// Prefetched JSON file contents (rel path → content), filled concurrently
+    /// Prefetched file bodies read in Rust (rel path → content): JSON sidecars,
+    /// `.bval`/`.bvec`, and adapter `read`-disposition files. Filled concurrently
     /// before the serial passes so each read isn't a separate round-trip on a
-    /// network filesystem.
-    json_content: HashMap<String, String>,
+    /// network filesystem. (TSV bodies are read by DuckDB, not here — only their
+    /// headers are prefetched, into `tabular_header`.)
+    content_cache: HashMap<String, String>,
     /// Prefetched TSV headers (rel path → parsed header), same rationale.
     tabular_header: HashMap<String, Option<(String, Vec<String>)>>,
     /// Term maps (FreeSurfer, …) that recognize standardized non-BIDS files. Empty for an
@@ -206,9 +208,9 @@ struct PendingTabular {
     spec: TableSpec,
     /// Dataset-relative path (→ `file_path`).
     rel_path: String,
-    /// Canonical absolute path, passed to `read_csv` and joined back to `rel_path`
-    /// via the emitted `filename` column.
-    local_path: String,
+    /// Ready-to-use `read_csv` source (canonical local path or `s3://` URL), passed
+    /// to `read_csv` and joined back to `rel_path` via the emitted `filename` column.
+    source: String,
     /// Raw header line (see [`read_tsv_header`]). The batch key is
     /// `(table, group_key)`, so every file in a group has byte-identical header
     /// bytes — one `read_csv` dialect, and `other_data` stays exact (no
@@ -249,7 +251,7 @@ impl BidsParser {
             seen_participants: HashSet::new(),
             seen_sessions: HashSet::new(),
             phase_timer: PhaseTimer::new(),
-            json_content: HashMap::new(),
+            content_cache: HashMap::new(),
             tabular_header: HashMap::new(),
             term_maps: Vec::new(),
             readers: readers::default_readers(),
@@ -761,10 +763,17 @@ impl BidsParser {
         }
     }
 
-    /// Read, with bounded concurrency, the JSON contents and TSV headers the
-    /// serial passes will consume, into [`Self::json_content`] /
-    /// [`Self::tabular_header`]. Failed reads are simply left uncached — the
-    /// consuming pass falls back to a direct read (and handles the error there).
+    /// Read, with bounded concurrency, the file bodies and TSV headers the serial
+    /// passes will consume, into [`Self::content_cache`] / [`Self::tabular_header`],
+    /// so a network filesystem's per-file latency is overlapped rather than paid one
+    /// round-trip at a time.
+    ///
+    /// A file's body is read either by Rust or by DuckDB; we prefetch every body Rust
+    /// reads. Full bodies (→ `content_cache`): JSON sidecars, `.bval`/`.bvec` (the
+    /// `diffusion` reader), and adapter `read`-disposition files (`fs_stats`/…) — see
+    /// [`Self::body_read_in_rust`]. A `.tsv` body is DuckDB's (`read_csv`), so only
+    /// its header is prefetched (→ `tabular_header`). Failed reads are left uncached —
+    /// the consuming pass falls back to a direct read (and handles the error there).
     async fn prefetch_contents(
         &mut self,
         dataset_description: &[std::path::PathBuf],
@@ -775,10 +784,16 @@ impl BidsParser {
         const CONCURRENCY: usize = 16;
 
         let rel = |p: &std::path::PathBuf| p.to_string_lossy().to_string();
-        let json_paths: Vec<String> = dataset_description
+        // Full-body reads: JSON (sidecars + dataset_description), plus every other
+        // file whose body a pass reads in Rust (`.bval`/`.bvec` and adapter `read`
+        // files, decided by `body_read_in_rust`).
+        let body_paths: Vec<String> = dataset_description
             .iter()
             .chain(other_files.iter())
-            .filter(|p| p.extension().is_some_and(|e| e == "json"))
+            .filter(|p| {
+                p.extension().is_some_and(|e| e == "json")
+                    || self.body_read_in_rust(&p.to_string_lossy())
+            })
             .map(rel)
             .collect();
         // Header candidates: uncompressed `.tsv` (per-row files sniff a header;
@@ -789,9 +804,9 @@ impl BidsParser {
             .map(rel)
             .collect();
 
-        let (json_res, hdr_res) = {
+        let (body_res, hdr_res) = {
             let fs = &self.fs;
-            let json_fut = futures::stream::iter(json_paths)
+            let body_fut = futures::stream::iter(body_paths)
                 .map(|p| async move {
                     let c = fs.read_to_string(Path::new(&p)).await.ok();
                     (p, c)
@@ -809,12 +824,12 @@ impl BidsParser {
                 })
                 .buffer_unordered(CONCURRENCY)
                 .collect::<Vec<_>>();
-            futures::join!(json_fut, hdr_fut)
+            futures::join!(body_fut, hdr_fut)
         };
 
-        for (p, c) in json_res {
+        for (p, c) in body_res {
             if let Some(c) = c {
-                self.json_content.insert(p, c);
+                self.content_cache.insert(p, c);
             }
         }
         for (p, h) in hdr_res {
@@ -822,10 +837,49 @@ impl BidsParser {
         }
     }
 
+    /// Whether a pass reads this file's body **in Rust** (so [`prefetch_contents`]
+    /// should cache it). True for `.bval`/`.bvec` (the native `diffusion` reader) and
+    /// for term-map adapter files the ingestion schema classifies as `read`
+    /// (`fs_stats`/…) — mirroring [`Self::ingest_projected`]. JSON is decided by the
+    /// caller; `.tsv` bodies are DuckDB's and return false here.
+    ///
+    /// `dataset_type` isn't known until `dataset_description.json` is processed (after
+    /// prefetch), so it's passed as `None`; the diffusion (`extension`) and adapter
+    /// (`suffix`) `read` rules don't reference it, and a misclassification only
+    /// forgoes a prefetch — the pass still does a direct read.
+    fn body_read_in_rust(&self, rel_path: &str) -> bool {
+        if rel_path.ends_with(".bval") || rel_path.ends_with(".bvec") {
+            return true;
+        }
+        if self.term_maps.is_empty() {
+            return false;
+        }
+        let Some(facts) = self.term_maps.iter().find_map(|tm| tm.classify(rel_path)) else {
+            return false;
+        };
+        let leading = format!("/{rel_path}");
+        let null = Value::Null;
+        let ctx = FileContext {
+            path: &leading,
+            datatype: facts.datatype.as_deref(),
+            suffix: facts.suffix.as_deref(),
+            extension: facts.extension.as_deref(),
+            sidecar: &null,
+            dataset_type: None,
+        };
+        matches!(
+            self.schema
+                .ingestion()
+                .classify(&ctx)
+                .map(|r| r.disposition),
+            Some(Disposition::Read)
+        )
+    }
+
     /// The file's content from the concurrent prefetch, or a direct read if it
     /// wasn't prefetched. `rel` is the dataset-relative key the prefetch used.
     async fn read_cached(&self, path: &Path, rel: &str) -> Result<String> {
-        match self.json_content.get(rel) {
+        match self.content_cache.get(rel) {
             Some(c) => Ok(c.clone()),
             None => Ok(self.fs.read_to_string(path).await?),
         }
@@ -1164,8 +1218,8 @@ impl BidsParser {
         file_name: &str,
         dataset_id: &str,
     ) -> Result<()> {
-        // Read the bval or bvec file
-        let content = self.fs.read_to_string(path).await?;
+        // Read the bval or bvec file (from the concurrent prefetch when available).
+        let content = self.read_cached(path, rel_path).await?;
 
         // Find the base name (both ".bval" and ".bvec" are 5 chars).
         let base_name = &rel_path[..rel_path.len() - 5];
@@ -1318,8 +1372,9 @@ impl BidsParser {
                 // a Rust/DuckDB header mismatch can only trigger a per-file
                 // fallback, never wrong data.
                 let t = self.phase_timer.mark();
-                let materialized = self.fs.materialize(Path::new(rel_path)).await?;
-                let materialized = materialized.to_string_lossy().to_string();
+                // A ready-to-use `read_csv` source (canonical local path or `s3://`
+                // URL); the backend has already resolved the scheme.
+                let source = self.fs.read_csv_source(Path::new(rel_path)).await?;
                 // Header from the concurrent prefetch; fall back to a direct read
                 // if it wasn't prefetched (shouldn't happen for a per-row `.tsv`).
                 let header = match self.tabular_header.get(rel_path) {
@@ -1330,15 +1385,6 @@ impl BidsParser {
                         .await
                         .ok()
                         .and_then(|c| tsv_header_from_line(c.split('\n').next().unwrap_or(""))),
-                };
-                // `read_csv` opens the `s3://` URL directly (httpfs) or the
-                // canonical local path.
-                let local = if materialized.starts_with("s3://") {
-                    materialized
-                } else {
-                    std::fs::canonicalize(&materialized)
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or(materialized)
                 };
                 self.phase_timer.add_tabular(t);
 
@@ -1374,7 +1420,7 @@ impl BidsParser {
                         self.pending_tabular.push(PendingTabular {
                             spec,
                             rel_path: rel_path.to_string(),
-                            local_path: local,
+                            source,
                             group_key,
                             columns,
                         });
@@ -1416,13 +1462,12 @@ impl BidsParser {
         dataset_id: &str,
         entities: &HashMap<String, String>,
     ) -> Result<i64> {
-        let local = self.fs.materialize(Path::new(rel_path)).await?;
-        let local = local.to_string_lossy().to_string();
+        let source = self.fs.read_csv_source(Path::new(rel_path)).await?;
 
         // Sniff the actual headers on the validator connection (so a parse error
         // can't poison the ingest transaction). An unreadable or column-less file
         // is classified but contributes no rows.
-        let read_from = format!("read_csv({}, {HEADER_READ_OPTS})", sql_lit(&local));
+        let read_from = format!("read_csv({}, {HEADER_READ_OPTS})", sql_lit(&source));
         let sniffed = self.sniff_columns(&read_from).unwrap_or_default();
         if sniffed.is_empty() {
             return Ok(0);
@@ -1448,7 +1493,7 @@ impl BidsParser {
         let preserve_order = self.schema.ingestion().ordered(&spec.table);
         let sql = build_tabular_insert_sql(
             spec,
-            &local,
+            &source,
             rel_path,
             dataset_id,
             sub,
@@ -1509,7 +1554,7 @@ impl BidsParser {
             let columns = &members[0].columns;
             let files: Vec<(&str, &str)> = members
                 .iter()
-                .map(|m| (m.local_path.as_str(), m.rel_path.as_str()))
+                .map(|m| (m.source.as_str(), m.rel_path.as_str()))
                 .collect();
 
             // Re-index idempotency (per-row tables have no PK): clear these files'
@@ -1707,8 +1752,7 @@ impl BidsParser {
             return Ok((None, 0)); // headerless file with no column names → skip
         }
 
-        let local = self.fs.materialize(Path::new(&rec.rel_path)).await?;
-        let local = local.to_string_lossy().to_string();
+        let source = self.fs.read_csv_source(Path::new(&rec.rel_path)).await?;
 
         let spec = TableSpec {
             table: table.to_string(),
@@ -1739,7 +1783,7 @@ impl BidsParser {
         // Pre-flight on the validator connection: many recordings are non-gzip
         // git-annex placeholders whose read errors would otherwise poison the
         // transaction. A readable-but-empty file passes and simply yields 0 rows.
-        let read_from = format!("read_csv({}, {read_opts})", sql_lit(&local));
+        let read_from = format!("read_csv({}, {read_opts})", sql_lit(&source));
         if !self.read_csv_ok(&read_from) {
             return Ok((Some(table.to_string()), 0));
         }
@@ -1758,7 +1802,7 @@ impl BidsParser {
         let preserve_order = self.schema.ingestion().ordered(&spec.table);
         let sql = build_tabular_insert_sql(
             &spec,
-            &local,
+            &source,
             &rec.rel_path,
             &rec.dataset_id,
             sub,
@@ -2118,7 +2162,7 @@ fn needs_try_cast(sql_type: &str) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn build_tabular_insert_sql(
     spec: &TableSpec,
-    local_path: &str,
+    source: &str,
     rel_path: &str,
     dataset_id: &str,
     sub: Option<&str>,
@@ -2233,14 +2277,14 @@ fn build_tabular_insert_sql(
         "{verb} INTO {} BY NAME SELECT {} FROM read_csv({}, {read_opts}{sequential})",
         spec.table,
         selects.join(", "),
-        sql_lit(local_path),
+        sql_lit(source),
     )
 }
 
 /// Build the batched `SELECT` for a group of per-row tabular files that share a
 /// table and header (Lever 1b) — one `read_csv([f1,…,fN])` in place of N. The
 /// caller prefixes it with `INSERT INTO … BY NAME` for the real write. `files` is
-/// `(canonical local path, dataset-relative path)`.
+/// (read_csv source — canonical local path or `s3://` URL, dataset-relative path).
 ///
 /// Shape mirrors [`build_tabular_insert_sql`]'s `PerRow` arm, generalized to many
 /// files:

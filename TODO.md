@@ -9,11 +9,6 @@ as issues. Roughly ordered by value.
   (now documented in the docstring). When the PyO3 PyCapsule stream bridge lands
   (`crates/bidslake-py/src/lib.rs`), stream Arrow batches so `get()` is O(1) memory.
 
-- [ ] **Push `materialize` scheme-branching behind the trait** (`abstraction-01` secondary).
-  Have each `BidsFileSystem` impl return a `read_csv`-ready source string (absolute local path,
-  or `s3://` URL) so the `starts_with("s3://")` branch at the call sites can be deleted;
-  optional rename `materialize` → `read_csv_source`.
-
 - [ ] **Fully convert `db.rs`/`dynamic.rs` to `anyhow`** (`eh-05` optional). Beyond the
   call-site `.context()` already added, push table/path context inside the write layer. Requires
   rewriting the two manual `duckdb::Error::ToSqlConversionFailure` constructions in
@@ -41,10 +36,6 @@ as issues. Roughly ordered by value.
   Python suite, and the codegen drift guard on a single Linux runner. Later: an OS/Python/Rust
   matrix, benchmark-regression tracking (`cargo bench` in `bidslake` and `bids-validator-rs`), a
   scheduled run of the `#[ignore]` whole-corpus smoke test, and code coverage.
-
-- [ ] **Concurrent Rust-side reads**. The known-deferred ingest perf lever from the prior
-  performance sweep (the sidecar/tabular header reads are prefetched concurrently, but the
-  per-file Rust-side reads are still sequential).
 
 ## Schema augmentation (overlays)
 
