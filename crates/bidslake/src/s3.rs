@@ -7,9 +7,15 @@
 
 use crate::fs::BidsFileSystem;
 use anyhow::{Context, Result};
+use aws_config::meta::region::RegionProviderChain;
+use aws_sdk_s3::config::Region;
 use futures::future;
-use std::env;
 use std::path::{Path, PathBuf};
+
+/// Last-resort region when neither the environment, the active profile, nor the
+/// bucket itself names one. [`S3Client::new`] asks the bucket where it really lives,
+/// so this only has to be *a* valid endpoint to ask from.
+const FALLBACK_REGION: &str = "us-east-1";
 
 /// Whether S3 requests are signed with AWS credentials or sent anonymously
 /// (public buckets like OpenNeuro's). A named type instead of a bare `bool` so
@@ -26,6 +32,38 @@ impl SigningMode {
     /// Whether this is anonymous (unsigned) access.
     pub fn is_anonymous(self) -> bool {
         self == SigningMode::Anonymous
+    }
+}
+
+/// Build an SDK config for `region`, unsigned when `signing` is anonymous.
+async fn load_config(
+    region: impl aws_config::meta::region::ProvideRegion + 'static,
+    signing: SigningMode,
+) -> aws_config::SdkConfig {
+    let loader = aws_config::defaults(aws_config::BehaviorVersion::latest()).region(region);
+    // For public buckets or when explicitly requested, use anonymous access.
+    let loader = if signing.is_anonymous() {
+        loader.no_credentials()
+    } else {
+        loader
+    };
+    loader.load().await
+}
+
+/// The bucket's own region, per the `x-amz-bucket-region` header, or `None` when the
+/// client's current region already reaches it (or the bucket declines to say).
+///
+/// S3 returns that header *with* the `301 PermanentRedirect` it sends to a client aimed
+/// at the wrong region (and with `403`/`404`), so a single HeadBucket resolves a bucket's
+/// home region — no credentials, and no `GetBucketLocation` grant, which public buckets
+/// typically deny anyway.
+async fn bucket_region(client: &aws_sdk_s3::Client, bucket: &str) -> Option<String> {
+    match client.head_bucket().bucket(bucket).send().await {
+        Ok(_) => None, // reached it: the configured region is already right
+        Err(err) => err
+            .raw_response()
+            .and_then(|resp| resp.headers().get("x-amz-bucket-region"))
+            .map(str::to_string),
     }
 }
 
@@ -48,20 +86,28 @@ impl S3Client {
     /// * `prefix` - Object prefix (directory path)
     /// * `signing` - [`SigningMode::Anonymous`] for public buckets (no credentials)
     pub async fn new(bucket: &str, prefix: &str, signing: SigningMode) -> Result<Self> {
-        let region = env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_string());
+        // Start from the standard region chain — AWS_REGION, AWS_DEFAULT_REGION, the
+        // active profile, IMDS — rather than AWS_REGION alone.
+        let chain = RegionProviderChain::default_provider().or_else(Region::new(FALLBACK_REGION));
+        let config = load_config(chain, signing).await;
+        let mut region = config
+            .region()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| FALLBACK_REGION.to_string());
+        let mut client = aws_sdk_s3::Client::new(&config);
 
-        let config_loader = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .region(aws_sdk_s3::config::Region::new(region.clone()));
-
-        // For public buckets or when explicitly requested, use anonymous access
-        let config_loader = if signing.is_anonymous() {
-            config_loader.no_credentials()
-        } else {
-            config_loader
-        };
-
-        let config = config_loader.load().await;
-        let client = aws_sdk_s3::Client::new(&config);
+        // Then let the bucket have the last word. Pointing a client at a bucket that
+        // lives elsewhere fails with an opaque `PermanentRedirect`, which is a lousy
+        // thing to hand someone indexing a public dataset they don't own (OpenNeuro's
+        // buckets are us-west-2, while the chain's default is commonly us-east-1). One
+        // HeadBucket resolves it, so `bidslake index -i s3://…` just works.
+        if let Some(actual) = bucket_region(&client, bucket).await
+            && actual != region
+        {
+            let config = load_config(Region::new(actual.clone()), signing).await;
+            client = aws_sdk_s3::Client::new(&config);
+            region = actual;
+        }
 
         // Ensure prefix ends with / if not empty
         let prefix = if !prefix.is_empty() && !prefix.ends_with('/') {
