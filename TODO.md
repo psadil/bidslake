@@ -51,10 +51,29 @@ accessors; and the opt-in `python -m bidslake.stubgen`. Remaining follow-ups:
   `*_AROMAnoiseICs.csv` (they show as `skipped` on `ds000001-fmriprep`); MRIQC group TSVs; more
   QSIPrep QC files. Column *values* are only lightly validated (the bids-examples confounds files
   are empty) — check names against a dataset with real confound data when one is available.
+  (MRIQC's *per-image* IQMs no longer need the group TSVs: a sidecar whose data file the dataset
+  never ships is now promoted to a record of its own, so the overlay's typed IQM columns populate
+  straight from `sub-…_T1w.json`/`_bold.json` — validated on `ds001761-mriqc`, 475 records.
+  The group TSVs remain the only route to *dataset-level* IQM summaries.)
 
 - [ ] **Auto-relax `.bidsignore` under `--overlay`?** Consider having an overlay imply
   `--no-bidsignore` (or selectively un-ignore only schema-recognized files), so the common case
-  needs one flag, not two. Currently explicit.
+  needs one flag, not two. Currently explicit — and now the sharpest edge left for MRIQC, whose
+  `.bidsignore` hides the very `*_T1w.json`/`*_bold.json` its metrics live in, so
+  `--overlay mriqc` alone still yields an empty catalog. Interim: an ingest that indexes no data
+  files while `.bidsignore` is in force now says so, instead of reporting success over an empty
+  database (see `promote_orphan_sidecars`' call site in `bids.rs`).
+
+- [ ] **Cross-dataset association by shared entities**. A catalog routinely holds several datasets —
+  `ds001761-fmriprep` and `ds001761-mriqc` indexed into one `.duckdb` — whose records describe the
+  *same acquisition* under different `dataset_id`s: MRIQC's
+  `sub-01_ses-01_task-faces_run-01_bold.json` IQMs characterize the very run fMRIPrep
+  preprocessed. `get_associated()` resolves associations only *within* a dataset (`IntendedFor`,
+  structural), so a consumer asking "the IQMs for this preprocessed BOLD run" must hand-write a
+  join on `sub`/`ses`/`task`/`run` across `dataset_id` — reintroducing exactly the entity
+  string-matching the catalog exists to abolish. Worth a first-class lookup, or at minimum a
+  documented and tested join recipe. Surfaced by dirt, which wants MRIQC `fd_mean` to order its
+  review of fMRIPrep derivatives (and became reachable once metadata-only records landed).
 
 - [ ] **YAML overlay authoring**. Overlays are JSON-only; accept `.yaml`/`.yml` (parse to `Value`
   before merge) behind an optional `yaml` cargo feature.

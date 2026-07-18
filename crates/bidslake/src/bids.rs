@@ -185,6 +185,37 @@ struct SidecarInfo {
     content: Value,
 }
 
+/// What matching a sidecar to a data file needs to know about that file: where it sits,
+/// and what its filename names. Precomputed so the orphan check parses each data file's
+/// entities once rather than once per sidecar.
+struct DataFileFacts<'a> {
+    dir: &'a Path,
+    entities: HashMap<String, String>,
+}
+
+/// Whether `sidecar` describes any indexed data file, by the same rule inheritance uses:
+/// same dataset and suffix (already keyed), the data file at or below the sidecar's
+/// directory, and the sidecar's entities a subset of the data file's.
+fn describes_a_data_file(
+    sidecar: &SidecarInfo,
+    by_suffix: &HashMap<(&str, String), Vec<DataFileFacts>>,
+) -> bool {
+    let Some(candidates) = by_suffix.get(&(sidecar.dataset_id.as_str(), sidecar.suffix.clone()))
+    else {
+        return false;
+    };
+    let dir = Path::new(&sidecar.file_path)
+        .parent()
+        .unwrap_or_else(|| Path::new(""));
+    candidates.iter().any(|f| {
+        f.dir.starts_with(dir)
+            && sidecar
+                .entities
+                .iter()
+                .all(|(key, value)| f.entities.get(key) == Some(value))
+    })
+}
+
 /// A headerless continuous recording (`*_physio.tsv.gz`, `*_stim.tsv.gz`,
 /// `*_physioevents.tsv.gz`, `*_motion.tsv`) deferred to the flush phase: its column
 /// names come from the merged sidecar's `Columns` (or, for motion, the associated
@@ -520,6 +551,28 @@ impl BidsParser {
             }
         }
 
+        // A metadata-only derivative (MRIQC's IQM sidecars, …) ships no data file for its
+        // sidecars to describe. Promote those records to data files first, so the scans
+        // flush below gives them a row and inheritance can attach their metrics.
+        self.promote_orphan_sidecars();
+
+        // An empty catalog is almost always a `.bidsignore` that hid the very files the
+        // caller wanted. MRIQC, for instance, lists its own `*_T1w.json`/`*_bold.json`
+        // IQMs there (they are deliberately not valid BIDS on their own), so a plain
+        // index silently yields nothing. Say so, rather than reporting success over an
+        // empty database.
+        if self.imaging_files.is_empty()
+            && self.apply_bidsignore
+            && self.ignore_set.num_ignores() > 0
+        {
+            eprintln!(
+                "Note: no data files were indexed, and this dataset's .bidsignore is in \
+                 force. Pipelines hide their non-standard outputs there (MRIQC hides the \
+                 very JSON sidecars holding its metrics); re-run with --no-bidsignore to \
+                 index them."
+            );
+        }
+
         // Ensure every discovered imaging file has a scans row. scans.tsv rows
         // (inserted earlier, with richer metadata) win via insert-if-not-exists;
         // this adds any imaging files a scans.tsv omitted (derivatives, files not
@@ -666,6 +719,73 @@ impl BidsParser {
         }
         sidecar_entry.insert("other_data".to_string(), Value::Object(merged));
         Some(Value::Object(sidecar_entry))
+    }
+
+    /// Promote metadata-only records: file-level JSON sidecars whose data file this
+    /// dataset does not ship.
+    ///
+    /// `sidecars` rows are keyed by the data file a sidecar describes (and foreign-key
+    /// into `scans`), so a sidecar with no data file is silently dropped. That loses a
+    /// whole class of derivative: MRIQC publishes its image-quality metrics as
+    /// `sub-…_T1w.json` and never writes the matching `.nii.gz`, so every IQM vanished.
+    /// For such a file the JSON *is* the record — treat it as a data file, so it earns a
+    /// `scans` row (satisfying the FK, and making it queryable by concept) and its
+    /// metrics reach `sidecars` through the ordinary inheritance path.
+    ///
+    /// Only a genuinely orphaned, *file-level* sidecar qualifies: one that describes no
+    /// indexed data file, sits in a datatype directory, and names a subject. That
+    /// excludes inheritance templates (a dataset- or subject-level `task-nback_bold.json`),
+    /// which describe files elsewhere and must never become records themselves.
+    fn promote_orphan_sidecars(&mut self) {
+        // Structural candidates first: a template — no subject, or outside a datatype
+        // directory — can never be promoted, so an ordinary dataset usually stops here.
+        let candidates: Vec<usize> = self
+            .sidecars
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| {
+                s.entities.contains_key("sub") && self.datatype_dir_in_path(&s.file_path).is_some()
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if candidates.is_empty() {
+            return;
+        }
+
+        let promoted: Vec<ImagingFile> = {
+            // A sidecar can only describe a data file of the same dataset and suffix, so
+            // index by that pair — the same cost class as inheritance itself.
+            let mut by_suffix: HashMap<(&str, String), Vec<DataFileFacts>> = HashMap::new();
+            for f in &self.imaging_files {
+                let name = f.file_path.split('/').next_back().unwrap_or_default();
+                let parts = read_entities(name);
+                by_suffix
+                    .entry((f.dataset_id.as_str(), parts.suffix))
+                    .or_default()
+                    .push(DataFileFacts {
+                        dir: Path::new(&f.file_path)
+                            .parent()
+                            .unwrap_or_else(|| Path::new("")),
+                        entities: parts.entities,
+                    });
+            }
+            candidates
+                .into_iter()
+                .filter(|&i| !describes_a_data_file(&self.sidecars[i], &by_suffix))
+                .map(|i| ImagingFile {
+                    dataset_id: self.sidecars[i].dataset_id.clone(),
+                    file_path: self.sidecars[i].file_path.clone(),
+                })
+                .collect()
+        };
+
+        if !promoted.is_empty() {
+            println!(
+                "Promoting {} metadata-only record(s): sidecars whose data file this dataset does not ship.",
+                promoted.len()
+            );
+            self.imaging_files.extend(promoted);
+        }
     }
 
     /// BIDS inheritance for the `sidecars` table, merging the JSON sidecars already
