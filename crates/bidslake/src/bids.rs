@@ -2079,20 +2079,23 @@ impl BidsParser {
 
             match intended_for {
                 Value::String(target) => {
-                    // Single target
-                    let normalized_target = self.normalize_path(target, source_file);
-                    self.pending_associations.push(FileAssociation {
-                        dataset_id: dataset_id.to_string(),
-                        source_file: source_file.to_string(),
-                        target_file: normalized_target,
-                        assoc_type: assoc_type.clone(),
-                    });
+                    // Single target — skipped if it names another dataset (unresolved).
+                    if let Some(normalized_target) = Self::normalize_path(target, source_file) {
+                        self.pending_associations.push(FileAssociation {
+                            dataset_id: dataset_id.to_string(),
+                            source_file: source_file.to_string(),
+                            target_file: normalized_target,
+                            assoc_type: assoc_type.clone(),
+                        });
+                    }
                 }
                 Value::Array(targets) => {
                     // Multiple targets
                     for target in targets {
-                        if let Some(target_str) = target.as_str() {
-                            let normalized_target = self.normalize_path(target_str, source_file);
+                        if let Some(target_str) = target.as_str()
+                            && let Some(normalized_target) =
+                                Self::normalize_path(target_str, source_file)
+                        {
                             self.pending_associations.push(FileAssociation {
                                 dataset_id: dataset_id.to_string(),
                                 source_file: source_file.to_string(),
@@ -2108,33 +2111,48 @@ impl BidsParser {
         Ok(())
     }
 
-    /// Normalize an IntendedFor target into a full dataset-relative path so it
-    /// matches `scans.file_path`.
+    /// Normalize an IntendedFor target into a full dataset-relative path so it matches
+    /// `scans.file_path`, or `None` when it cannot be resolved to one *within this dataset*.
     ///
-    /// BIDS allows two forms:
-    /// - dataset-relative, e.g. `bids::sub-01/ses-mri/func/..._bold.nii.gz`
-    ///   (optionally with a `bids::` prefix or leading `/`);
-    /// - subject-relative (legacy), e.g. `ses-mri/func/..._bold.nii.gz`, which is
-    ///   relative to the declaring file's subject directory.
-    ///
-    /// We strip URI decoration, and for the subject-relative form prepend the
-    /// `sub-XX/` taken from `source_file`.
-    fn normalize_path(&self, target: &str, source_file: &str) -> String {
-        let target = target.trim_start_matches("bids::").trim_start_matches('/');
+    /// BIDS allows:
+    /// - a **BIDS URI** `bids:<name>:<path>` — an empty `<name>` (`bids::…`) means "this
+    ///   dataset"; a non-empty `<name>` points into *another* dataset, which we cannot resolve
+    ///   yet (no `DatasetLinks` resolution — see docs/adr/0003), so we skip it rather than
+    ///   fabricate a wrong path (the old code produced `sub-01/bids:deriv:sub-01/…`);
+    /// - a **dataset-relative** path, e.g. `sub-01/ses-mri/func/..._bold.nii.gz` (optionally
+    ///   with a leading `/`);
+    /// - a **subject-relative** (legacy) path, e.g. `ses-mri/func/..._bold.nii.gz`, relative to
+    ///   the declaring file's subject directory.
+    fn normalize_path(target: &str, source_file: &str) -> Option<String> {
+        let target = match target.strip_prefix("bids:") {
+            Some(rest) => match rest.split_once(':') {
+                Some(("", path)) => path, // bids::<path> — this dataset
+                Some((name, _)) => {
+                    eprintln!(
+                        "Note: IntendedFor target names dataset {name:?}; cross-dataset BIDS \
+                         URIs are not resolved yet — skipping."
+                    );
+                    return None;
+                }
+                None => return None, // malformed: `bids:` with no `<name>:`
+            },
+            None => target,
+        };
+        let target = target.trim_start_matches('/');
 
         // Already dataset-relative.
         if target.starts_with("sub-") {
-            return target.to_string();
+            return Some(target.to_string());
         }
 
         // Subject-relative: prepend the source file's subject directory.
         if let Some(sub) = source_file.split('/').next()
             && sub.starts_with("sub-")
         {
-            return format!("{}/{}", sub, target);
+            return Some(format!("{}/{}", sub, target));
         }
 
-        target.to_string()
+        Some(target.to_string())
     }
 
     /// Schema-driven structural associations for the whole dataset: for each data file in the
@@ -2596,8 +2614,42 @@ pub fn build_bidsignore(content: &str) -> Result<Gitignore> {
 
 #[cfg(test)]
 mod tests {
-    use super::build_bidsignore;
+    use super::{BidsParser, build_bidsignore};
     use std::path::Path;
+
+    #[test]
+    fn normalize_path_skips_cross_dataset_bids_uri() {
+        // A named BIDS URI points into ANOTHER dataset — skip, don't fabricate a path.
+        // (The old code produced `sub-02/bids:deriv:sub-01/x.nii.gz`.)
+        assert_eq!(
+            BidsParser::normalize_path("bids:deriv:sub-01/x.nii.gz", "sub-02/fmap/y.json"),
+            None
+        );
+        // Malformed (`bids:` with no second colon) is also skipped.
+        assert_eq!(
+            BidsParser::normalize_path("bids:sub-01", "sub-02/fmap/y.json"),
+            None
+        );
+    }
+
+    #[test]
+    fn normalize_path_resolves_this_dataset_and_relative_forms() {
+        // `bids::<path>` — this dataset.
+        assert_eq!(
+            BidsParser::normalize_path("bids::sub-01/func/x.nii.gz", "sub-01/fmap/y.json"),
+            Some("sub-01/func/x.nii.gz".to_string())
+        );
+        // Already dataset-relative.
+        assert_eq!(
+            BidsParser::normalize_path("sub-01/func/x.nii.gz", "sub-01/fmap/y.json"),
+            Some("sub-01/func/x.nii.gz".to_string())
+        );
+        // Subject-relative (legacy): prepend the source file's `sub-XX/`.
+        assert_eq!(
+            BidsParser::normalize_path("ses-1/func/x.nii.gz", "sub-03/fmap/y.json"),
+            Some("sub-03/ses-1/func/x.nii.gz".to_string())
+        );
+    }
 
     fn ignored(content: &str, path: &str) -> bool {
         build_bidsignore(content)
