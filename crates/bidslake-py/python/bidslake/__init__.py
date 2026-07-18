@@ -21,12 +21,13 @@ from collections.abc import Mapping
 from .file import BidsFile
 from .layout import BidsLake, Table
 from .paths import RemotePathError
+from .relations import Relation
 from .schema import C
 
 # `_bidslake` (the compiled extension) is intentionally not re-exported here — it
 # is a private implementation detail, imported and used by `layout`. It remains
 # importable as `bidslake._bidslake` for anyone who needs it.
-__all__ = ["BidsFile", "BidsLake", "C", "RemotePathError", "Table", "open"]
+__all__ = ["BidsFile", "BidsLake", "C", "Relation", "RemotePathError", "Table", "open"]
 
 
 def open(

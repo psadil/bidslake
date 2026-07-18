@@ -3,12 +3,15 @@
 //! `bidslake index` consolidates a BIDS dataset's metadata into a small set of
 //! DuckDB tables. Most are **generated dynamically** from the vendored BIDS
 //! schema — see [`dynamic`] (and [`Schema`]) for that machinery, which is the
-//! heart of how bidslake maps BIDS onto SQL. Two tables are **static** (defined
-//! in this module): `diffusion` (one row per parsed bval/bvec volume) and
-//! `file_associations` (derived `IntendedFor`-style cross-references).
+//! heart of how bidslake maps BIDS onto SQL. A few tables are **static** (defined
+//! in this module): `diffusion` (one row per parsed bval/bvec volume),
+//! `file_associations` (derived `IntendedFor`-style cross-references), and the
+//! cross-dataset `dataset_links`/`dataset_identity` (see `docs/adr/0003`).
 //!
 //! Every table is keyed by `dataset_id`, so multiple datasets can coexist in one
-//! database and stay isolated while being queried together.
+//! database and stay isolated while being queried together. The one place datasets
+//! are *related* to each other is the `dataset_relations` **view**, which resolves
+//! cross-dataset provenance at query time without any table crossing that boundary.
 //!
 //! # The tabular-data invariant
 //!
@@ -86,6 +89,16 @@
 //!   (`fieldmap`/`sbref`/`mask`/`derivative`). No foreign keys are enforced (the
 //!   source is often a sidecar JSON that isn't itself a `scans` row); targets are
 //!   resolved to full dataset-relative paths so they still join to `scans`.
+//! - **`dataset_links`** — what a dataset declares it came from, one row per
+//!   `SourceDatasets` entry / `--source-dataset` flag / `DatasetLinks` mapping:
+//!   `link_type`, `link_name`, `declared_ref`, and the canonicalized
+//!   `identity`/`identity_kind`/`identity_base` (see `links.rs`).
+//! - **`dataset_identity`** — what identities a dataset *is* (`self`, `DatasetDOI`,
+//!   `root_uri`), so a present source can be matched as a parent.
+//! - **`dataset_relations`** (VIEW) — the resolved dataset-to-dataset relation:
+//!   `(from_dataset_id, to_dataset_id, relation, via_identity)` where `relation` is
+//!   `shares_source` (co-derivatives of one source), `derived_from`, or `source_of`.
+//!   Resolved at query time, so ingest order is irrelevant (`docs/adr/0003`).
 //!
 //! ## Query `scans` by BIDS concept
 //!
@@ -116,11 +129,14 @@
 //! dataset_description (dataset_id)
 //!   ├── participants (dataset_id, participant_id)
 //!   │     └── sessions (dataset_id, session_id, participant_id)
-//!   └── scans (dataset_id, file_path)
-//!         ├── sidecars          (dataset_id, file_path)   FK → scans
-//!         ├── diffusion         (dataset_id, file_path, volume_idx)
-//!         ├── events            (dataset_id, file_path)
-//!         └── file_associations (target_file_path → scans.file_path, unenforced)
+//!   ├── scans (dataset_id, file_path)
+//!   │     ├── sidecars          (dataset_id, file_path)   FK → scans
+//!   │     ├── diffusion         (dataset_id, file_path, volume_idx)
+//!   │     ├── events            (dataset_id, file_path)
+//!   │     └── file_associations (target_file_path → scans.file_path, unenforced)
+//!   ├── dataset_links    (dataset_id, …)   what this dataset declares it came from
+//!   └── dataset_identity (dataset_id, …)   what this dataset *is*
+//!         ⇒ dataset_relations (VIEW)        resolved dataset↔dataset edges (query-time)
 //! ```
 //!
 //! `scans` and `participants` aren't linked by an explicit column — a scan
@@ -192,4 +208,69 @@ CREATE TABLE IF NOT EXISTS file_associations (
     association_type TEXT,
     PRIMARY KEY (dataset_id, source_file_path, target_file_path, association_type)
 );
+";
+
+// Cross-dataset association (see docs/adr/0003). The dataset-to-dataset relation is
+// deliberately NOT stored — it is resolved at query time by the `dataset_relations`
+// view over these two tables, so the catalog is correct regardless of ingest order
+// (a source dataset added later just makes the edge appear on the next query; nothing
+// to re-index). Each table stays keyed by a single `dataset_id`, so the crate
+// invariant "every table is keyed by dataset_id" holds and each ingest writes only
+// its own rows. Like `file_associations`: best-effort, no foreign keys — a declared
+// source that is not in the catalog (the usual case for a derivative) is kept, not dropped.
+
+// What a dataset declares it came from: one row per `SourceDatasets` entry, per
+// `--source-dataset` flag, and per `DatasetLinks` mapping.
+pub const CREATE_DATASET_LINKS_TABLE: &str = "
+CREATE TABLE IF NOT EXISTS dataset_links (
+    dataset_id TEXT,
+    link_type TEXT,
+    link_name TEXT,
+    declared_ref TEXT,
+    identity TEXT,
+    identity_kind TEXT,
+    identity_base TEXT,
+    PRIMARY KEY (dataset_id, link_type, link_name, identity)
+);
+";
+
+// What identities a dataset *is* (its own `dataset:<id>`, its `DatasetDOI`, its
+// `root_uri`), so a source dataset that *is* present in the catalog can be matched
+// as the parent of the datasets that declare it.
+pub const CREATE_DATASET_IDENTITY_TABLE: &str = "
+CREATE TABLE IF NOT EXISTS dataset_identity (
+    dataset_id TEXT,
+    identity TEXT,
+    identity_kind TEXT,
+    source TEXT,
+    PRIMARY KEY (dataset_id, identity)
+);
+";
+
+// The dataset-to-dataset relation, resolved at query time. Depth-1 only (no transitive
+// closure): `UNION` dedups, `from <> to` drops self-links, so cycles cannot arise.
+//   - `shares_source`: two datasets declare the SAME source identity. This needs no
+//     `dataset_identity` row, which is why it works when the shared source is absent
+//     from the catalog (the ds001761 fMRIPrep/MRIQC case).
+//   - `derived_from` / `source_of`: one dataset declares an identity that ANOTHER
+//     catalog dataset *is* (its DOI or its `dataset:<id>`).
+// `named` links (`DatasetLinks`) are excluded from `shares_source`: they name a
+// referenced dataset, not a shared origin.
+pub const CREATE_DATASET_RELATIONS_VIEW: &str = "
+CREATE OR REPLACE VIEW dataset_relations AS
+  SELECT a.dataset_id AS from_dataset_id, b.dataset_id AS to_dataset_id,
+         'shares_source' AS relation, a.identity AS via_identity
+  FROM dataset_links a JOIN dataset_links b ON a.identity = b.identity
+  WHERE a.dataset_id <> b.dataset_id
+    AND a.link_type IN ('source', 'declared')
+    AND b.link_type IN ('source', 'declared')
+  UNION
+  SELECT l.dataset_id, i.dataset_id, 'derived_from', l.identity
+  FROM dataset_links l JOIN dataset_identity i ON i.identity = l.identity
+  WHERE l.dataset_id <> i.dataset_id
+  UNION
+  SELECT i.dataset_id, l.dataset_id, 'source_of', l.identity
+  FROM dataset_links l JOIN dataset_identity i ON i.identity = l.identity
+  WHERE l.dataset_id <> i.dataset_id
+;
 ";

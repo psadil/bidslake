@@ -19,6 +19,7 @@ from ._lazy import build_lazy
 from ._sql import quote_ident
 from .file import BidsFile
 from .paths import to_uri
+from .relations import Relation
 from .schema._generated import SCHEMA_VERSION, GetFilters
 
 
@@ -133,6 +134,52 @@ class BidsLake:
     def tables(self) -> list[str]:
         """Every base table and view in the database."""
         return self._lake.list_tables()
+
+    # -- cross-dataset links (docs/adr/0003) -------------------------------
+
+    def datasets(self) -> DataFrame:
+        """One row per dataset in the catalog (the ``dataset_description`` table)."""
+        return self._query("SELECT * FROM dataset_description", [])
+
+    def dataset_relations(self) -> DataFrame:
+        """The resolved dataset-to-dataset relations.
+
+        Columns ``(from_dataset_id, to_dataset_id, relation, via_identity)``, where
+        ``relation`` is one of :class:`Relation`. Resolved at query time from each
+        dataset's declared ``SourceDatasets`` — order of ingest does not matter.
+        """
+        self._require_relations()
+        return self._query("SELECT * FROM dataset_relations", [])
+
+    def related_datasets(
+        self, dataset_id: str, relation: Relation | str | None = None
+    ) -> list[str]:
+        """The dataset ids related to ``dataset_id`` by explicit provenance.
+
+        ``relation`` optionally filters to one kind (e.g. :attr:`Relation.SHARES_SOURCE`).
+        A shared-source link guarantees a shared subject/entity namespace, so a caller can
+        then *soundly* match files across the boundary — bidslake resolves the dataset
+        relation; the caller does the entity match::
+
+            for other in lake.related_datasets(fp_id, relation=Relation.SHARES_SOURCE):
+                lake.get(dataset_id=other, sub=f.sub, ses=f.ses, task=f.task, run=f.run)
+        """
+        self._require_relations()
+        sql = "SELECT DISTINCT to_dataset_id FROM dataset_relations WHERE from_dataset_id = ?"
+        params: list[Any] = [dataset_id]
+        if relation is not None:
+            sql += " AND relation = ?"
+            params.append(str(relation))
+        sql += " ORDER BY to_dataset_id"
+        df = self._query(sql, params)
+        return list(df["to_dataset_id"]) if df.height else []
+
+    def _require_relations(self) -> None:
+        if "dataset_relations" not in self.tables():
+            raise RuntimeError(
+                "this catalog predates cross-dataset links; run "
+                "`bidslake link init <db>` or re-index to add them"
+            )
 
     # -- schema augmentation -----------------------------------------------
 

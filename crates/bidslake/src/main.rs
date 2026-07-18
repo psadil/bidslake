@@ -6,6 +6,7 @@ use std::path::PathBuf;
 mod bids;
 mod db;
 mod fs;
+mod links;
 mod readers;
 mod s3;
 mod schema;
@@ -74,6 +75,13 @@ enum Commands {
         /// `*_xfm.*`) in `.bidsignore`; pass this alongside `--overlay` to index them.
         #[arg(long)]
         no_bidsignore: bool,
+
+        /// Declare that this dataset derives from a source: a DOI, URL, filesystem/S3 path,
+        /// or another catalog dataset's id (`dataset:<id>` or a bare id). The escape hatch
+        /// for datasets whose `dataset_description.json` has no `SourceDatasets` DOI to link
+        /// on. Repeatable (docs/adr/0003).
+        #[arg(long = "source-dataset")]
+        source_dataset: Vec<String>,
     },
 
     /// Print the DuckDB schema bidslake would build from the BIDS schema (plus any
@@ -115,6 +123,49 @@ enum Commands {
         #[arg(long)]
         to: String,
     },
+
+    /// Manage cross-dataset links in an existing catalog: co-derivatives that share a
+    /// source, resolved at query time from each dataset's `SourceDatasets` (docs/adr/0003).
+    Link {
+        #[command(subcommand)]
+        action: LinkAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum LinkAction {
+    /// Create the cross-dataset link tables + `dataset_relations` view on an existing
+    /// catalog and backfill declarations from the stored `dataset_description` rows — so a
+    /// catalog indexed before this feature gains links without a re-index.
+    Init {
+        #[arg(short, long, default_value = "bidslake.duckdb")]
+        database: String,
+    },
+    /// Declare that a catalog dataset derives from a source. Repeatable `--source-dataset`.
+    Add {
+        #[arg(short, long, default_value = "bidslake.duckdb")]
+        database: String,
+        /// The catalog dataset that derives from the source(s).
+        #[arg(long)]
+        dataset: String,
+        /// A source reference: a DOI, URL, path, or `dataset:<id>` (repeatable).
+        #[arg(long = "source-dataset", required = true)]
+        source_dataset: Vec<String>,
+    },
+    /// List resolved relations, dangling declarations, and any version drift.
+    List {
+        #[arg(short, long, default_value = "bidslake.duckdb")]
+        database: String,
+    },
+    /// Remove a declared (`--source-dataset`/`link add`) link. Repeatable `--source-dataset`.
+    Rm {
+        #[arg(short, long, default_value = "bidslake.duckdb")]
+        database: String,
+        #[arg(long)]
+        dataset: String,
+        #[arg(long = "source-dataset", required = true)]
+        source_dataset: Vec<String>,
+    },
 }
 
 #[tokio::main]
@@ -132,6 +183,7 @@ async fn main() -> Result<()> {
             adapter,
             dry_run,
             no_bidsignore,
+            source_dataset,
         } => {
             let schema_path_str = schema_path
                 .as_deref()
@@ -162,6 +214,7 @@ async fn main() -> Result<()> {
                 bundle.ingestion_provenance,
                 dry_run,
                 !no_bidsignore,
+                source_dataset,
             )
             .await
         }
@@ -194,7 +247,233 @@ async fn main() -> Result<()> {
                  See the README on managed mode. (database: {database}, to: {to})"
             )
         }
+        Commands::Link { action } => run_link(action),
     }
+}
+
+/// `bidslake link` — manage cross-dataset links in an existing catalog (docs/adr/0003).
+fn run_link(action: LinkAction) -> Result<()> {
+    match action {
+        LinkAction::Init { database } => {
+            let db = BidsDb::new(&database)?;
+            ensure_link_tables(&db)?;
+            let n = backfill_links(&db)?;
+            println!(
+                "Initialized cross-dataset links in {database}: backfilled {n} dataset(s) from \
+                 stored dataset_description rows."
+            );
+            Ok(())
+        }
+        LinkAction::Add {
+            database,
+            dataset,
+            source_dataset,
+        } => {
+            let db = BidsDb::new(&database)?;
+            ensure_link_tables(&db)?;
+            for reference in &source_dataset {
+                db.record_dataset_link(
+                    &dataset,
+                    "declared",
+                    "",
+                    reference,
+                    &links::canonicalize(reference),
+                )?;
+            }
+            println!("Declared {} source(s) for {dataset}.", source_dataset.len());
+            Ok(())
+        }
+        LinkAction::Rm {
+            database,
+            dataset,
+            source_dataset,
+        } => {
+            let db = BidsDb::new(&database)?;
+            let mut removed = 0usize;
+            for reference in &source_dataset {
+                let identity = links::canonicalize(reference);
+                removed += db.conn.execute(
+                    "DELETE FROM dataset_links \
+                     WHERE dataset_id = ? AND link_type = 'declared' AND identity = ?",
+                    duckdb::params![dataset, identity.value],
+                )?;
+            }
+            println!("Removed {removed} declared link(s) for {dataset}.");
+            Ok(())
+        }
+        LinkAction::List { database } => {
+            let db = BidsDb::new(&database)?;
+            list_links(&db)
+        }
+    }
+}
+
+/// Create the cross-dataset link tables + view on an existing catalog (idempotent).
+fn ensure_link_tables(db: &BidsDb) -> Result<()> {
+    db.conn.execute(schema::CREATE_DATASET_LINKS_TABLE, [])?;
+    db.conn.execute(schema::CREATE_DATASET_IDENTITY_TABLE, [])?;
+    db.conn.execute(schema::CREATE_DATASET_RELATIONS_VIEW, [])?;
+    Ok(())
+}
+
+/// Backfill `dataset_links`/`dataset_identity` from the `dataset_description` rows already
+/// in the catalog, so a database indexed before this feature is fully linked without a
+/// re-index. Mirrors `BidsParser::record_links`, but reads the stored columns instead of the
+/// live JSON. Returns the number of datasets processed.
+fn backfill_links(db: &BidsDb) -> Result<usize> {
+    type Row = (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let rows: Vec<Row> = {
+        let mut stmt = db.conn.prepare(
+            "SELECT dataset_id, root_uri, \"DatasetDOI\", \"SourceDatasets\", \
+             CAST(\"DatasetLinks\" AS VARCHAR) FROM dataset_description",
+        )?;
+        let mapped = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+            ))
+        })?;
+        mapped.collect::<std::result::Result<_, _>>()?
+    };
+
+    for (dataset_id, root_uri, doi, sources, named) in &rows {
+        db.clear_derived_links(dataset_id)?;
+        db.record_dataset_identity(
+            dataset_id,
+            &links::canonicalize(&format!("dataset:{dataset_id}")),
+            "self",
+        )?;
+        if let Some(root) = root_uri {
+            db.record_dataset_identity(dataset_id, &links::canonicalize(root), "root_uri")?;
+        }
+        if let Some(doi) = doi {
+            db.record_dataset_identity(dataset_id, &links::canonicalize(doi), "DatasetDOI")?;
+        }
+        if let Some(src) = sources
+            && let Ok(serde_json::Value::Array(arr)) =
+                serde_json::from_str::<serde_json::Value>(src)
+        {
+            for entry in arr {
+                if let Some(reference) = entry
+                    .get("DOI")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| entry.get("URL").and_then(|v| v.as_str()))
+                {
+                    db.record_dataset_link(
+                        dataset_id,
+                        "source",
+                        "",
+                        reference,
+                        &links::canonicalize(reference),
+                    )?;
+                }
+            }
+        }
+        if let Some(dl) = named
+            && let Ok(serde_json::Value::Object(map)) =
+                serde_json::from_str::<serde_json::Value>(dl)
+        {
+            for (name, uri) in map {
+                if let Some(uri) = uri.as_str() {
+                    db.record_dataset_link(
+                        dataset_id,
+                        "named",
+                        &name,
+                        uri,
+                        &links::canonicalize(uri),
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(rows.len())
+}
+
+/// Print resolved relations, dangling declarations, and version drift for `bidslake link list`.
+fn list_links(db: &BidsDb) -> Result<()> {
+    println!("Resolved relations:");
+    let mut stmt = db.conn.prepare(
+        "SELECT from_dataset_id, relation, to_dataset_id, via_identity \
+         FROM dataset_relations ORDER BY from_dataset_id, relation, to_dataset_id",
+    )?;
+    let mut any = false;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+        ))
+    })?;
+    for row in rows {
+        let (from, relation, to, via) = row?;
+        println!("  {from}  {relation}  {to}  (via {via})");
+        any = true;
+    }
+    if !any {
+        println!("  (none)");
+    }
+
+    // Dangling: a declared/source identity no other dataset shares or *is* — normal for a
+    // derivative whose source is not in the catalog.
+    println!("\nDangling declarations (source not in the catalog — normal for a derivative):");
+    let mut stmt = db.conn.prepare(
+        "SELECT dataset_id, identity FROM dataset_links l \
+         WHERE link_type IN ('source', 'declared') \
+           AND NOT EXISTS (SELECT 1 FROM dataset_links b \
+                           WHERE b.identity = l.identity AND b.dataset_id <> l.dataset_id) \
+           AND NOT EXISTS (SELECT 1 FROM dataset_identity i \
+                           WHERE i.identity = l.identity AND i.dataset_id <> l.dataset_id) \
+         ORDER BY dataset_id, identity",
+    )?;
+    let mut any = false;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    for row in rows {
+        let (dataset_id, identity) = row?;
+        println!("  {dataset_id}  →  {identity}");
+        any = true;
+    }
+    if !any {
+        println!("  (none)");
+    }
+
+    // Version drift: two datasets whose DOI shares a base but not the exact version. Not
+    // linked (exact match only); `--source-dataset` can force it.
+    let mut stmt = db.conn.prepare(
+        "SELECT a.dataset_id, a.identity, b.dataset_id, b.identity \
+         FROM dataset_links a JOIN dataset_links b \
+           ON a.identity_base = b.identity_base AND a.identity <> b.identity \
+         WHERE a.identity_kind = 'doi' AND a.dataset_id < b.dataset_id \
+         ORDER BY a.identity_base",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if !rows.is_empty() {
+        println!(
+            "\nVersion drift (same study, different version — not linked; use --source-dataset to force):"
+        );
+        for (da, ia, dbn, ib) in rows {
+            println!("  {da} ({ia})  vs  {dbn} ({ib})");
+        }
+    }
+    Ok(())
 }
 
 /// Prepend a dataset-embedded overlay (`<input>/.bidslake/overlay.json`) to the
@@ -323,6 +602,7 @@ async fn run_indexer(
     ingestion_provenance: Vec<(String, serde_json::Value)>,
     dry_run: bool,
     apply_bidsignore: bool,
+    declared_sources: Vec<String>,
 ) -> Result<()> {
     println!("Input BIDS location: {}", input);
     // A dry run parses into a throwaway in-memory database and reports routing rather
@@ -377,7 +657,8 @@ async fn run_indexer(
         });
     let mut parser: BidsParser =
         BidsParser::new(fs, dataset_id, schema, s3_httpfs_cfg, apply_bidsignore)
-            .with_term_maps(term_maps);
+            .with_term_maps(term_maps)
+            .with_declared_sources(declared_sources);
 
     // Wrap the whole ingest in one transaction. DuckDB otherwise autocommits
     // every statement, fsyncing per row on a file-backed database — the single

@@ -64,16 +64,14 @@ accessors; and the opt-in `python -m bidslake.stubgen`. Remaining follow-ups:
   files while `.bidsignore` is in force now says so, instead of reporting success over an empty
   database (see `promote_orphan_sidecars`' call site in `bids.rs`).
 
-- [ ] **Cross-dataset association by shared entities**. A catalog routinely holds several datasets —
-  `ds001761-fmriprep` and `ds001761-mriqc` indexed into one `.duckdb` — whose records describe the
-  *same acquisition* under different `dataset_id`s: MRIQC's
-  `sub-01_ses-01_task-faces_run-01_bold.json` IQMs characterize the very run fMRIPrep
-  preprocessed. `get_associated()` resolves associations only *within* a dataset (`IntendedFor`,
-  structural), so a consumer asking "the IQMs for this preprocessed BOLD run" must hand-write a
-  join on `sub`/`ses`/`task`/`run` across `dataset_id` — reintroducing exactly the entity
-  string-matching the catalog exists to abolish. Worth a first-class lookup, or at minimum a
-  documented and tested join recipe. Surfaced by dirt, which wants MRIQC `fd_mean` to order its
-  review of fMRIPrep derivatives (and became reachable once metadata-only records landed).
+- [x] **Cross-dataset association** — landed at the *dataset* level, not by entity guessing
+  (`docs/adr/0003`). Datasets declaring the same `SourceDatasets` are co-derivatives
+  (`shares_source`, resolved by the `dataset_relations` view); `lake.related_datasets(id, relation)`
+  gives a consumer the sound relation, within which it can then match files by entity. Validated on
+  `ds001761-fmriprep`/`-mriqc`. **Remaining:** the precise *file*-level link via the BIDS `Sources`
+  metadata field (a `target_dataset_id` on `file_associations`, BIDS-URI resolution through
+  `DatasetLinks`) — deferred because no producer we have emits `Sources` (MRIQC emits neither it nor
+  the deprecated `RawSources`; an issue has been filed with nipreps/mriqc). See ADR 0003 §6.
 
 - [ ] **YAML overlay authoring**. Overlays are JSON-only; accept `.yaml`/`.yml` (parse to `Value`
   before merge) behind an optional `yaml` cargo feature.

@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     import polars as pl
 
     from .layout import BidsLake
+    from .relations import Relation
 
 # Columns present on every file-based row that are not BIDS concepts; excluded
 # from the ``entities`` mapping.
@@ -92,6 +93,12 @@ class BidsFile:
         """Files cross-referenced from this one (fieldmaps, events, …) via
         `file_associations`, optionally filtered to one `association_type`."""
         return self._require_lake()._associated_for(self.dataset_id, self.file_path, kind)
+
+    def related_datasets(self, relation: Relation | str | None = None) -> list[str]:
+        """The dataset ids related to *this file's* dataset by explicit provenance
+        (see :meth:`BidsLake.related_datasets`). A shared-source relation makes an
+        entity match into the returned dataset(s) sound."""
+        return self._require_lake().related_datasets(self.dataset_id, relation)
 
     def _require_lake(self) -> BidsLake:
         if self.lake is None:

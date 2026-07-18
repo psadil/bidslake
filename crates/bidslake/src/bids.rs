@@ -26,6 +26,7 @@
 
 use crate::db::{BidsDb, FileAssociation, TabularStatus};
 use crate::fs::BidsFileSystem;
+use crate::links;
 use crate::readers::{self, ContentReader};
 use crate::schema::Schema;
 use crate::schema::dynamic::{quote_ident, sql_in_list, sql_lit};
@@ -161,6 +162,12 @@ pub struct BidsParser {
     /// Content readers keyed by name (`fs_stats`, …); parse a recognized file's body into
     /// rows. Selected by the ingestion schema's `reader`.
     readers: HashMap<String, Box<dyn ContentReader>>,
+    /// The root `dataset_description.json` (captured on its first, shallowest processing),
+    /// read at finalize by [`Self::record_links`] for `SourceDatasets`/`DatasetLinks`/`DatasetDOI`.
+    /// Nested descriptions under `derivatives/` describe *other* datasets and are ignored.
+    root_description_json: Option<Value>,
+    /// `--source-dataset` references declared on the CLI; recorded as `declared` links.
+    declared_sources: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -286,7 +293,16 @@ impl BidsParser {
             tabular_header: HashMap::new(),
             term_maps: Vec::new(),
             readers: readers::default_readers(),
+            root_description_json: None,
+            declared_sources: Vec::new(),
         }
+    }
+
+    /// Record CLI `--source-dataset` references as `declared` cross-dataset links, so a
+    /// dataset with no `SourceDatasets` DOI can still be tied to a catalog dataset.
+    pub fn with_declared_sources(mut self, sources: Vec<String>) -> Self {
+        self.declared_sources = sources;
+        self
     }
 
     /// Attach term maps that recognize standardized non-BIDS files (FreeSurfer, …).
@@ -517,6 +533,10 @@ impl BidsParser {
                     format!("inserting synthesized dataset_description for {dataset_id}")
                 })?;
         }
+
+        // Cross-dataset links: record what this dataset declares it came from and what it
+        // *is*, for the query-time `dataset_relations` view (docs/adr/0003).
+        self.record_links(db, &dataset_id)?;
 
         // File associations: the `IntendedFor` rows collected during the walk, plus the schema's
         // structural associations (events↔bold, bval/bvec↔dwi, channels↔eeg, …) resolved via the
@@ -1316,6 +1336,13 @@ impl BidsParser {
             self.dataset_type = Some(dt.to_string());
         }
 
+        // Capture the ROOT description (shallowest, processed first) for `record_links` at
+        // finalize — its SourceDatasets/DatasetLinks/DatasetDOI declare *this* dataset's
+        // provenance. Captured before the dataset_id/root_uri splice below to stay pristine.
+        if !self.has_dataset_description {
+            self.root_description_json = Some(json_value.clone());
+        }
+
         if let Value::Object(ref mut map) = json_value {
             map.insert(
                 "dataset_id".to_string(),
@@ -1327,6 +1354,79 @@ impl BidsParser {
         db.insert(&self.schema, "dataset_description", &json_value)
             .with_context(|| format!("inserting dataset_description for {dataset_id}"))?;
         self.has_dataset_description = true;
+        Ok(())
+    }
+
+    /// Record this dataset's cross-dataset link declarations for the query-time
+    /// `dataset_relations` view (docs/adr/0003). Refreshes the ingest-derived rows
+    /// (`SourceDatasets`, `DatasetLinks`) and all identities so a re-index reflects the
+    /// current `dataset_description.json`; user-provided `declared` links (`--source-dataset`,
+    /// `bidslake link add`) are merged idempotently and never cleared here. Runs for every
+    /// dataset, including adapter-ingested ones with no description (they still get their
+    /// `self`/`root_uri` identity and any `--source-dataset`).
+    fn record_links(&self, db: &BidsDb, dataset_id: &str) -> Result<()> {
+        db.clear_derived_links(dataset_id)?;
+
+        // What this dataset IS: its own id, and its root_uri.
+        db.record_dataset_identity(
+            dataset_id,
+            &links::canonicalize(&format!("dataset:{dataset_id}")),
+            "self",
+        )?;
+        db.record_dataset_identity(
+            dataset_id,
+            &links::canonicalize(&self.fs.root()),
+            "root_uri",
+        )?;
+
+        if let Some(desc) = &self.root_description_json {
+            if let Some(doi) = desc.get("DatasetDOI").and_then(Value::as_str) {
+                db.record_dataset_identity(dataset_id, &links::canonicalize(doi), "DatasetDOI")?;
+            }
+            // SourceDatasets: prefer each entry's DOI, else its URL.
+            if let Some(sources) = desc.get("SourceDatasets").and_then(Value::as_array) {
+                for src in sources {
+                    if let Some(reference) = src
+                        .get("DOI")
+                        .and_then(Value::as_str)
+                        .or_else(|| src.get("URL").and_then(Value::as_str))
+                    {
+                        db.record_dataset_link(
+                            dataset_id,
+                            "source",
+                            "",
+                            reference,
+                            &links::canonicalize(reference),
+                        )?;
+                    }
+                }
+            }
+            // DatasetLinks: a name → location map (stored now; the BIDS-URI resolver that
+            // reads them is a later slice).
+            if let Some(named) = desc.get("DatasetLinks").and_then(Value::as_object) {
+                for (name, uri) in named {
+                    if let Some(uri) = uri.as_str() {
+                        db.record_dataset_link(
+                            dataset_id,
+                            "named",
+                            name,
+                            uri,
+                            &links::canonicalize(uri),
+                        )?;
+                    }
+                }
+            }
+        }
+
+        for reference in &self.declared_sources {
+            db.record_dataset_link(
+                dataset_id,
+                "declared",
+                "",
+                reference,
+                &links::canonicalize(reference),
+            )?;
+        }
         Ok(())
     }
 
