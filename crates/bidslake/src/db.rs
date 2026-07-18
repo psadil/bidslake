@@ -11,6 +11,7 @@
 //! the batched `read_csv` inserts, re-index `DELETE`s, and count-back `SELECT`s — by
 //! design; this module deliberately does not gate every statement.
 
+use crate::links::Identity;
 use crate::schema::{self, Schema};
 use duckdb::{Connection, Result, params};
 use serde_json::Value;
@@ -76,7 +77,8 @@ impl BidsDb {
     }
 
     /// Create every table: the schema-generated ones ([`Schema::create_tables_sql`])
-    /// plus the static `diffusion` and `file_associations` tables.
+    /// plus the static `diffusion`, `file_associations`, and cross-dataset
+    /// `dataset_links`/`dataset_identity` tables (and the `dataset_relations` view).
     pub fn create_tables(&self, schema: &Schema) -> Result<()> {
         let sqls = schema.create_tables_sql();
         for sql in sqls {
@@ -87,6 +89,12 @@ impl BidsDb {
         self.conn
             .execute(schema::CREATE_FILE_ASSOCIATIONS_TABLE, [])?;
         self.conn.execute(schema::CREATE_TABULAR_FILES_TABLE, [])?;
+        // Cross-dataset links + the query-time relation view (see docs/adr/0003).
+        self.conn.execute(schema::CREATE_DATASET_LINKS_TABLE, [])?;
+        self.conn
+            .execute(schema::CREATE_DATASET_IDENTITY_TABLE, [])?;
+        self.conn
+            .execute(schema::CREATE_DATASET_RELATIONS_VIEW, [])?;
         self.stamp_meta(schema)?;
         self.stamp_schema(schema)?;
         Ok(())
@@ -231,6 +239,70 @@ impl BidsDb {
             status.as_str()
         ])
         .with_context(|| format!("recording tabular file {file_path} as {}", status.as_str()))?;
+        Ok(())
+    }
+
+    /// Record one cross-dataset link declaration (`dataset_links`). `INSERT OR REPLACE`
+    /// keeps re-indexing idempotent (see docs/adr/0003).
+    pub fn record_dataset_link(
+        &self,
+        dataset_id: &str,
+        link_type: &str,
+        link_name: &str,
+        declared_ref: &str,
+        identity: &Identity,
+    ) -> Result<()> {
+        let mut stmt = self.conn.prepare_cached(
+            "INSERT OR REPLACE INTO dataset_links \
+             (dataset_id, link_type, link_name, declared_ref, identity, identity_kind, identity_base) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )?;
+        stmt.execute(params![
+            dataset_id,
+            link_type,
+            link_name,
+            declared_ref,
+            &identity.value,
+            identity.kind.as_str(),
+            &identity.base
+        ])?;
+        Ok(())
+    }
+
+    /// Record one identity a dataset *is* (`dataset_identity`). `source` is its provenance
+    /// (`self`/`DatasetDOI`/`root_uri`). `INSERT OR REPLACE` for idempotent re-indexing.
+    pub fn record_dataset_identity(
+        &self,
+        dataset_id: &str,
+        identity: &Identity,
+        source: &str,
+    ) -> Result<()> {
+        let mut stmt = self.conn.prepare_cached(
+            "INSERT OR REPLACE INTO dataset_identity (dataset_id, identity, identity_kind, source) \
+             VALUES (?, ?, ?, ?)",
+        )?;
+        stmt.execute(params![
+            dataset_id,
+            &identity.value,
+            identity.kind.as_str(),
+            source
+        ])?;
+        Ok(())
+    }
+
+    /// Drop a dataset's ingest-derived links (`source`/`named`) and all its identities
+    /// before re-recording them, so a re-index reflects the current `dataset_description.json`.
+    /// User-provided `declared` links (`--source-dataset`, `bidslake link add`) are left
+    /// in place (docs/adr/0003).
+    pub fn clear_derived_links(&self, dataset_id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM dataset_links WHERE dataset_id = ? AND link_type IN ('source', 'named')",
+            params![dataset_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM dataset_identity WHERE dataset_id = ?",
+            params![dataset_id],
+        )?;
         Ok(())
     }
 

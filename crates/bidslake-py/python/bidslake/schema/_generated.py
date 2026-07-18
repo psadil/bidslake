@@ -244,6 +244,27 @@ COLUMNS: dict[str, dict[str, str]] = {
         "DatasetLinks": "JSON",
         "other_data": "JSON",
     },
+    "dataset_identity": {
+        "dataset_id": "VARCHAR",
+        "identity": "VARCHAR",
+        "identity_kind": "VARCHAR",
+        "source": "VARCHAR",
+    },
+    "dataset_links": {
+        "dataset_id": "VARCHAR",
+        "link_type": "VARCHAR",
+        "link_name": "VARCHAR",
+        "declared_ref": "VARCHAR",
+        "identity": "VARCHAR",
+        "identity_kind": "VARCHAR",
+        "identity_base": "VARCHAR",
+    },
+    "dataset_relations": {
+        "from_dataset_id": "VARCHAR",
+        "to_dataset_id": "VARCHAR",
+        "relation": "VARCHAR",
+        "via_identity": "VARCHAR",
+    },
     "descriptions": {
         "dataset_id": "VARCHAR",
         "file_path": "VARCHAR",
@@ -1994,6 +2015,27 @@ class C:
         SourceDatasets: pl.Expr = pl.col("SourceDatasets")
         DatasetLinks: pl.Expr = pl.col("DatasetLinks")
         other_data: pl.Expr = pl.col("other_data")
+
+    class dataset_identity:
+        dataset_id: pl.Expr = pl.col("dataset_id")
+        identity: pl.Expr = pl.col("identity")
+        identity_kind: pl.Expr = pl.col("identity_kind")
+        source: pl.Expr = pl.col("source")
+
+    class dataset_links:
+        dataset_id: pl.Expr = pl.col("dataset_id")
+        link_type: pl.Expr = pl.col("link_type")
+        link_name: pl.Expr = pl.col("link_name")
+        declared_ref: pl.Expr = pl.col("declared_ref")
+        identity: pl.Expr = pl.col("identity")
+        identity_kind: pl.Expr = pl.col("identity_kind")
+        identity_base: pl.Expr = pl.col("identity_base")
+
+    class dataset_relations:
+        from_dataset_id: pl.Expr = pl.col("from_dataset_id")
+        to_dataset_id: pl.Expr = pl.col("to_dataset_id")
+        relation: pl.Expr = pl.col("relation")
+        via_identity: pl.Expr = pl.col("via_identity")
 
     class descriptions:
         dataset_id: pl.Expr = pl.col("dataset_id")
