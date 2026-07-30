@@ -63,6 +63,15 @@ pub enum Undeclared {
     Catalog,
 }
 
+/// An [`Undeclared`] policy that applies only to the files a selector matches.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScopedUndeclared {
+    /// BIDS selector expressions over the file's projected concepts; all must pass.
+    #[serde(default)]
+    pub selectors: Vec<String>,
+    pub undeclared: Undeclared,
+}
+
 /// Per-table row/column policy for the data tables readers populate.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct TablePolicy {
@@ -77,6 +86,13 @@ pub struct TablePolicy {
     /// declared `catalog` gets no `other_data` column at all.
     #[serde(default)]
     pub undeclared: Option<Undeclared>,
+    /// Per-file undeclared-column policy, for tables holding more than one class of
+    /// file. `sidecars` is the motivating case — one table for *every* file in the
+    /// catalog, so a table-wide flag would strip custom metadata from all raw BIDS to
+    /// reach one derivative's sidecars. First match wins; falls back to
+    /// [`TablePolicy::undeclared`], then to [`Undeclared::Store`].
+    #[serde(default, rename = "undeclaredWhen")]
+    pub undeclared_when: Vec<ScopedUndeclared>,
 }
 
 impl TablePolicy {
@@ -94,6 +110,9 @@ impl TablePolicy {
         if other.undeclared.is_some() {
             self.undeclared = other.undeclared;
         }
+        // Appends rather than replaces, so several adapters can each scope a policy
+        // onto a shared table (`sidecars` above all) without clobbering one another.
+        self.undeclared_when.extend(other.undeclared_when);
     }
 }
 
@@ -193,6 +212,31 @@ impl Ingestion {
             .and_then(|p| p.undeclared)
             .unwrap_or_default()
     }
+
+    /// A table's undeclared-column policy for one specific file: the first matching
+    /// `undeclaredWhen` entry, else the static [`Self::undeclared`].
+    ///
+    /// Returns early for a table with no policy at all — the overwhelmingly common
+    /// case — so a plain BIDS ingest evaluates no selectors.
+    pub fn undeclared_for(&self, table: &str, ctx: &FileContext) -> Undeclared {
+        let Some(policy) = self.tables.get(table) else {
+            return Undeclared::Store;
+        };
+        if policy.undeclared_when.is_empty() {
+            return policy.undeclared.unwrap_or_default();
+        }
+        let (file, dataset) = ctx.eval_bindings();
+        let null = Value::Null;
+        let eval = bids_schema::expression::EvalContext::new(&file, &dataset, &null, &null);
+        policy
+            .undeclared_when
+            .iter()
+            .find(|scoped| {
+                bids_schema::expression::do_selectors_select(Some(&scoped.selectors), &eval)
+            })
+            .map(|scoped| scoped.undeclared)
+            .unwrap_or_else(|| policy.undeclared.unwrap_or_default())
+    }
 }
 
 #[cfg(test)]
@@ -289,6 +333,9 @@ mod tests {
                 "tables": { "t": { "undeclared": "cataolg" } } }"#,
             r#"{"IngestionSchemaVersion": "0.1.0",
                 "tables": { "t": { "undecalred": "catalog" } } }"#,
+            // `undeclaredWhen` entries need both fields.
+            r#"{"IngestionSchemaVersion": "0.1.0",
+                "tables": { "t": { "undeclaredWhen": [{ "undeclared": "catalog" }] } } }"#,
         ] {
             assert!(
                 Ingestion::from_sources(&[bad]).is_err(),
@@ -308,6 +355,38 @@ mod tests {
         assert_eq!(ing.undeclared("events"), Undeclared::Store);
     }
 
+    /// `undeclaredWhen` scopes the policy to matching files only — the property that
+    /// lets one derivative's sidecars be cataloged while raw BIDS sidecars in the same
+    /// database keep their custom metadata.
+    #[test]
+    fn undeclared_when_scopes_to_matching_files() {
+        let ing = Ingestion::from_sources(&[r#"{
+            "IngestionSchemaVersion": "0.1.0",
+            "tables": { "sidecars": { "undeclaredWhen": [
+                { "selectors": ["suffix == \"timeseries\""], "undeclared": "catalog" }
+            ] } }
+        }"#])
+        .expect("fragment loads");
+
+        for (suffix, want) in [
+            ("timeseries", Undeclared::Catalog),
+            ("bold", Undeclared::Store),
+        ] {
+            let ctx = FileContext {
+                suffix: Some(suffix),
+                ..Default::default()
+            };
+            assert_eq!(
+                ing.undeclared_for("sidecars", &ctx),
+                want,
+                "suffix {suffix}"
+            );
+        }
+        // The static policy stays `Store`, so the table still gets its `other_data`
+        // column — the scoped form must not change the table's shape.
+        assert_eq!(ing.undeclared("sidecars"), Undeclared::Store);
+    }
+
     /// A later fragment touching one field of a shared table must not drop the others.
     /// `tables.extend` used to replace the whole `TablePolicy`, silently losing an
     /// earlier fragment's `concepts`/`ordered`.
@@ -316,11 +395,13 @@ mod tests {
         let ing = Ingestion::from_sources(&[
             r#"{
                 "IngestionSchemaVersion": "0.1.0",
-                "tables": { "t": { "concepts": ["sub"], "ordered": false } }
+                "tables": { "t": { "concepts": ["sub"], "ordered": false,
+                    "undeclaredWhen": [{ "selectors": ["suffix == \"a\""], "undeclared": "catalog" }] } }
             }"#,
             r#"{
                 "IngestionSchemaVersion": "0.1.0",
-                "tables": { "t": { "undeclared": "catalog" } }
+                "tables": { "t": { "undeclared": "catalog",
+                    "undeclaredWhen": [{ "selectors": ["suffix == \"b\""], "undeclared": "store" }] } }
             }"#,
         ])
         .expect("fragments load");
@@ -328,5 +409,13 @@ mod tests {
         assert_eq!(ing.materialized_concepts("t"), ["sub"], "concepts survive");
         assert!(!ing.ordered("t"), "ordered survives");
         assert_eq!(ing.undeclared("t"), Undeclared::Catalog, "later field wins");
+        // Both fragments' scoped entries are live, in declaration order.
+        for (suffix, want) in [("a", Undeclared::Catalog), ("b", Undeclared::Store)] {
+            let ctx = FileContext {
+                suffix: Some(suffix),
+                ..Default::default()
+            };
+            assert_eq!(ing.undeclared_for("t", &ctx), want, "suffix {suffix}");
+        }
     }
 }

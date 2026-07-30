@@ -715,6 +715,17 @@ impl BidsParser {
     /// columns). `None` when `merged` is empty. Collected and bulk-inserted via the
     /// Appender (`sidecars` is very wide and carries the generated columns, so a
     /// per-row INSERT is especially slow).
+    ///
+    /// When the ingestion policy scopes `undeclared: catalog` onto this file, only the
+    /// fields with dedicated columns are kept — the sidecar on disk stays the record of
+    /// the rest. fMRIPrep's `desc-confounds_timeseries.json` is the case that motivates
+    /// it: a 366 KB column dictionary describing ~2,200 confound regressors, one per
+    /// BOLD run, and 100% of the sidecar JSON bytes in a real derivatives catalog.
+    ///
+    /// The filter has to happen *here*, on the flatten loop, not by dropping the
+    /// `other_data` insert below: [`Schema::row_values`] treats `other_data` as one of
+    /// its own `schema_keys`, so it discards the map passed here and recomputes the
+    /// column from these flattened top-level keys. Removing that insert is a no-op.
     fn build_sidecar_row(
         &self,
         dataset_id: &str,
@@ -733,12 +744,34 @@ impl BidsParser {
             "file_path".to_string(),
             Value::String(file_path.to_string()),
         );
+
+        let (suffix, extension) = split_suffix_ext(file_path);
+        let datatype = self.datatype_dir_in_path(file_path);
+        // BIDS selector paths are dataset-relative with a leading slash.
+        let path_with_slash = format!("/{file_path}");
+        let sidecar = Value::Null;
+        let keep_undeclared = self.schema.ingestion().undeclared_for(
+            "sidecars",
+            &FileContext {
+                path: &path_with_slash,
+                datatype: datatype.as_deref(),
+                suffix: Some(&suffix),
+                extension: Some(&extension),
+                sidecar: &sidecar,
+                dataset_type: self.dataset_type.as_deref(),
+            },
+        ) == Undeclared::Store;
+
         // Flatten metadata into top-level fields for known columns (borrowing
         // `merged`), then move the whole map into `other_data` — no clone.
         for (k, v) in &merged {
-            sidecar_entry.insert(k.clone(), v.clone());
+            if keep_undeclared || self.schema.declares("sidecars", k) {
+                sidecar_entry.insert(k.clone(), v.clone());
+            }
         }
-        sidecar_entry.insert("other_data".to_string(), Value::Object(merged));
+        if keep_undeclared {
+            sidecar_entry.insert("other_data".to_string(), Value::Object(merged));
+        }
         Some(Value::Object(sidecar_entry))
     }
 

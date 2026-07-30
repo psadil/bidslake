@@ -224,6 +224,14 @@ impl Schema {
         self.table_columns.insert(table.to_string(), fields);
     }
 
+    /// Whether `table` has a dedicated column for the source field `key`, matched
+    /// case-insensitively (see [`Self::table_keys_lower`]).
+    pub fn declares(&self, table: &str, key: &str) -> bool {
+        self.table_keys_lower
+            .get(table)
+            .is_some_and(|keys| keys.contains(&key.to_lowercase()))
+    }
+
     /// Build the `INSERT ... SELECT ... [WHERE NOT EXISTS ...]` statement for a
     /// table from its column and primary-key metadata.
     fn build_insert_sql(&self, table_name: &str) -> Option<String> {

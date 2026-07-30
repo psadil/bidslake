@@ -76,8 +76,26 @@
               "description": "Do not store undeclared columns. The file is NOT parsed away — it stays on disk and stays in `tabular_files`, whose `file_path` is the authoritative record of its full column set, and the names encountered are collected into `tabular_undeclared_columns`. For sources whose undeclared columns dwarf the declared ones (fMRIPrep confounds carry ~1,800 columns against ~13 declared)."
             }
           ]
+        },
+        "undeclaredWhen": {
+          "type": "array",
+          "description": "Per-file `undeclared` policy, for tables that hold more than one class of file — `sidecars` above all, which is one table for every file in the catalog, so a table-wide flag would strip custom metadata from all raw BIDS to reach one derivative's sidecars. First matching entry wins; falls back to `undeclared`, then to `store`. Does not affect the table's shape: a table scoping its policy per file still gets an `other_data` column, since some of its files will fill it.",
+          "items": { "$ref": "#/$defs/scopedUndeclared" }
         }
       },
+      "additionalProperties": false
+    },
+    "scopedUndeclared": {
+      "type": "object",
+      "properties": {
+        "selectors": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "BIDS selector expressions over the file's projected concepts; all must pass for this policy to apply."
+        },
+        "undeclared": { "$ref": "#/$defs/tablePolicy/properties/undeclared" }
+      },
+      "required": ["selectors", "undeclared"],
       "additionalProperties": false
     }
   }
