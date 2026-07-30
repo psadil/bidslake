@@ -177,6 +177,29 @@ CREATE TABLE IF NOT EXISTS tabular_files (
 );
 ";
 
+// The column names a table saw but does not declare — one row per distinct name,
+// per table, for the whole catalog.
+//
+// Only populated for tables whose ingestion policy is `undeclared: catalog`, where
+// the names are otherwise nowhere in the database. It answers "what confound
+// regressors does this catalog's data contain?" without opening a file; the
+// authoritative per-file column set remains the file's own header, reachable via
+// `tabular_files.file_path`.
+//
+// Deliberately keyed by name rather than by file or by header signature. Measured on
+// real fMRIPrep output, 48 confounds files produce 38 *distinct* headers (the aCompCor
+// component count varies per run) at ~27.7 KB each, so a per-header manifest projects
+// to ~8.3 GB at 100k participants. The names themselves are drawn from one shared
+// space: 1,864 distinct across that whole corpus, 27.3 KB total, and bounded by the
+// pipeline's vocabulary rather than by dataset size.
+pub const CREATE_TABULAR_UNDECLARED_COLUMNS_TABLE: &str = "
+CREATE TABLE IF NOT EXISTS tabular_undeclared_columns (
+    table_name TEXT,
+    name TEXT,
+    PRIMARY KEY (table_name, name)
+);
+";
+
 // One row per diffusion volume, matching the row-per-sample shape of every other
 // tabular table. `file_path` is the diffusion NIfTI; `volume_idx` is the 0-based
 // position of the volume, and (bval, bvec_x/y/z) are that volume's scalar

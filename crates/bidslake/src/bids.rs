@@ -1746,7 +1746,7 @@ impl BidsParser {
         // (`Ingestion::ordered`); see bids-2-devel#98.
         let preserve_order = self.schema.ingestion().ordered(&spec.table);
         let store_undeclared = self.schema.ingestion().undeclared(&spec.table) == Undeclared::Store;
-        let sql = build_tabular_insert_sql(
+        let (sql, undeclared) = build_tabular_insert_sql(
             spec,
             &source,
             rel_path,
@@ -1757,6 +1757,9 @@ impl BidsParser {
             preserve_order,
             store_undeclared,
         );
+        if !store_undeclared {
+            db.record_undeclared_columns(&spec.table, &undeclared)?;
+        }
         // A single malformed TSV must not abort the whole dataset's ingest — log
         // and move on (the file is still recorded in `tabular_files`, with 0 rows).
         match db.conn.execute(&sql, []) {
@@ -1838,7 +1841,7 @@ impl BidsParser {
             let preserve_order = self.schema.ingestion().ordered(&spec.table);
             let store_undeclared =
                 self.schema.ingestion().undeclared(&spec.table) == Undeclared::Store;
-            let select = build_tabular_batch_select(
+            let (select, undeclared) = build_tabular_batch_select(
                 spec,
                 &dataset_id,
                 &files,
@@ -1846,6 +1849,14 @@ impl BidsParser {
                 preserve_order,
                 store_undeclared,
             );
+            if !store_undeclared
+                && let Err(e) = db.record_undeclared_columns(&spec.table, &undeclared)
+            {
+                eprintln!(
+                    "Warning: recording undeclared columns for {}: {e}",
+                    spec.table
+                );
+            }
             let sql = format!("INSERT INTO {} BY NAME {select}", spec.table);
             // A batch-INSERT execution failure (e.g. an IO/read error) drops this
             // group's rows for the run — record its members as `failed` so the
@@ -2065,7 +2076,7 @@ impl BidsParser {
         // Recordings are positional (row N is sample N), so preserve line order.
         let preserve_order = self.schema.ingestion().ordered(&spec.table);
         let store_undeclared = self.schema.ingestion().undeclared(&spec.table) == Undeclared::Store;
-        let sql = build_tabular_insert_sql(
+        let (sql, undeclared) = build_tabular_insert_sql(
             &spec,
             &source,
             &rec.rel_path,
@@ -2076,6 +2087,9 @@ impl BidsParser {
             preserve_order,
             store_undeclared,
         );
+        if !store_undeclared {
+            db.record_undeclared_columns(&spec.table, &undeclared)?;
+        }
         match db.conn.execute(&sql, []) {
             Ok(n) => Ok((Some(table.to_string()), n as i64)),
             Err(e) => {
@@ -2454,7 +2468,7 @@ fn build_tabular_insert_sql(
     read_opts: &str,
     preserve_order: bool,
     store_undeclared: bool,
-) -> String {
+) -> (String, Vec<String>) {
     let present: HashSet<&str> = sniffed.iter().map(|s| s.as_str()).collect();
     let mut selects: Vec<String> = vec![format!("{} AS dataset_id", sql_lit(dataset_id))];
     // TSV headers consumed structurally (become a key/path, not a data column and
@@ -2531,18 +2545,15 @@ fn build_tabular_insert_sql(
     // Everything else → other_data JSON (in file order). An empty name (a trailing
     // tab in the header) is dropped: it would emit `json_object('', "")`, whose
     // zero-length delimited identifier is a parser error that drops the whole file.
-    // Under `undeclared: catalog` the table has no `other_data` column at all, so the
-    // extras are not selected — the file on disk is the record of them.
-    let extras: Vec<&str> = if store_undeclared {
-        sniffed
-            .iter()
-            .map(|s| s.as_str())
-            .filter(|c| !c.is_empty() && !structural.contains(c) && !known.contains(c))
-            .collect()
-    } else {
-        Vec::new()
-    };
-    if !extras.is_empty() {
+    // Under `undeclared: catalog` the table has no `other_data` column, so these are
+    // not projected — the file on disk is the record of them — but they are still
+    // computed, so the caller can record their names (see `build_tabular_batch_select`).
+    let extras: Vec<&str> = sniffed
+        .iter()
+        .map(|s| s.as_str())
+        .filter(|c| !c.is_empty() && !structural.contains(c) && !known.contains(c))
+        .collect();
+    if store_undeclared && !extras.is_empty() {
         let pairs: Vec<String> = extras
             .iter()
             .map(|c| format!("{}, {}", sql_lit(c), quote_ident(c)))
@@ -2566,12 +2577,13 @@ fn build_tabular_insert_sql(
     } else {
         ""
     };
-    format!(
+    let sql = format!(
         "{verb} INTO {} BY NAME SELECT {} FROM read_csv({}, {read_opts}{sequential})",
         spec.table,
         selects.join(", "),
         sql_lit(source),
-    )
+    );
+    (sql, extras.into_iter().map(str::to_string).collect())
 }
 
 /// Build the batched `SELECT` for a group of per-row tabular files that share a
@@ -2604,7 +2616,7 @@ fn build_tabular_batch_select(
     columns: &[String],
     preserve_order: bool,
     store_undeclared: bool,
-) -> String {
+) -> (String, Vec<String>) {
     let present: HashSet<&str> = columns.iter().map(|s| s.as_str()).collect();
 
     let row_idx = if preserve_order {
@@ -2635,18 +2647,16 @@ fn build_tabular_batch_select(
 
     // Everything else → other_data JSON. Identical column set across the group, so
     // these are exactly each file's real extras. Empty names are dropped for the same
-    // reason as in `build_tabular_insert_sql`, and `store_undeclared` has the same
-    // meaning: under `undeclared: catalog` there is no `other_data` column to fill.
-    let extras: Vec<&str> = if store_undeclared {
-        columns
-            .iter()
-            .map(|s| s.as_str())
-            .filter(|c| !c.is_empty() && !known.contains(c) && *c != "filename")
-            .collect()
-    } else {
-        Vec::new()
-    };
-    if !extras.is_empty() {
+    // reason as in `build_tabular_insert_sql`. Computed even when they will not be
+    // projected, because the caller records the names in
+    // `tabular_undeclared_columns` — deriving both from this one list is what keeps
+    // "what we dropped" and "what we recorded dropping" in agreement.
+    let extras: Vec<&str> = columns
+        .iter()
+        .map(|s| s.as_str())
+        .filter(|c| !c.is_empty() && !known.contains(c) && *c != "filename")
+        .collect();
+    if store_undeclared && !extras.is_empty() {
         let pairs: Vec<String> = extras
             .iter()
             .map(|c| format!("{}, raw.{}", sql_lit(c), quote_ident(c)))
@@ -2677,11 +2687,12 @@ fn build_tabular_batch_select(
         format!("read_csv([{locals}], {HEADER_READ_OPTS}, filename=true) AS raw")
     };
 
-    format!(
+    let sql = format!(
         "SELECT {selects} FROM {from} \
          JOIN (VALUES {map_values}) AS m(abs, rel) ON raw.filename = m.abs",
         selects = selects.join(", "),
-    )
+    );
+    (sql, extras.into_iter().map(str::to_string).collect())
 }
 
 /// Parse a TSV file's header from its first line — read in Rust (via
@@ -2885,6 +2896,7 @@ mod tests {
                 preserve,
                 true,
             )
+            .0
         };
 
         // Positional per-row table → sequential read + a row_idx.
@@ -2926,7 +2938,7 @@ mod tests {
             .collect();
 
         for store in [true, false] {
-            let single = build_tabular_insert_sql(
+            let (single, dropped_single) = build_tabular_insert_sql(
                 &spec,
                 "/t/f.tsv",
                 "sub-01/func/f.tsv",
@@ -2937,7 +2949,7 @@ mod tests {
                 true,
                 store,
             );
-            let batched = build_tabular_batch_select(
+            let (batched, dropped_batched) = build_tabular_batch_select(
                 &spec,
                 "ds",
                 &[("/t/f.tsv", "sub-01/func/f.tsv")],
@@ -2945,6 +2957,11 @@ mod tests {
                 true,
                 store,
             );
+            // The undeclared names are reported either way — that is what the caller
+            // records in `tabular_undeclared_columns` when it is not storing them.
+            for names in [&dropped_single, &dropped_batched] {
+                assert_eq!(names, &["a_comp_cor_00".to_string()]);
+            }
             for (which, sql) in [("single-file", &single), ("batched", &batched)] {
                 assert_eq!(
                     sql.contains("other_data"),

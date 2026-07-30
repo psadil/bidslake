@@ -250,6 +250,24 @@ async fn undeclared_catalog_drops_the_overflow_column() -> anyhow::Result<()> {
         |r| r.get(0),
     )?;
     assert_eq!(status, "ingested");
+
+    // The name of what was not stored is recorded, so a user can discover it without
+    // opening the file — losslessness by reference, cheaply.
+    let names: Vec<String> = db
+        .conn
+        .prepare("SELECT name FROM tabular_undeclared_columns WHERE table_name = ?")?
+        .query_map(["fmriprep_confounds"], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+    assert_eq!(names, ["a_comp_cor_00"]);
+
+    // Declared columns never appear there — it records what is *missing* from the
+    // catalog, not the header.
+    let has_declared: bool = db.conn.query_row(
+        "SELECT count(*) > 0 FROM tabular_undeclared_columns WHERE name = 'trans_x'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert!(!has_declared);
     Ok(())
 }
 
