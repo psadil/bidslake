@@ -633,10 +633,11 @@ impl BidsParser {
                     Value::String(img_file.file_path.clone()),
                 );
 
-                // `filename` has no dedicated column, so it lands in `other_data`.
-                if let Some(filename) = img_file.file_path.split('/').next_back() {
-                    scan_data.insert("filename".to_string(), Value::String(filename.to_string()));
-                }
+                // No `filename` key: it is structural, not data. The `scans.tsv` path
+                // consumes it into `file_path` (see `structural` in
+                // `build_tabular_insert_sql`) rather than storing it, and an
+                // auto-generated row must agree — otherwise every row carries an
+                // `other_data` blob duplicating the tail of `file_path`.
                 scan_rows.push(Value::Object(scan_data));
             }
 
@@ -2481,11 +2482,13 @@ fn build_tabular_insert_sql(
         }
     }
 
-    // Everything else → other_data JSON (in file order).
+    // Everything else → other_data JSON (in file order). An empty name (a trailing
+    // tab in the header) is dropped: it would emit `json_object('', "")`, whose
+    // zero-length delimited identifier is a parser error that drops the whole file.
     let extras: Vec<&str> = sniffed
         .iter()
         .map(|s| s.as_str())
-        .filter(|c| !structural.contains(c) && !known.contains(c))
+        .filter(|c| !c.is_empty() && !structural.contains(c) && !known.contains(c))
         .collect();
     if !extras.is_empty() {
         let pairs: Vec<String> = extras
@@ -2578,11 +2581,12 @@ fn build_tabular_batch_select(
     }
 
     // Everything else → other_data JSON. Identical column set across the group, so
-    // these are exactly each file's real extras.
+    // these are exactly each file's real extras. Empty names are dropped for the same
+    // reason as in `build_tabular_insert_sql`.
     let extras: Vec<&str> = columns
         .iter()
         .map(|s| s.as_str())
-        .filter(|c| !known.contains(c) && *c != "filename")
+        .filter(|c| !c.is_empty() && !known.contains(c) && *c != "filename")
         .collect();
     if !extras.is_empty() {
         let pairs: Vec<String> = extras

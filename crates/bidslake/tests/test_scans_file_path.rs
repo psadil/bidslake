@@ -87,27 +87,25 @@ async fn test_scans_file_path_with_root_uri() -> Result<()> {
         assert!(full_path.exists(), "File should exist at: {:?}", full_path);
     }
 
-    // Verify that file_path is NOT in other_data
-    let other_data_json: Option<String> =
-        db.conn
-            .query_row("SELECT other_data::VARCHAR FROM scans LIMIT 1", [], |r| {
-                r.get(0)
-            })?;
-
-    if let Some(json_str) = other_data_json {
-        let json: serde_json::Value = serde_json::from_str(&json_str)?;
-        if let Some(obj) = json.as_object() {
-            assert!(
-                !obj.contains_key("file_path"),
-                "file_path should NOT appear in other_data column"
-            );
-            assert!(
-                !obj.contains_key("dataset_id"),
-                "dataset_id should NOT appear in other_data column"
-            );
-            println!("✓ file_path and dataset_id correctly excluded from other_data");
-        }
-    }
+    // This dataset ships no `scans.tsv`, so every `scans` row is auto-generated and
+    // carries no source fields at all — `other_data` must be NULL, not merely free of
+    // the structural keys. Asserting NULL (rather than inspecting the JSON only when
+    // present) is what keeps this test from passing vacuously: `filename` used to be
+    // written here, duplicating the tail of `file_path` on every row.
+    let non_null: i64 = db.conn.query_row(
+        "SELECT count(*) FROM scans WHERE other_data IS NOT NULL",
+        [],
+        |r| r.get(0),
+    )?;
+    let total: i64 = db
+        .conn
+        .query_row("SELECT count(*) FROM scans", [], |r| r.get(0))?;
+    assert!(total > 0, "expected at least one auto-generated scans row");
+    assert_eq!(
+        non_null, 0,
+        "auto-generated scans rows must leave other_data NULL \
+         (structural keys like `filename` are consumed into file_path, not stored)"
+    );
 
     Ok(())
 }

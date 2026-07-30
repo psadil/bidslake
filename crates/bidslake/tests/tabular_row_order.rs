@@ -24,7 +24,7 @@
 mod common;
 
 use bidslake::db::BidsDb;
-use common::{bids_example, ingest, walk_tabular};
+use common::{bids_example, count, ingest, walk_tabular};
 use std::path::Path;
 
 /// Parse a raw TSV: `(header, data_rows)`, each row split on tab.
@@ -136,6 +136,65 @@ async fn ds001_batched_events_and_other_data() -> anyhow::Result<()> {
     )?;
     assert!(has_extra, "non-schema column must be in other_data");
     assert!(!has_onset, "schema column must not be in other_data");
+    Ok(())
+}
+
+/// A header with a trailing tab yields an empty-string column name. Left in the
+/// `other_data` extras it emits `json_object('', raw."")`, whose zero-length
+/// delimited identifier is a DuckDB parser error — and because the batched path has
+/// no per-file fallback, that error drops every file in the group. Real datasets do
+/// ship such headers, so both SQL builders filter empty names out.
+///
+/// Two files with the same trailing-tab header so this exercises the *batched* path
+/// (a lone file would fall to the single-file builder).
+#[tokio::test]
+async fn trailing_tab_header_still_ingests() -> anyhow::Result<()> {
+    let dir = tempfile::TempDir::new()?;
+    let root = dir.path();
+    std::fs::write(
+        root.join("dataset_description.json"),
+        r#"{"Name": "trailing tab", "BIDSVersion": "1.8.0"}"#,
+    )?;
+    let func = root.join("sub-01/func");
+    std::fs::create_dir_all(&func)?;
+    for run in ["01", "02"] {
+        std::fs::write(
+            func.join(format!("sub-01_task-t_run-{run}_bold.nii.gz")),
+            b"fake",
+        )?;
+        // Note the trailing tab on the header line, and the extra `custom` column.
+        std::fs::write(
+            func.join(format!("sub-01_task-t_run-{run}_events.tsv")),
+            "onset\tduration\tcustom\t\n1.0\t0.5\tx\t\n2.0\t0.5\ty\t\n",
+        )?;
+    }
+
+    let db = ingest(root).await?;
+
+    let (n, failed): (i64, i64) = db.conn.query_row(
+        "SELECT count(*), count(*) FILTER (WHERE status = 'failed') FROM tabular_files \
+         WHERE file_path LIKE '%_events.tsv'",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    assert_eq!(n, 2, "both events files must be recorded");
+    assert_eq!(failed, 0, "a trailing-tab header must not fail the batch");
+    assert_eq!(
+        count(&db, "events")?,
+        4,
+        "both files' rows must land (2 rows each)"
+    );
+
+    // The real extra column still reaches other_data; the empty name does not.
+    let (has_custom, has_empty): (bool, bool) = db.conn.query_row(
+        "SELECT list_contains(json_keys(other_data), 'custom'), \
+                list_contains(json_keys(other_data), '') \
+         FROM events LIMIT 1",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    assert!(has_custom, "genuine extra column must be in other_data");
+    assert!(!has_empty, "empty column name must not be in other_data");
     Ok(())
 }
 

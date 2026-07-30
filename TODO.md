@@ -82,7 +82,10 @@ accessors; and the opt-in `python -m bidslake.stubgen`. Remaining follow-ups:
 - [ ] **Consider filtering `bidslake_*` meta tables** from the generated `COLUMNS`/`C` typed surface
   (they are internal provenance tables; `bidslake_meta`/`bidslake_schema` currently appear there).
 
-- [ ] **Batched-insert crash on empty header columns** (pre-existing, unrelated to overlays). A TSV
-  with a trailing tab (an empty-string column name) makes the batched insert emit
-  `json_object('', raw."")`, a "zero-length delimited identifier" parser error that drops the file
-  (seen as a warning on `ds001` events). The single-file path tolerates it; harden the batched path.
+- [x] **Batched-insert crash on empty header columns** (pre-existing, unrelated to overlays). A TSV
+  with a trailing tab (an empty-string column name) made the batched insert emit
+  `json_object('', raw."")`, a "zero-length delimited identifier" parser error that dropped the
+  file — and, since the batched path has no per-file fallback, every other file in its header group
+  too. Both SQL builders now filter empty column names out of the `other_data` extras. Regression
+  test: `tabular_row_order::trailing_tab_header_still_ingests` (the vendored `ds001` no longer
+  carries such a header, so the test ships its own fixture).
