@@ -63,6 +63,19 @@
         "ordered": {
           "type": "boolean",
           "description": "Whether the source row order is load-bearing and must be preserved (rows read sequentially). When false, rows carry no meaningful order and may be read in parallel. Follows the BIDS row-order proposal (bids-standard/bids-2-devel#98); consumers sort by a canonical column (e.g. `onset`) when needed, so no sort column is specified."
+        },
+        "undeclared": {
+          "description": "What this table does with source columns the schema does not declare. Table-wide, so it decides the table's shape: a `catalog` table has no `other_data` column at all. For a table holding more than one class of file, scope the policy with `undeclaredWhen` instead.",
+          "oneOf": [
+            {
+              "const": "store",
+              "description": "Preserve undeclared columns verbatim in the table's `other_data` JSON column. The default, and what every BIDS table does."
+            },
+            {
+              "const": "catalog",
+              "description": "Do not store undeclared columns. The file is NOT parsed away — it stays on disk and stays in `tabular_files`, whose `file_path` is the authoritative record of its full column set, and the names encountered are collected into `tabular_undeclared_columns`. For sources whose undeclared columns dwarf the declared ones (fMRIPrep confounds carry ~1,800 columns against ~13 declared)."
+            }
+          ]
         }
       },
       "additionalProperties": false

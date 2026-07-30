@@ -39,7 +39,7 @@
 //! The static tables `diffusion` and `file_associations` live in the parent
 //! [`crate::schema`] module, not here.
 
-use super::ingestion::Ingestion;
+use super::ingestion::{Ingestion, Undeclared};
 use super::tabular::{RowIdentity, TableSpec, Tabular};
 use duckdb::{Connection, Result};
 use serde_json::Value;
@@ -363,13 +363,19 @@ impl Schema {
             fields.push((c.name.clone(), c.sql_type.clone(), c.name.clone()));
         }
 
-        // Overflow for any header without a dedicated column.
-        columns.push("other_data JSON".to_string());
-        fields.push((
-            "other_data".to_string(),
-            "JSON".to_string(),
-            "other_data".to_string(),
-        ));
+        // Overflow for any header without a dedicated column — unless the ingestion
+        // policy declares this table's undeclared columns cataloged, in which case the
+        // column is omitted outright. Omitting it (rather than leaving it NULL) is what
+        // makes `row_values` drop those keys for free: it iterates `table_columns`, so
+        // with no `other_data` field there is no branch to populate.
+        if self.ingestion.undeclared(&spec.table) == Undeclared::Store {
+            columns.push("other_data JSON".to_string());
+            fields.push((
+                "other_data".to_string(),
+                "JSON".to_string(),
+                "other_data".to_string(),
+            ));
+        }
 
         // Virtual BIDS-concept columns (derived from file_path) for file-based
         // tables, computed on read and never written.

@@ -30,7 +30,7 @@ use crate::links;
 use crate::readers::{self, ContentReader};
 use crate::schema::Schema;
 use crate::schema::dynamic::{quote_ident, sql_in_list, sql_lit};
-use crate::schema::ingestion::Disposition;
+use crate::schema::ingestion::{Disposition, Undeclared};
 use crate::schema::tabular::{ColumnSpec, FileContext, RowIdentity, TableSpec};
 use anyhow::{Context, Result};
 use bids_core::entities::read_entities;
@@ -1712,6 +1712,7 @@ impl BidsParser {
         // faithful row number; the ordering policy lives in the ingestion schema
         // (`Ingestion::ordered`); see bids-2-devel#98.
         let preserve_order = self.schema.ingestion().ordered(&spec.table);
+        let store_undeclared = self.schema.ingestion().undeclared(&spec.table) == Undeclared::Store;
         let sql = build_tabular_insert_sql(
             spec,
             &source,
@@ -1721,6 +1722,7 @@ impl BidsParser {
             &sniffed,
             HEADER_READ_OPTS,
             preserve_order,
+            store_undeclared,
         );
         // A single malformed TSV must not abort the whole dataset's ingest — log
         // and move on (the file is still recorded in `tabular_files`, with 0 rows).
@@ -1801,8 +1803,16 @@ impl BidsParser {
             // ingestion schema (`Ingestion::ordered`);
             // see https://github.com/bids-standard/bids-2-devel/issues/98.
             let preserve_order = self.schema.ingestion().ordered(&spec.table);
-            let select =
-                build_tabular_batch_select(spec, &dataset_id, &files, columns, preserve_order);
+            let store_undeclared =
+                self.schema.ingestion().undeclared(&spec.table) == Undeclared::Store;
+            let select = build_tabular_batch_select(
+                spec,
+                &dataset_id,
+                &files,
+                columns,
+                preserve_order,
+                store_undeclared,
+            );
             let sql = format!("INSERT INTO {} BY NAME {select}", spec.table);
             // A batch-INSERT execution failure (e.g. an IO/read error) drops this
             // group's rows for the run — record its members as `failed` so the
@@ -2021,6 +2031,7 @@ impl BidsParser {
         let sub = rec.entities.get("sub").map(|s| s.as_str());
         // Recordings are positional (row N is sample N), so preserve line order.
         let preserve_order = self.schema.ingestion().ordered(&spec.table);
+        let store_undeclared = self.schema.ingestion().undeclared(&spec.table) == Undeclared::Store;
         let sql = build_tabular_insert_sql(
             &spec,
             &source,
@@ -2030,6 +2041,7 @@ impl BidsParser {
             &colnames,
             &read_opts,
             preserve_order,
+            store_undeclared,
         );
         match db.conn.execute(&sql, []) {
             Ok(n) => Ok((Some(table.to_string()), n as i64)),
@@ -2408,6 +2420,7 @@ fn build_tabular_insert_sql(
     sniffed: &[String],
     read_opts: &str,
     preserve_order: bool,
+    store_undeclared: bool,
 ) -> String {
     let present: HashSet<&str> = sniffed.iter().map(|s| s.as_str()).collect();
     let mut selects: Vec<String> = vec![format!("{} AS dataset_id", sql_lit(dataset_id))];
@@ -2485,11 +2498,17 @@ fn build_tabular_insert_sql(
     // Everything else → other_data JSON (in file order). An empty name (a trailing
     // tab in the header) is dropped: it would emit `json_object('', "")`, whose
     // zero-length delimited identifier is a parser error that drops the whole file.
-    let extras: Vec<&str> = sniffed
-        .iter()
-        .map(|s| s.as_str())
-        .filter(|c| !c.is_empty() && !structural.contains(c) && !known.contains(c))
-        .collect();
+    // Under `undeclared: catalog` the table has no `other_data` column at all, so the
+    // extras are not selected — the file on disk is the record of them.
+    let extras: Vec<&str> = if store_undeclared {
+        sniffed
+            .iter()
+            .map(|s| s.as_str())
+            .filter(|c| !c.is_empty() && !structural.contains(c) && !known.contains(c))
+            .collect()
+    } else {
+        Vec::new()
+    };
     if !extras.is_empty() {
         let pairs: Vec<String> = extras
             .iter()
@@ -2551,6 +2570,7 @@ fn build_tabular_batch_select(
     files: &[(&str, &str)],
     columns: &[String],
     preserve_order: bool,
+    store_undeclared: bool,
 ) -> String {
     let present: HashSet<&str> = columns.iter().map(|s| s.as_str()).collect();
 
@@ -2582,12 +2602,17 @@ fn build_tabular_batch_select(
 
     // Everything else → other_data JSON. Identical column set across the group, so
     // these are exactly each file's real extras. Empty names are dropped for the same
-    // reason as in `build_tabular_insert_sql`.
-    let extras: Vec<&str> = columns
-        .iter()
-        .map(|s| s.as_str())
-        .filter(|c| !c.is_empty() && !known.contains(c) && *c != "filename")
-        .collect();
+    // reason as in `build_tabular_insert_sql`, and `store_undeclared` has the same
+    // meaning: under `undeclared: catalog` there is no `other_data` column to fill.
+    let extras: Vec<&str> = if store_undeclared {
+        columns
+            .iter()
+            .map(|s| s.as_str())
+            .filter(|c| !c.is_empty() && !known.contains(c) && *c != "filename")
+            .collect()
+    } else {
+        Vec::new()
+    };
     if !extras.is_empty() {
         let pairs: Vec<String> = extras
             .iter()
@@ -2825,6 +2850,7 @@ mod tests {
                 &[],
                 HEADER_READ_OPTS,
                 preserve,
+                true,
             )
         };
 
@@ -2840,5 +2866,68 @@ mod tests {
         // PK tables carry no row_idx → never forced sequential, even with preserve_order.
         let pk = sql(&spec("participants", RowIdentity::PerEntity), true);
         assert!(!pk.contains("parallel=false"), "{pk}");
+    }
+
+    /// `store_undeclared` gates the `other_data` projection in *both* builders. The
+    /// declared columns must survive either way — this is a column policy, not a
+    /// read/skip policy: the file is still parsed, just not hoarded.
+    #[test]
+    fn store_undeclared_gates_other_data_in_both_builders() {
+        use super::{HEADER_READ_OPTS, build_tabular_batch_select, build_tabular_insert_sql};
+        use crate::schema::tabular::{ColumnSpec, RowIdentity, TableSpec};
+
+        let spec = TableSpec {
+            table: "confounds".to_string(),
+            columns: vec![ColumnSpec {
+                key: "trans_x__confounds".to_string(),
+                name: "trans_x".to_string(),
+                sql_type: "DOUBLE".to_string(),
+            }],
+            identity: RowIdentity::PerRow,
+            file_based: true,
+            rule_ids: Vec::new(),
+        };
+        let header: Vec<String> = ["trans_x", "a_comp_cor_00"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        for store in [true, false] {
+            let single = build_tabular_insert_sql(
+                &spec,
+                "/t/f.tsv",
+                "sub-01/func/f.tsv",
+                "ds",
+                None,
+                &header,
+                HEADER_READ_OPTS,
+                true,
+                store,
+            );
+            let batched = build_tabular_batch_select(
+                &spec,
+                "ds",
+                &[("/t/f.tsv", "sub-01/func/f.tsv")],
+                &header,
+                true,
+                store,
+            );
+            for (which, sql) in [("single-file", &single), ("batched", &batched)] {
+                assert_eq!(
+                    sql.contains("other_data"),
+                    store,
+                    "{which} builder with store_undeclared={store}: {sql}"
+                );
+                assert_eq!(
+                    sql.contains("a_comp_cor_00"),
+                    store,
+                    "{which}: the undeclared column itself must only appear when stored"
+                );
+                assert!(
+                    sql.contains("trans_x"),
+                    "{which}: declared columns are unaffected by the policy"
+                );
+            }
+        }
     }
 }
