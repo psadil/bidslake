@@ -65,3 +65,58 @@ async fn test_sidecar_deduplication() -> Result<()> {
     }
     Ok(())
 }
+
+/// DuckDB folds identifier case, so `sidecars` cannot carry two columns whose
+/// names differ only in case. BIDS declares exactly one such pair —
+/// `MISCChannelCount` (MEG) and `MiscChannelCount` (EEG/iEEG) — and the DDL keeps
+/// the first, so an EEG sidecar's `MiscChannelCount` has no column of its own
+/// spelling. Matching source keys exactly would strand it: missing from its
+/// column *and* treated as undeclared, i.e. demoted to `other_data`.
+///
+/// Benign while `other_data` preserves everything; silent data loss once a table
+/// declines to store undeclared columns. So the surviving column absorbs both
+/// spellings, as DuckDB does with the identifier itself.
+#[tokio::test]
+async fn case_variant_metadata_reaches_its_typed_column() -> Result<()> {
+    let dir = tempfile::TempDir::new()?;
+    let root = dir.path();
+    std::fs::write(
+        root.join("dataset_description.json"),
+        r#"{"Name": "case variants", "BIDSVersion": "1.8.0"}"#,
+    )?;
+    let eeg = root.join("sub-01/eeg");
+    std::fs::create_dir_all(&eeg)?;
+    std::fs::write(eeg.join("sub-01_task-t_eeg.edf"), b"fake")?;
+    // The EEG spelling — the one BIDS uses for auxiliary analog channels, and the
+    // one the case-insensitive DDL dedup drops.
+    std::fs::write(
+        eeg.join("sub-01_task-t_eeg.json"),
+        r#"{"MiscChannelCount": 7, "SomethingCustom": "keep me"}"#,
+    )?;
+
+    let db = ingest(root).await?;
+
+    let (count, other): (Option<i64>, Option<String>) = db.conn.query_row(
+        r#"SELECT "MISCChannelCount", other_data::VARCHAR FROM sidecars
+           WHERE file_path LIKE '%_eeg.edf'"#,
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+
+    assert_eq!(
+        count,
+        Some(7),
+        "MiscChannelCount must land in the surviving MISCChannelCount column"
+    );
+    let obj: serde_json::Value = serde_json::from_str(&other.unwrap_or_else(|| "{}".into()))?;
+    assert!(
+        obj.get("MiscChannelCount").is_none(),
+        "a declared field must not also sit in other_data: {obj}"
+    );
+    // The genuinely custom field is untouched — this is a case fix, not a filter.
+    assert_eq!(
+        obj.get("SomethingCustom").and_then(|v| v.as_str()),
+        Some("keep me")
+    );
+    Ok(())
+}

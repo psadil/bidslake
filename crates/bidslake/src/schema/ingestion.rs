@@ -10,9 +10,10 @@
 //!
 //! Rules select with the BIDS selector-expression language over projected concepts, reusing
 //! the same evaluator as [`Tabular::route`](super::tabular::Tabular::route). Per-table policy
-//! (`concepts` to materialize, row `ordered`ing) is declared for the data tables readers
-//! populate. Documents are validated against [`INGESTION_METASCHEMA_JSON`]. This model
-//! subsumes bidslake's previously-hardcoded `.tsv` gate, `.bval`/`.bvec` handling, and
+//! (`concepts` to materialize, row `ordered`ing, and whether columns the schema does not
+//! declare are stored — see [`Undeclared`]) is declared for the data tables readers populate.
+//! Documents are validated against [`INGESTION_METASCHEMA_JSON`]. This model subsumes
+//! bidslake's previously-hardcoded `.tsv` gate, `.bval`/`.bvec` handling, and
 //! recording/ordering rules.
 
 use std::collections::BTreeMap;
