@@ -283,10 +283,10 @@ class BidsLake:
             uri = self._resolve(dataset_id, file_path)
             yield BidsFile._from_row(dataset_id, file_path, uri, row, self)
 
-    def bind(self, binding: Binding) -> Iterator[Unit]:
+    def bind(self, binding: Binding) -> list[Unit]:
         """Resolve a :class:`~bidslake.binding.Binding` into units of work.
 
-        Yields one :class:`~bidslake.binding.Unit` per anchor file, each carrying its
+        Returns one :class:`~bidslake.binding.Unit` per anchor file, each carrying its
         resolved inputs and — rather than raising — a tuple of
         :class:`~bidslake.binding.Unresolved` entries for the inputs that did not
         match exactly one thing. Costs one query per declared input, not one per

@@ -73,7 +73,7 @@ mistake. Promote it once the shape stops moving; the trigger is recorded in
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -274,12 +274,17 @@ def _index_table(lake: BidsLake, name: str, spec: TableInput) -> dict[tuple[Any,
     return {key: part.select(list(spec.columns)) for key, part in parts.items()}
 
 
-def resolve(lake: BidsLake, binding: Binding) -> Iterator[Unit]:
-    """Resolve `binding` against `lake`, yielding one :class:`Unit` per anchor file.
+def resolve(lake: BidsLake, binding: Binding) -> list[Unit]:
+    """Resolve `binding` against `lake`, one :class:`Unit` per anchor file.
 
-    Eager: every query runs before the first unit is yielded. A study's worth of
-    units is small (hundreds of rows across a handful of inputs) and materializing
-    them is what makes the unresolved ones visible up front, which is the point.
+    Eager, and returns a `list` rather than a generator so that it *is*: a malformed
+    binding and every unresolved input surface when this is called, not on the first
+    iteration. That distinction is the whole point — "incomplete subjects are visible
+    before you submit anything" is not true of a generator nobody has started yet, and
+    a plan you can count and inspect is what makes it worth building.
+
+    A study's worth of units is small (hundreds of rows across a handful of inputs),
+    so materializing them costs nothing worth saving.
     """
     _check_columns(lake, binding.table, binding.key, "binding key")
     for name, spec in binding.inputs.items():
@@ -296,6 +301,7 @@ def resolve(lake: BidsLake, binding: Binding) -> Iterator[Unit]:
     file_index = {n: _index_files(lake, n, s) for n, s in file_specs.items()}
     table_index = {n: _index_table(lake, n, s) for n, s in table_specs.items()}
 
+    units: list[Unit] = []
     for anchor in lake.get(table=binding.table, **binding.anchor):
         key = tuple(anchor.entities.get(k) for k in binding.key)
         resolved: dict[str, UPath | DataFrame] = {}
@@ -318,10 +324,13 @@ def resolve(lake: BidsLake, binding: Binding) -> Iterator[Unit]:
             else:
                 resolved[name] = part
 
-        yield Unit(
-            key=key,
-            entities=anchor.entities,
-            anchor=anchor,
-            inputs=resolved,
-            unresolved=tuple(unresolved),
+        units.append(
+            Unit(
+                key=key,
+                entities=anchor.entities,
+                anchor=anchor,
+                inputs=resolved,
+                unresolved=tuple(unresolved),
+            )
         )
+    return units
