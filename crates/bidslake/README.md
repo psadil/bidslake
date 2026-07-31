@@ -111,4 +111,12 @@ What remains crude is the **criterion**. Two levers exist, at different granular
 
 In managed mode the likely answer for the whole-file case is the DuckLake split applied one level down: small tabular data stays in the catalog, while large continuous recordings are written to partitioned Parquet (or [Vortex](https://vortex.dev/)) files on disk and exposed as views, so SQL still sees one table.
 
+**Reclaiming space after a re-index.** Re-indexing a dataset deletes its rows and re-inserts them; DuckDB reuses the vacated blocks for later writes but never returns them to the OS, and `CHECKPOINT` does not shrink the file. A catalog that has been re-indexed a few times can be substantially holes — the one that motivated ADR 0004 was 28% free blocks, 478 MB of a 1.74 GB file. `bidslake compact` rewrites it:
+
+```bash
+bidslake compact -d study.duckdb
+```
+
+It preserves every table, row, key, constraint, and view, verifies per-table row counts before replacing the original, and reports what it reclaimed. An index run that leaves a substantial fraction free says so rather than waiting to be discovered. It is deliberately not automatic: a rewrite transiently needs twice the disk, and a first index has nothing to reclaim.
+
 **S3.** Ingesting a dataset straight from S3 works end-to-end: object listing and JSON metadata via the AWS SDK, `.tsv` contents streamed into DuckDB via the `httpfs` extension (`read_csv` opens `s3://` directly), and Rust-side reads (JSON sidecars, `.bval`/`.bvec`) issued concurrently to overlap network latency. Remaining gaps are minor: dataset-embedded overlay auto-discovery (`.bidslake/overlay.json`) is skipped for remote inputs, and the S3 integration tests are network-gated (`#[ignore]`, run with `cargo test --test s3_ingest -- --ignored`).

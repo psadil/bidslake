@@ -151,6 +151,7 @@
 //! ```
 
 pub mod bids;
+pub mod compact;
 pub mod db;
 pub mod fs;
 pub mod links;

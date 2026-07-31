@@ -122,6 +122,23 @@ enum Commands {
         to: String,
     },
 
+    /// Rewrite a catalog into a fresh file, reclaiming space that re-indexing left
+    /// behind.
+    ///
+    /// Re-indexing a dataset DELETEs its rows and re-inserts them; DuckDB reuses those
+    /// blocks for later writes but never returns them to the OS, and `CHECKPOINT` does
+    /// not shrink the file. Only a full rewrite does. A profiled catalog was 28% free
+    /// blocks — 478 MB of a 1.74 GB file.
+    Compact {
+        /// bidslake DuckDB database to compact
+        #[arg(short, long, default_value = "bidslake.duckdb")]
+        database: String,
+
+        /// Write here instead of replacing `database` in place.
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+
     /// Manage cross-dataset links in an existing catalog: co-derivatives that share a
     /// source, resolved at query time from each dataset's `SourceDatasets` (docs/adr/0003).
     Link {
@@ -247,6 +264,7 @@ async fn main() -> Result<()> {
                  See the README on managed mode. (database: {database}, to: {to})"
             )
         }
+        Commands::Compact { database, output } => run_compact(&database, output.as_deref()),
         Commands::Link { action } => run_link(action),
     }
 }
@@ -542,6 +560,59 @@ struct AdapterBundle {
     ingestion_provenance: Vec<(String, serde_json::Value)>,
 }
 
+/// Rewrite `database` into a fresh file, reclaiming blocks that re-indexing freed but
+/// DuckDB never returned to the OS.
+///
+/// Writes to a temporary sibling and renames over the original when `output` is absent,
+/// so an interrupted compaction leaves the catalog untouched rather than truncated.
+fn run_compact(database: &str, output: Option<&str>) -> Result<()> {
+    use anyhow::Context as _;
+
+    let src = std::path::Path::new(database);
+    if !src.is_file() {
+        anyhow::bail!("no database at {database}");
+    }
+    let in_place = output.is_none();
+    let dst_path = match output {
+        Some(path) => std::path::PathBuf::from(path),
+        // Alongside the original, so the rename is atomic (same filesystem).
+        None => src.with_extension("compact.tmp.duckdb"),
+    };
+    if dst_path.exists() {
+        anyhow::bail!("{} already exists", dst_path.display());
+    }
+
+    let stats =
+        bidslake::compact::compact(database, &dst_path.to_string_lossy()).inspect_err(|_| {
+            // A failed compaction must not leave a half-written file behind.
+            let _ = std::fs::remove_file(&dst_path);
+        })?;
+
+    if in_place {
+        std::fs::rename(&dst_path, src)
+            .with_context(|| format!("replacing {database} with the compacted copy"))?;
+    }
+
+    let pct = if stats.blocks_before > 0 {
+        100.0 * (stats.blocks_before - stats.blocks_after) as f64 / stats.blocks_before as f64
+    } else {
+        0.0
+    };
+    println!(
+        "Compacted {database}: {} tables, {} rows, {} -> {} blocks ({pct:.0}% smaller){}",
+        stats.tables,
+        stats.rows,
+        stats.blocks_before,
+        stats.blocks_after,
+        if in_place {
+            String::new()
+        } else {
+            format!(" -> {}", dst_path.display())
+        }
+    );
+    Ok(())
+}
+
 /// Every name that resolves as an adapter — the union of the three bundled
 /// registries, since an adapter need not carry all three artifacts.
 fn bundled_artifact_names() -> Vec<&'static str> {
@@ -719,9 +790,41 @@ async fn run_indexer(
         print_routing_summary(&db)?;
     } else {
         println!("Conversion complete!");
+        report_reclaimable_space(&db, &output);
     }
 
     Ok(())
+}
+
+/// Point out a catalog that is mostly holes, once the waste is worth a rewrite.
+///
+/// Re-indexing DELETEs a dataset's rows before re-inserting them, and DuckDB never
+/// returns the vacated blocks to the OS. A first index frees nothing, so this stays
+/// quiet until a re-index has actually churned — and the absolute floor keeps it quiet
+/// for a small catalog, where a large *fraction* is still not worth a rewrite.
+///
+/// Advisory, not automatic: compaction rewrites the whole file and transiently needs
+/// twice the disk, which is not something to do behind the user's back.
+fn report_reclaimable_space(db: &BidsDb, output: &str) {
+    const MIN_FREE_FRACTION: f64 = 0.20;
+    const MIN_FREE_MB: f64 = 64.0;
+
+    let Ok((total, free)) = bidslake::compact::free_block_ratio(&db.conn) else {
+        return;
+    };
+    if total == 0 {
+        return;
+    }
+    let block_mb = 0.25; // DuckDB's 256 KiB default
+    let free_mb = free as f64 * block_mb;
+    if (free as f64 / total as f64) < MIN_FREE_FRACTION || free_mb < MIN_FREE_MB {
+        return;
+    }
+    println!(
+        "Note: {free_mb:.0} MB of {output} ({:.0}%) is free blocks left by re-indexing. \
+         DuckDB does not return them to the OS; reclaim with `bidslake compact -d {output}`.",
+        100.0 * free as f64 / total as f64,
+    );
 }
 
 /// Report, for a dry run, how each tabular file was routed — a count by disposition
