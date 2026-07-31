@@ -171,6 +171,38 @@ class Unit:
             raise TypeError(msg)
         return to_local_path(str(value))
 
+    def frame(self, name: str) -> DataFrame:
+        """The rows of table input ``name``.
+
+        The counterpart of :meth:`local`. ``inputs`` is typed
+        ``UPath | DataFrame`` because a binding mixes both kinds, so reading a table
+        slice straight out of it hands a checker a union that will not satisfy a
+        ``DataFrame`` parameter. Narrowing here keeps that out of every call site.
+        """
+        value = self.inputs[name]
+        if not isinstance(value, DataFrame):
+            msg = f"input {name!r} is a file, not a table slice"
+            raise TypeError(msg)
+        return value
+
+    def entity(self, name: str) -> str:
+        """One of this unit's key entities, required to be present.
+
+        ``key`` and ``entities`` are both ``str | None``-valued, because an entity is
+        legitimately absent for a sessionless or single-run dataset. Where a caller
+        *requires* one — it is about to build a filename from it — this narrows and
+        fails loudly rather than letting a ``None`` reach a path join and produce
+        ``sub-None``.
+        """
+        value = self.entities.get(name)
+        if value is None:
+            msg = (
+                f"unit {self.key} has no {name!r}; it is absent for this dataset, so "
+                f"read it from `entities` and handle None if that is expected"
+            )
+            raise KeyError(msg)
+        return str(value)
+
     def __repr__(self) -> str:
         state = f", unresolved={len(self.unresolved)}" if self.unresolved else ""
         return f"Unit(key={self.key}{state})"

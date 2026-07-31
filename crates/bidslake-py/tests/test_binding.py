@@ -174,6 +174,42 @@ def test_local_gives_a_path_a_tool_can_open(lake) -> None:
     assert local.is_file(), "the returned path must actually exist on disk"
 
 
+def test_frame_narrows_a_table_slice(lake) -> None:
+    """`inputs` is `UPath | DataFrame`, which will not satisfy a `DataFrame` parameter.
+
+    Narrowing at the accessor keeps that out of every call site — the counterpart of
+    `local()` for the inputs that are not files.
+    """
+    binding = Binding(
+        anchor={**BOLD, "dataset_id": "ds001", "sub": "01", "run": "01"},
+        key=("sub", "ses", "task", "run"),
+        inputs={
+            "events": TableInput(join=("sub", "task", "run"), table="events", columns=("onset",))
+        },
+    )
+    unit = next(iter(lake.bind(binding)))
+    frame = unit.frame("events")
+    assert frame.columns == ["onset"]
+    # ...and the two accessors each refuse the other's kind, naming which is which.
+    with pytest.raises(TypeError, match="is a table slice, not a file"):
+        unit.local("events")
+
+
+def test_entity_requires_the_value_it_returns(lake) -> None:
+    """`sub-None` is the failure this prevents.
+
+    Entities are legitimately absent (a sessionless dataset has no `ses`), so `entities`
+    is `str | None`-valued. Where a caller is about to build a filename from one, it
+    should fail loudly rather than interpolate a None.
+    """
+    unit = next(iter(lake.bind(_ds001(sub="01", run="01"))))
+    assert unit.entity("sub") == "01"
+    # ds001 is sessionless, so `ses` really is absent.
+    assert unit.entities.get("ses") is None
+    with pytest.raises(KeyError, match="has no 'ses'"):
+        unit.entity("ses")
+
+
 def test_local_refuses_a_table_slice(lake) -> None:
     binding = Binding(
         anchor={**BOLD, "dataset_id": "ds001", "sub": "01", "run": "01"},
