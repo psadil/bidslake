@@ -12,13 +12,14 @@ from typing import Any, Unpack
 # Import the types by name: the `Table.pl`/`Table.lazy` methods would otherwise
 # shadow a `pl` module alias inside the class body's annotations.
 from polars import DataFrame, LazyFrame
+from upath import UPath
 
 from . import _bidslake
 from ._arrow import ipc_to_df
 from ._lazy import build_lazy
 from ._sql import quote_ident
 from .file import BidsFile
-from .paths import to_uri
+from .paths import to_upath, to_uri
 from .relations import Relation
 from .schema._generated import SCHEMA_VERSION, GetFilters
 
@@ -134,6 +135,33 @@ class BidsLake:
     def tables(self) -> list[str]:
         """Every base table and view in the database."""
         return self._lake.list_tables()
+
+    def resolve(self, dataset_id: str, file_path: str) -> UPath:
+        """One handle that opens the file a `(dataset_id, file_path)` pair names.
+
+        The same resolution :attr:`BidsFile.path` uses — honoring ``base_dir`` and
+        ``root_override`` — but for any row in any table, not just ``scans``.
+
+        Its main use is reading what the catalog deliberately did not store. A table
+        whose ingestion policy is ``undeclared: catalog`` keeps only the columns its
+        schema declares; the file on disk stays the record of the rest, and
+        ``tabular_files`` is the index of those files::
+
+            row = (lake.table("tabular_files").pl()
+                   .filter(pl.col("table_name") == "fmriprep_confounds")
+                   .row(0, named=True))
+            path = lake.resolve(row["dataset_id"], row["file_path"])
+            full = pl.read_csv(path.open("rb"), separator="\\t", null_values="n/a")
+            full.select("^a_comp_cor_.*$")   # the columns the catalog did not store
+
+        Read through ``.open()`` rather than ``str(path)``: a :class:`UPath` stringifies
+        back to a URI (scheme and all), and it is what keeps the recipe working for a
+        remote dataset.
+
+        To learn which names those are without touching disk, read
+        ``tabular_undeclared_columns``.
+        """
+        return to_upath(self._resolve(dataset_id, file_path))
 
     # -- cross-dataset links (docs/adr/0003) -------------------------------
 
@@ -355,6 +383,10 @@ class BidsLake:
         row = df.row(0, named=True)
         # `other_data` holds custom (non-schema) fields in original BIDS case; the
         # typed columns hold the schema fields (also BIDS-cased). Merge both.
+        # It is absent or NULL when the sidecar's ingestion policy is
+        # `undeclared: catalog` (fMRIPrep's confounds sidecars, say), in which case the
+        # merged metadata is the declared fields only and the file on disk holds the
+        # rest — `lake.resolve()` opens it.
         meta: dict[str, Any] = {}
         other = row.get("other_data")
         if other:

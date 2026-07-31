@@ -29,6 +29,40 @@ lake.files.pl()                      # scans + sidecar__*/participant__*/dataset
 lake.sql(t"SELECT count(*) FROM scans WHERE suffix = {suffix}")
 ```
 
+## Reading what the catalog did not store
+
+A catalog holds what its schema declares it holds. A table whose ingestion policy is
+`undeclared: catalog` keeps only its declared columns, and the file on disk stays the
+record of the rest — which is how fMRIPrep confounds stay tractable, since a single
+file has ~1,800 columns against the ~13 the schema names (see
+[ADR 0004](../../docs/adr/0004-undeclared-column-policy.md)).
+
+Nothing is unreachable. `tabular_files` indexes every tabular file the ingest saw, and
+`lake.resolve()` opens any of them:
+
+```python
+import polars as pl
+
+# What names exist but are not stored — no disk access.
+lake.table("tabular_undeclared_columns").pl()
+
+# And the values, from the file itself.
+row = (lake.table("tabular_files").pl()
+       .filter(pl.col("table_name") == "fmriprep_confounds")
+       .row(0, named=True))
+path = lake.resolve(row["dataset_id"], row["file_path"])
+full = pl.read_csv(path.open("rb"), separator="\t", null_values="n/a")
+full.select("^a_comp_cor_.*$")
+```
+
+`resolve()` uses the same root resolution as `BidsFile.path` (so `base_dir` and
+`root_override` apply) and returns a `UPath`. Read through `.open()` rather than
+`str(path)` — a `UPath` stringifies back to a URI, and `.open()` is what keeps this
+working for a remote dataset.
+
+To store one of those columns instead, declare it in the overlay: it then gets a typed
+column and costs 8 bytes a row. Declared-ness is the dial.
+
 ## Design
 
 - **Rust owns the connection.** The compiled extension (`bidslake._bidslake`,
