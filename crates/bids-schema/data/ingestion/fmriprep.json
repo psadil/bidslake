@@ -1,0 +1,14 @@
+{
+  "IngestionSchemaVersion": "0.1.0",
+  "tables": {
+    "fmriprep_confounds": { "undeclared": "catalog" },
+    "sidecars": {
+      "undeclaredWhen": [
+        {
+          "selectors": ["suffix == \"timeseries\"", "extension == \".json\""],
+          "undeclared": "catalog"
+        }
+      ]
+    }
+  }
+}

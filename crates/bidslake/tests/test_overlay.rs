@@ -321,6 +321,59 @@ async fn undeclared_when_scopes_sidecars_per_file() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The bundled `fmriprep` adapter, end to end: its overlay makes confounds a typed
+/// table and its ingestion fragment keeps that table (and the confounds sidecar) from
+/// hoarding the ~1,800 columns the schema does not declare. This is what
+/// `--adapter fmriprep` gets a user, with no hand-written policy.
+#[tokio::test]
+async fn bundled_fmriprep_adapter_catalogs_undeclared_columns() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_derivative_tree(dir.path());
+
+    let ingestion = Ingestion::from_sources(&[
+        bids_schema::bundled_ingestion_source("base").expect("base ingestion"),
+        bids_schema::bundled_ingestion_source("fmriprep").expect("bundled fmriprep ingestion"),
+    ])?;
+    let schema = Schema::load_full(None, &[fmriprep_overlay()], ingestion)?;
+    let db = ingest_with_schema(dir.path(), schema).await?;
+
+    // Confounds: declared columns kept, undeclared ones recorded but not stored.
+    let has_other_data: bool = db.conn.query_row(
+        "SELECT count(*) > 0 FROM information_schema.columns \
+         WHERE table_name = 'fmriprep_confounds' AND column_name = 'other_data'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert!(!has_other_data);
+    assert_eq!(count(&db, "fmriprep_confounds")?, 3);
+    let recorded: i64 = db.conn.query_row(
+        "SELECT count(*) FROM tabular_undeclared_columns WHERE name = 'a_comp_cor_00'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(recorded, 1);
+
+    // The confounds sidecar loses its per-column dictionary...
+    let confounds_sidecar: Option<String> = db.conn.query_row(
+        "SELECT other_data::VARCHAR FROM sidecars WHERE file_path LIKE '%confounds_timeseries.json'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(confounds_sidecar, None);
+
+    // ...while an ordinary sidecar in the same dataset keeps its custom fields.
+    let bold_sidecar: Option<String> = db.conn.query_row(
+        "SELECT other_data::VARCHAR FROM sidecars WHERE file_path LIKE '%preproc_bold.nii.gz'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert!(
+        bold_sidecar.is_some_and(|s| s.contains("SiteSpecificNote")),
+        "the policy is scoped to confounds, not to the whole table"
+    );
+    Ok(())
+}
+
 #[test]
 fn conflicting_overlay_is_rejected() {
     // An overlay that tries to *change* an existing base entity (subject's short
