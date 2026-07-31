@@ -119,3 +119,8 @@ accessors; and the opt-in `python -m bidslake.stubgen`. Remaining follow-ups:
   `csv` reader assumes tabs and schema-declared columns, so the `feat` adapter catalogs these
   rather than reading them. A `ContentReader` would make the mixing matrix and motion
   parameters queryable as tables instead of paths.
+
+- [ ] **Layouts for the other bundled producers**. `data/layouts/feat.json` is the first;
+  fMRIPrep, MRIQC, and QSIPrep have term maps or overlays but no write direction, so code
+  producing files in their conventions still hardcodes paths. Each is a layout document
+  plus its `Examples`; the round-trip check does the rest.

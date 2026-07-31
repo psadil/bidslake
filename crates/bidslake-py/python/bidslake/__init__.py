@@ -30,6 +30,7 @@ from collections.abc import Mapping
 from .binding import Binding, FileInput, TableInput, Unit, Unresolved
 from .file import BidsFile
 from .layout import BidsLake, Table
+from .layouts import Layout, LayoutAt, layout
 from .paths import RemotePathError
 from .relations import Relation
 from .schema import C
@@ -43,12 +44,15 @@ __all__ = [
     "Binding",
     "C",
     "FileInput",
+    "Layout",
+    "LayoutAt",
     "Relation",
     "RemotePathError",
     "Table",
     "TableInput",
     "Unit",
     "Unresolved",
+    "layout",
     "open",
 ]
 

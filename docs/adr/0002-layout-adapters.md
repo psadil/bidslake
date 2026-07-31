@@ -274,6 +274,39 @@ for a BIDS-named derivative. The ingestion schema alone is what plain BIDS uses.
 > `.bidslake/` is the hand-written counterpart, and gains `ingestion.json` beside the existing
 > `overlay.json` — the only route for a producer bidslake does not bundle.
 
+### 12. Rendering is a fourth artifact, because invertibility is per-mapping
+
+§2 pinned PCRE for the read direction. A pipeline that *writes* one of these trees needs
+the other direction — name a file before it exists — and PCRE cannot supply it: the
+optional groups that collapse `sub-01_ses-1` / `sub-01` / bare `bert` into one mapping are
+exactly what makes it non-invertible.
+
+Swapping to BEP-043's other floated syntax (`{var}` interpolation) does not fix that,
+because **invertibility is a property of the mapping, not of the syntax**. Measured on a
+real `recon-all` tree of 657 files: the 8 PCRE mappings recognize all of them; a
+pure-`{var}` rewrite needs 12 mappings, recognizes 430, and loses 227. The losses are the
+catch-alls (`label/*.annot`, `mri/*.mgz`), which match a *class* of filenames — those
+cannot be enumerated, and cannot be rendered either, since there is no concept to render
+*from*. `{var}` also over-matches where alternation was doing work, labelling
+`mri/T1.mgz` as `seg=T1`.
+
+So the term map keeps PCRE and stays read-only, and a **layout**
+(`data/layouts/feat.json`, metaschema `layout-metaschema.json`) declares the roles that
+can be written: `role -> {render template, concepts, entities}`, rendered relative to a
+unit's output root.
+
+*Rejected:* replacing PCRE with `{var}`, on the numbers above. *Rejected:* a render field
+on the BEP-043 `Mapping`, which would spend §2's "no bidslake keys, contributable
+upstream" property to solve a problem only half the mappings have.
+
+**What stops two documents drifting.** Every layout declares `Examples`, and loading one
+renders *every role under every example* and feeds the result back through its term map;
+if `classify(render(role))` does not reproduce the declared concepts, the layout fails to
+load. The check is not decoration — it immediately caught `reg/wmparc.nii.gz`, a file the
+pipeline writes and the `feat` term map had no mapping for, so those files were being
+produced and then silently ignored at index time. Co-locating the two directions would
+have prevented only *textual* drift; this prevents semantic drift.
+
 ## Consequences
 
 - FreeSurfer `recon-all` is queryable as typed tables (`freesurfer_aseg`, `freesurfer_aparc`,

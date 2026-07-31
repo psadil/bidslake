@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bidslake.dev/schemas/layout-metaschema.json",
+  "title": "bidslake Layout document",
+  "description": "Validates a bidslake **layout**: the concepts-to-path direction for a standardized non-BIDS output tree. A term map (BEP-043) answers 'what does this path denote?'; a layout answers 'where does this role go?', which is what lets a pipeline name a file it has not written yet. The two are separate documents because invertibility is a per-mapping property: a term map mapping that recognizes a whole *class* of filenames (`mri/*.mgz`, `label/*.annot`) has no concept to render from and so is read-only, while PCRE's optional groups and alternations — the reason it was pinned over `{var}` interpolation — are not invertible at all. Keeping them apart lets each use the syntax it needs; `Examples` is what stops them drifting.",
+  "type": "object",
+  "properties": {
+    "LayoutVersion": {
+      "type": "string",
+      "description": "Version of this layout document's own format."
+    },
+    "TermMap": {
+      "type": "string",
+      "description": "Name of the bundled term map that reads back what this layout writes. Every rendered role is fed through it at load time and must project onto the role's declared concepts."
+    },
+    "Roles": {
+      "type": "object",
+      "description": "Role name -> where that artifact sits, relative to a unit's output root. A role is the stable name for a slot in the tree ('the highres-to-standard affine'), independent of the filename convention that expresses it.",
+      "minProperties": 1,
+      "patternProperties": { "^[a-zA-Z0-9_]+$": { "$ref": "#/$defs/role" } },
+      "additionalProperties": false
+    },
+    "Examples": {
+      "type": "array",
+      "description": "Unit output-root names to validate against. Every role is rendered under every example and classified by `TermMap`; a role whose rendered path does not read back as its declared concepts fails to load. This is what makes the two directions verifiably agree rather than merely adjacent, so it is required and must be non-empty.",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/example" }
+    }
+  },
+  "required": ["LayoutVersion", "TermMap", "Roles", "Examples"],
+  "patternProperties": { "^x_": {} },
+  "unevaluatedProperties": false,
+  "$defs": {
+    "role": {
+      "type": "object",
+      "properties": {
+        "Template": {
+          "type": "string",
+          "description": "A POSIX path relative to the unit's output root, with `{name}` placeholders interpolated from the bindings passed at render time. Most FEAT-style slots are wholly literal (`reg/highres.nii.gz`); placeholders are for the parts that genuinely vary, such as a classifier's training set. Must not be absolute or contain `..`."
+        },
+        "Concepts": {
+          "type": "object",
+          "description": "The datatype/suffix the term map must project onto this role's rendered path. Checked at load time, so a rename on either side is caught rather than silently producing files nothing can read back.",
+          "properties": {
+            "datatype": { "type": "string" },
+            "suffix": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        "Entities": {
+          "type": "object",
+          "description": "BIDS entities the term map must also project onto this role (e.g. `from`/`to` for a registration transform). Checked at load time alongside `Concepts`.",
+          "patternProperties": { "^[a-zA-Z0-9]+$": { "type": "string" } },
+          "additionalProperties": false
+        },
+        "Description": {
+          "type": "string",
+          "description": "What this slot is, for humans reading the layout rather than the tree."
+        }
+      },
+      "required": ["Template"],
+      "patternProperties": { "^x_": {} },
+      "unevaluatedProperties": false
+    },
+    "example": {
+      "type": "object",
+      "properties": {
+        "Root": {
+          "type": "string",
+          "description": "A unit output-root directory name, relative to the dataset root — for FEAT, the BIDS stem of the run the tree was built from. Rendered role paths are joined under it before classification."
+        },
+        "Bindings": {
+          "type": "object",
+          "description": "Values for any `{name}` placeholders the roles use. A role whose placeholders are not all bound is skipped by this example (another example must cover it).",
+          "patternProperties": { "^[a-zA-Z0-9_]+$": { "type": "string" } },
+          "additionalProperties": false
+        }
+      },
+      "required": ["Root"],
+      "patternProperties": { "^x_": {} },
+      "unevaluatedProperties": false
+    }
+  }
+}

@@ -13,6 +13,7 @@ pub mod associations;
 pub mod context;
 pub mod datatypes;
 pub mod expression;
+pub mod layout;
 pub mod overlay;
 pub mod term_map;
 

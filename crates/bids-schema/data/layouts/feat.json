@@ -1,0 +1,281 @@
+{
+  "LayoutVersion": "0.1.0",
+  "TermMap": "feat",
+  "Roles": {
+    "filtered_func": {
+      "Template": "filtered_func_data.nii.gz",
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "bold"
+      },
+      "Entities": {
+        "desc": "filtered"
+      },
+      "Description": "The input to MELODIC: masked, non-steady-state-trimmed, intensity-normalized, high-pass filtered."
+    },
+    "filtered_func_clean": {
+      "Template": "filtered_func_data_clean.nii.gz",
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "bold"
+      },
+      "Entities": {
+        "desc": "clean"
+      },
+      "Description": "The denoised output: FIX's reconstruction with the classified noise components removed."
+    },
+    "filtered_func_clean_vn": {
+      "Template": "filtered_func_data_clean_vn.nii.gz",
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "bold"
+      },
+      "Entities": {
+        "desc": "cleanvn"
+      },
+      "Description": "Variance-normalized counterpart of the denoised output."
+    },
+    "mask": {
+      "Template": "mask.nii.gz",
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "mask"
+      },
+      "Entities": {
+        "desc": "brain"
+      },
+      "Description": "The brain mask MELODIC and FIX operate within."
+    },
+    "melodic_mix": {
+      "Template": "filtered_func_data.ica/melodic_mix",
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "mixing"
+      },
+      "Entities": {
+        "desc": "MELODIC"
+      },
+      "Description": "The mixing matrix: one column per component, one row per retained volume."
+    },
+    "melodic_ic": {
+      "Template": "filtered_func_data.ica/melodic_IC.nii.gz",
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "components"
+      },
+      "Entities": {
+        "desc": "IC"
+      },
+      "Description": "Component spatial maps."
+    },
+    "melodic_oic": {
+      "Template": "filtered_func_data.ica/melodic_oIC.nii.gz",
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "components"
+      },
+      "Entities": {
+        "desc": "oIC"
+      },
+      "Description": "Component spatial maps before thresholding."
+    },
+    "motion_params": {
+      "Template": "mc/prefiltered_func_data_mcf.par",
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "timeseries"
+      },
+      "Entities": {
+        "desc": "motion"
+      },
+      "Description": "Rigid-body motion parameters in FSL's column order, one row per retained volume."
+    },
+    "classification": {
+      "Template": "fix4melview_{training}_thr{threshold}.txt",
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "classification"
+      },
+      "Description": "FIX's automatic signal/noise labelling, for one training set and threshold."
+    },
+    "classification_by_rater": {
+      "Template": "fix4melview_{training}_thr{threshold}_{rater}.txt",
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "classification"
+      },
+      "Description": "A hand-edited labelling. Distinguished from the automatic one only by the trailing rater, which is why `rater` is an entity rather than part of `desc`."
+    },
+    "example_func": {
+      "Template": "reg/example_func.nii.gz",
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "boldref"
+      },
+      "Description": "A single reference volume in the run's own space (the temporal mean)."
+    },
+    "highres": {
+      "Template": "reg/highres.nii.gz",
+      "Concepts": {
+        "datatype": "anat",
+        "suffix": "T1w"
+      },
+      "Description": "The participant's T1w, in FEAT's naming."
+    },
+    "standard": {
+      "Template": "reg/standard.nii.gz",
+      "Concepts": {
+        "datatype": "anat",
+        "suffix": "T1w"
+      },
+      "Entities": {
+        "desc": "standard"
+      },
+      "Description": "The template the run is registered to."
+    },
+    "highres_pveseg": {
+      "Template": "reg/highres_pveseg.nii.gz",
+      "Concepts": {
+        "datatype": "anat",
+        "suffix": "dseg"
+      },
+      "Entities": {
+        "desc": "pveseg"
+      },
+      "Description": "Tissue segmentation in highres space."
+    },
+    "example_func2highres_mat": {
+      "Template": "reg/example_func2highres.mat",
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "xfm"
+      },
+      "Entities": {
+        "from": "exfunc",
+        "to": "highres",
+        "mode": "image"
+      },
+      "Description": "Affine, functional to anatomical."
+    },
+    "highres2example_func_mat": {
+      "Template": "reg/highres2example_func.mat",
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "xfm"
+      },
+      "Entities": {
+        "from": "highres",
+        "to": "exfunc",
+        "mode": "image"
+      },
+      "Description": "Affine, anatomical to functional."
+    },
+    "highres2standard_mat": {
+      "Template": "reg/highres2standard.mat",
+      "Concepts": {
+        "datatype": "anat",
+        "suffix": "xfm"
+      },
+      "Entities": {
+        "from": "highres",
+        "to": "standard",
+        "mode": "image"
+      },
+      "Description": "Affine, anatomical to template."
+    },
+    "standard2highres_mat": {
+      "Template": "reg/standard2highres.mat",
+      "Concepts": {
+        "datatype": "anat",
+        "suffix": "xfm"
+      },
+      "Entities": {
+        "from": "standard",
+        "to": "highres",
+        "mode": "image"
+      },
+      "Description": "Affine, template to anatomical."
+    },
+    "highres2standard_warp": {
+      "Template": "reg/highres2standard_warp.nii.gz",
+      "Concepts": {
+        "datatype": "anat",
+        "suffix": "xfm"
+      },
+      "Entities": {
+        "from": "highres",
+        "to": "standard",
+        "mode": "image"
+      },
+      "Description": "Warp field, anatomical to template."
+    },
+    "standard2highres_warp": {
+      "Template": "reg/standard2highres_warp.nii.gz",
+      "Concepts": {
+        "datatype": "anat",
+        "suffix": "xfm"
+      },
+      "Entities": {
+        "from": "standard",
+        "to": "highres",
+        "mode": "image"
+      },
+      "Description": "Warp field, template to anatomical."
+    },
+    "example_func2standard_warp": {
+      "Template": "reg/example_func2standard_warp.nii.gz",
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "xfm"
+      },
+      "Entities": {
+        "from": "exfunc",
+        "to": "standard",
+        "mode": "image"
+      },
+      "Description": "Warp field, functional to template."
+    },
+    "standard2example_func_warp": {
+      "Template": "reg/standard2example_func_warp.nii.gz",
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "xfm"
+      },
+      "Entities": {
+        "from": "standard",
+        "to": "exfunc",
+        "mode": "image"
+      },
+      "Description": "Warp field, template to functional."
+    },
+    "wmparc": {
+      "Template": "reg/wmparc.nii.gz",
+      "Concepts": {
+        "datatype": "anat",
+        "suffix": "dseg"
+      },
+      "Description": "FreeSurfer's white-matter parcellation resampled into highres space, which FIX uses as a tissue prior.",
+      "Entities": {
+        "seg": "wmparc"
+      }
+    }
+  },
+  "Examples": [
+    {
+      "Root": "sub-01_ses-V1_task-rest_run-01_desc-preproc_bold",
+      "Bindings": {
+        "training": "UKBiobank",
+        "threshold": "1",
+        "rater": "psadil"
+      }
+    },
+    {
+      "Root": "sub-02_task-cuff_desc-preproc_bold",
+      "Bindings": {
+        "training": "Standard",
+        "threshold": "20",
+        "rater": "ab"
+      }
+    }
+  ]
+}
