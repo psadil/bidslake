@@ -89,3 +89,33 @@ accessors; and the opt-in `python -m bidslake.stubgen`. Remaining follow-ups:
   too. Both SQL builders now filter empty column names out of the `other_data` extras. Regression
   test: `tabular_row_order::trailing_tab_header_still_ingests` (the vendored `ds001` no longer
   carries such a header, so the test ships its own fixture).
+
+## Derivation layer
+
+- [ ] **Promote bindings to a stamped artifact**. `bidslake.binding` is deliberately typed
+  Python and not a JSON document: the dataclasses are a 1:1 match for what such a document
+  would hold, so promoting is writing a serializer, but the shape has not earned its
+  metaschema yet. ADR 0002 §1 records why the `x_bidslake` prototype was rejected — "one
+  artifact, three concerns, no standards path, bespoke parser" — and a work-unit language
+  invented before real pipelines exercise it would repeat that.
+  **Trigger:** two or three pipelines have used bindings without the shape moving. Then add
+  `data/bindings/*.json` + a hand-written `binding-metaschema.json`, stamp it as
+  `bidslake_bindings` beside the overlay/term-map/ingestion stamps, and write the ADR. Until
+  then, changing a field is a Python edit rather than a schema migration — which is the point
+  of waiting.
+
+- [ ] **Rebuild the file registry when a later run needs a wider one**. Tables are created
+  `IF NOT EXISTS`, so `scans` keeps the shape of the run that created it while datasets
+  accumulate across runs (ADR 0002 §3). `BidsDb::check_registry_shape` turns the resulting
+  silent column loss into an error whose remedy is "name every adapter the catalog uses on
+  every run", which makes order irrelevant — but it is a workaround. The fuller fix is to
+  rebuild `scans` in place (new table, copy physical columns, swap), which `compact.rs`
+  already has most of the machinery for; the complication is that `sidecars` carries a
+  foreign key to `scans`. Regression tests: `test_registry_shape.rs`.
+
+- [ ] **A reader for headerless numeric matrices**. FSL writes several
+  (`filtered_func_data.ica/melodic_mix`, `mc/prefiltered_func_data_mcf.par`): whitespace-
+  delimited, no header, and in `melodic_mix`'s case a column count that varies per run. The
+  `csv` reader assumes tabs and schema-declared columns, so the `feat` adapter catalogs these
+  rather than reading them. A `ContentReader` would make the mixing matrix and motion
+  parameters queryable as tables instead of paths.

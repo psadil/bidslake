@@ -63,6 +63,71 @@ working for a remote dataset.
 To store one of those columns instead, declare it in the overlay: it then gets a typed
 column and costs 8 bytes a row. Declared-ness is the dial.
 
+## Bindings: units of work
+
+A pipeline step rarely operates on one file. It operates on a *unit* — a subject, a
+session, a run — and needs several sibling files that belong to it, each matched on a
+**different subset** of its entities. Written by hand that is one query per sibling per
+unit, each wrapped in a "there must be exactly one" check that raises; a subject missing
+one input then aborts the loop at whatever hour it is reached.
+
+```python
+from bidslake import Binding, FileInput, TableInput
+
+DENOISE = Binding(
+    anchor={"datatype": "func", "suffix": "bold", "desc": "preproc",
+            "extension": ".nii.gz", "space": None},
+    key=("sub", "ses", "task", "run"),
+    inputs={
+        "brain": FileInput(join=("sub", "ses", "task", "run"),
+                           where={"datatype": "func", "suffix": "mask",
+                                  "desc": "brain", "extension": ".nii.gz", "space": None}),
+        # one T1w per session, so this joins on a *subset* of the key
+        "anat":  FileInput(join=("sub", "ses"),
+                           where={"datatype": "anat", "suffix": "T1w",
+                                  "desc": "preproc", "extension": ".nii.gz", "space": None}),
+        # a different dataset in the same catalog
+        "wmparc": FileInput(join=("sub", "ses"), dataset_id="freesurfer",
+                            where={"seg": "wmparc", "extension": ".mgz"}),
+        # not a file at all: six columns of an ingested table, in row order
+        "motion": TableInput(join=("sub", "ses", "task", "run"),
+                             table="fmriprep_confounds", order_by="row_idx",
+                             columns=("rot_x", "rot_y", "rot_z",
+                                      "trans_x", "trans_y", "trans_z")),
+    },
+)
+
+for unit in lake.bind(DENOISE):
+    if unit.unresolved:
+        print(unit.key, unit.unresolved)   # data, not an exception
+        continue
+    work(unit.anchor.local_path, unit.inputs["anat"], unit.inputs["motion"])
+```
+
+Two properties are the point. Resolution costs **one query per input**, not one per input
+per unit, so it does not scale with the study. And a unit whose inputs do not resolve is
+*returned*, carrying `Unresolved(name, n_matched, reason)` entries that separate *missing*
+(the unit is incomplete) from *ambiguous* (the binding under-specifies — e.g. joining on
+`sub` alone across datasets whose subject labels collide). Incomplete subjects are visible
+before anything is submitted.
+
+A binding is only a query; bidslake schedules nothing. The same declaration drives a
+`for` loop, a process pool, a SLURM array, or a Snakemake input function:
+
+```python
+import submitit
+
+units = [u for u in lake.bind(DENOISE) if not u.unresolved]
+executor = submitit.AutoExecutor(folder="logs")
+executor.update_parameters(timeout_min=240, slurm_partition="normal", cpus_per_task=4)
+jobs = executor.map_array(run_one_unit, units)   # one job per unit
+```
+
+`bidslake.binding` is deliberately typed Python rather than a stamped JSON artifact for
+now — the dataclasses match what such an artifact would hold, so promoting it later is a
+serializer rather than a redesign. The module docstring and `TODO.md` ("Derivation layer")
+record the reasoning and the trigger.
+
 ## Design
 
 - **Rust owns the connection.** The compiled extension (`bidslake._bidslake`,

@@ -11,6 +11,15 @@ Open a database with :func:`open` and query it by BIDS concept::
 
     # Or work with whole tables as Polars.
     df = lake.scans.pl()
+
+Declare a pipeline's units of work — and what each one needs — with a
+:class:`~bidslake.binding.Binding`, which resolves siblings joined on any subset of a
+unit's entities and reports the ones that did not resolve as data rather than raising::
+
+    for unit in lake.bind(DENOISE):
+        if unit.unresolved:
+            continue
+        work(unit.anchor.local_path, unit.inputs["anat"])
 """
 
 from __future__ import annotations
@@ -18,6 +27,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 
+from .binding import Binding, FileInput, TableInput, Unit, Unresolved
 from .file import BidsFile
 from .layout import BidsLake, Table
 from .paths import RemotePathError
@@ -27,7 +37,20 @@ from .schema import C
 # `_bidslake` (the compiled extension) is intentionally not re-exported here — it
 # is a private implementation detail, imported and used by `layout`. It remains
 # importable as `bidslake._bidslake` for anyone who needs it.
-__all__ = ["BidsFile", "BidsLake", "C", "Relation", "RemotePathError", "Table", "open"]
+__all__ = [
+    "BidsFile",
+    "BidsLake",
+    "Binding",
+    "C",
+    "FileInput",
+    "Relation",
+    "RemotePathError",
+    "Table",
+    "TableInput",
+    "Unit",
+    "Unresolved",
+    "open",
+]
 
 
 def open(

@@ -202,6 +202,34 @@ impl Schema {
         &self.ingestion
     }
 
+    /// The BIDS concepts this schema's term maps can project, sorted. Empty for a
+    /// plain BIDS ingest, in which case the registry stores no projection at all.
+    pub fn projected_concepts(&self) -> Vec<String> {
+        self.projected_concepts.iter().cloned().collect()
+    }
+
+    /// Every column this schema would put on the file registry: the generated
+    /// concept columns (entity names, `datatype`, `suffix`, `extension`, `modality`,
+    /// `pseudofile`) plus `projected` when a term map supplies one.
+    ///
+    /// Exists so an *existing* catalog can be checked against what this run expects.
+    /// Tables are created `IF NOT EXISTS`, so a catalog's registry keeps the shape
+    /// the first run gave it while datasets accumulate across runs (ADR 0002 §3) —
+    /// and a later run whose overlays or term maps are wider has nowhere to put the
+    /// difference. Derived from the same call that emits the DDL, so the two cannot
+    /// drift.
+    pub fn registry_concept_columns(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .generated_bids_columns()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        if !self.projected_concepts.is_empty() {
+            names.push("projected".to_string());
+        }
+        names
+    }
+
     /// The schema-driven tabular model — which tables exist and their columns,
     /// plus selector-based routing. Used by the ingest pipeline.
     pub fn tabular(&self) -> &Tabular {
@@ -482,7 +510,7 @@ impl Schema {
                     "projected".to_string(),
                 ));
             }
-            columns.extend(self.generated_bids_columns());
+            columns.extend(self.generated_bids_columns().into_iter().map(|(_, d)| d));
         }
 
         if !pk.is_empty() {
@@ -573,7 +601,7 @@ impl Schema {
         format!("COALESCE(json_extract_string(projected, '$.{name}'), {expr})")
     }
 
-    fn generated_bids_columns(&self) -> Vec<String> {
+    fn generated_bids_columns(&self) -> Vec<(String, String)> {
         let mut cols = Vec::new();
 
         // One column per BIDS entity, keyed by its short `name`. Entity set comes
@@ -590,8 +618,9 @@ impl Schema {
                 name,
                 &format!("NULLIF(regexp_extract(file_path, '(?:^|[_/]){name}-({valpat})', 1), '')"),
             );
-            cols.push(format!(
-                "\"{name}\" VARCHAR GENERATED ALWAYS AS ({expr}) VIRTUAL"
+            cols.push((
+                name.clone(),
+                format!("\"{name}\" VARCHAR GENERATED ALWAYS AS ({expr}) VIRTUAL"),
             ));
         }
 
@@ -603,8 +632,9 @@ impl Schema {
                 "datatype",
                 &format!("NULLIF(regexp_extract(file_path, '/({alt})/', 1), '')"),
             );
-            cols.push(format!(
-                "datatype VARCHAR GENERATED ALWAYS AS ({expr}) VIRTUAL"
+            cols.push((
+                "datatype".to_string(),
+                format!("datatype VARCHAR GENERATED ALWAYS AS ({expr}) VIRTUAL"),
             ));
         }
 
@@ -614,13 +644,15 @@ impl Schema {
             "suffix",
             "NULLIF(regexp_extract(file_path, '_([A-Za-z0-9]+)\\.[^/]+$', 1), '')",
         );
-        cols.push(format!(
-            "suffix VARCHAR GENERATED ALWAYS AS ({suffix_expr}) VIRTUAL"
+        cols.push((
+            "suffix".to_string(),
+            format!("suffix VARCHAR GENERATED ALWAYS AS ({suffix_expr}) VIRTUAL"),
         ));
-        cols.push(
+        cols.push((
+            "extension".to_string(),
             "extension VARCHAR GENERATED ALWAYS AS (NULLIF(regexp_extract(file_path, '(\\.[^/]+)$', 1), '')) VIRTUAL"
                 .to_string(),
-        );
+        ));
 
         // pseudofile: TRUE when the file is a BIDS "pseudo-file" — an opaque directory (`.ds`,
         // `.mefd`, `.ome.zarr`, …) that tools treat as a single file. Derived from the schema's
@@ -633,9 +665,12 @@ impl Schema {
             .map(|e| e.replace('.', "\\."))
             .collect();
         if !pseudo_alt.is_empty() {
-            cols.push(format!(
-                "pseudofile BOOLEAN GENERATED ALWAYS AS (regexp_matches(file_path, '({})$')) VIRTUAL",
-                pseudo_alt.join("|")
+            cols.push((
+                "pseudofile".to_string(),
+                format!(
+                    "pseudofile BOOLEAN GENERATED ALWAYS AS (regexp_matches(file_path, '({})$')) VIRTUAL",
+                    pseudo_alt.join("|")
+                ),
             ));
         }
 
@@ -672,9 +707,12 @@ impl Schema {
             }
         }
         if !whens.is_empty() {
-            cols.push(format!(
-                "modality VARCHAR GENERATED ALWAYS AS (CASE {} ELSE NULL END) VIRTUAL",
-                whens.join(" ")
+            cols.push((
+                "modality".to_string(),
+                format!(
+                    "modality VARCHAR GENERATED ALWAYS AS (CASE {} ELSE NULL END) VIRTUAL",
+                    whens.join(" ")
+                ),
             ));
         }
 
