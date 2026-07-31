@@ -34,8 +34,15 @@
 //! - **`file_path`** — a dataset-relative path (`sub-01/func/sub-01_task-x_bold.nii.gz`);
 //!   how imaging files are referenced across tables.
 //! - **`other_data JSON`** — an overflow column on most tables. Any source field
-//!   without a dedicated column is preserved here, so nothing is lost; fields that
-//!   *do* have a column are not duplicated into it.
+//!   without a dedicated column is preserved here; fields that *do* have a column are
+//!   not duplicated into it.
+//!
+//!   Conditional, not universal: a table whose ingestion policy declares
+//!   `undeclared: catalog` has no `other_data` column at all, and the columns it does
+//!   not declare stay in the file on disk — still recorded in `tabular_files`, with
+//!   their names in `tabular_undeclared_columns`. A table stores what its schema
+//!   declares it stores; see docs/adr/0004. fMRIPrep confounds are why: ~1,800 columns
+//!   against ~13 declared, which cost 24 MB of database per file as per-row JSON.
 //! - **Missing values** — BIDS `n/a`, and any non-numeric value in a numeric
 //!   column (a censored age `89+`, a range `35-40`, an array), are stored as `NULL`.
 //!
