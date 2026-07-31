@@ -286,6 +286,17 @@ for a BIDS-named derivative. The ingestion schema alone is what plain BIDS uses.
   `scans` rows carried a `datatype`, though the term map declares `anat` for every mapping —
   so consumers fell back to matching paths by hand (`file_path LIKE '%mri/wmparc.mgz'`), which
   is exactly what a term map exists to remove.
+- FSL's FEAT/MELODIC/FIX tree is the second bundled layout, and it exercises a different
+  part of the mechanism than FreeSurfer. Its files are identified purely by position
+  (`reg/highres.nii.gz`, `filtered_func_data.ica/melodic_mix`) inside a directory named
+  after the BIDS stem of the run it was built from — so the unit's entities come from the
+  directory and each file's role from the projection. Two things fall out: FSL's
+  `<from>2<to>` transform naming maps directly onto the `from`/`to`/`mode` entities BIDS
+  derivatives already use, and the tree is *mostly* scratch (a FIX run leaves ~230
+  intermediates in `fix/` alone), so the ingestion fragment's main job is `ignore` —
+  discriminating *within* a directory, since `mc/` and `filtered_func_data.ica/` each
+  hold one keeper amongst the noise. Measured on a real 27-unit tree: 863 files in, 404
+  cataloged, 0 unmatched by the term map.
 - Because a projection now reaches the registry, mappings should bind the entity that
   identifies a file rather than leaning on a catch-all. `mri/[^/]+\.mgz` matched every volume
   but bound nothing, so the volumetric segmentations were indistinguishable; they now have

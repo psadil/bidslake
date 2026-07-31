@@ -53,10 +53,10 @@ enum Commands {
         overlay: Vec<String>,
 
         /// Everything bidslake bundles for a data producer, by name (`fmriprep`,
-        /// `mriqc`, `qsiprep`, `freesurfer`): any of a schema overlay (vocabulary), a
-        /// BEP-043 term map (path→concept projection, for layouts whose filenames carry
-        /// no BIDS entities), and an ingestion fragment (read/catalog policy). Which of
-        /// the three exist varies by producer. Repeatable.
+        /// `mriqc`, `qsiprep`, `freesurfer`, `feat`): any of a schema overlay
+        /// (vocabulary), a BEP-043 term map (path→concept projection, for layouts whose
+        /// filenames carry no BIDS entities), and an ingestion fragment (read/catalog
+        /// policy). Which of the three exist varies by producer. Repeatable.
         #[arg(long = "adapter")]
         adapter: Vec<String>,
 

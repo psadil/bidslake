@@ -253,12 +253,13 @@ pub fn validate_term_map(document: &Value) -> Vec<String> {
 }
 
 /// Term maps bidslake ships, addressable by name.
-pub const BUNDLED_TERM_MAP_NAMES: &[&str] = &["freesurfer"];
+pub const BUNDLED_TERM_MAP_NAMES: &[&str] = &["freesurfer", "feat"];
 
 /// The raw JSON source of a bundled term map, or `None` if `name` is not bundled.
 pub fn bundled_term_map_source(name: &str) -> Option<&'static str> {
     Some(match name {
         "freesurfer" => include_str!("../data/term-maps/freesurfer.json"),
+        "feat" => include_str!("../data/term-maps/feat.json"),
         _ => return None,
     })
 }
@@ -301,15 +302,25 @@ mod tests {
         bundled_term_map("freesurfer").expect("bundled")
     }
 
+    /// Every bundled term map, not just one — a new map that violates the metaschema or
+    /// fails to compile should fail here rather than at a user's first ingest. Mirrors
+    /// `bundled_ingestion_is_metaschema_valid` in `bidslake::schema::ingestion`.
     #[test]
-    fn bundled_term_map_is_metaschema_valid() {
-        let raw = bundled_term_map_source("freesurfer").unwrap();
-        let doc: Value = serde_json::from_str(raw).unwrap();
-        let violations = validate_term_map(&doc);
-        assert!(
-            violations.is_empty(),
-            "freesurfer term map invalid: {violations:?}"
-        );
+    fn bundled_term_maps_are_metaschema_valid() {
+        for name in BUNDLED_TERM_MAP_NAMES {
+            let raw = bundled_term_map_source(name)
+                .unwrap_or_else(|| panic!("term map {name:?} is registered but missing"));
+            let doc: Value = serde_json::from_str(raw)
+                .unwrap_or_else(|e| panic!("bundled term map {name:?} is not JSON: {e}"));
+            let violations = validate_term_map(&doc);
+            assert!(
+                violations.is_empty(),
+                "bundled term map {name:?} invalid: {violations:?}"
+            );
+            // And it must actually compile, not merely validate.
+            bundled_term_map(name)
+                .unwrap_or_else(|| panic!("bundled term map {name:?} does not compile"));
+        }
     }
 
     #[test]

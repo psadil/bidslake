@@ -75,7 +75,7 @@ pub fn load_overlay(path: &Path) -> Result<Value, OverlayError> {
 /// `--adapter` flag (e.g. `--adapter fmriprep`), which loads this overlay together with
 /// whatever term map and ingestion fragment are bundled under the same name; `--overlay`
 /// takes file paths only. Kept alongside [`bundled_overlay`] so the two never drift.
-pub const BUNDLED_OVERLAY_NAMES: &[&str] = &["fmriprep", "mriqc", "qsiprep", "freesurfer"];
+pub const BUNDLED_OVERLAY_NAMES: &[&str] = &["fmriprep", "mriqc", "qsiprep", "freesurfer", "feat"];
 
 /// The parsed bundled overlay for a pipeline `name`, or `None` if `name` is not a
 /// bundled pipeline (callers then treat the argument as a filesystem path). The JSON
@@ -86,6 +86,7 @@ pub fn bundled_overlay(name: &str) -> Option<Value> {
         "mriqc" => include_str!("../data/overlays/mriqc.json"),
         "qsiprep" => include_str!("../data/overlays/qsiprep.json"),
         "freesurfer" => include_str!("../data/overlays/freesurfer.json"),
+        "feat" => include_str!("../data/overlays/feat.json"),
         _ => return None,
     };
     Some(serde_json::from_str(raw).expect("bundled overlay must be valid JSON"))

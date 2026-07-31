@@ -1,0 +1,21 @@
+{
+  "IngestionSchemaVersion": "0.1.0",
+  "rules": [
+    {
+      "selectors": ["match(path, \"/(fix|mc)/\")", "suffix == null"],
+      "disposition": "ignore"
+    },
+    {
+      "selectors": ["match(path, \"/filtered_func_data\\.ica/\")", "suffix == null"],
+      "disposition": "ignore"
+    },
+    {
+      "selectors": ["match(path, \"/(pyfix\\.log|report(_log)?\\.html)$\")"],
+      "disposition": "ignore"
+    },
+    {
+      "selectors": ["intersects([datatype], [\"func\", \"anat\"])"],
+      "disposition": "catalog"
+    }
+  ]
+}
