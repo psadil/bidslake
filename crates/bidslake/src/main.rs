@@ -3,18 +3,15 @@ use clap::{Parser, Subcommand};
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
-mod bids;
-mod db;
-mod fs;
-mod links;
-mod readers;
-mod s3;
-mod schema;
+// The CLI is a consumer of the library, not a second copy of it. Declaring these as
+// `mod` here would compile every one of them a second time, in parallel with the lib
+// and invisible to it.
+use bidslake::{bids, links, s3, schema};
 
-use bids::BidsParser;
-use db::BidsDb;
-use fs::{BidsFileSystem, LocalFileSystem};
-use schema::Schema;
+use bidslake::bids::BidsParser;
+use bidslake::db::BidsDb;
+use bidslake::fs::{BidsFileSystem, LocalFileSystem};
+use bidslake::schema::Schema;
 
 #[derive(Parser)]
 #[command(name = "bidslake")]
