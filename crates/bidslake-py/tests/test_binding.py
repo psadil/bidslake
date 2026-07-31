@@ -69,33 +69,62 @@ def test_sessionless_units_join_on_null(lake) -> None:
     assert all("anat" in u.inputs for u in units)
 
 
-def test_missing_input_is_data_not_an_exception(lake) -> None:
-    """ds210 has BOLD but ships no anat, so the input cannot resolve.
+def test_partly_missing_input_is_data_not_an_exception(lake) -> None:
+    """The case the design exists for: *some* units are incomplete.
 
-    The point is that iteration completes and every unit is inspectable: a subject
-    missing an input is visible before any work is submitted, rather than raising
-    partway through a long run.
+    ``eyetracking_fmri`` has only ``sub-01``, so joined on ``sub`` this resolves for
+    ds001's three sub-01 runs and not the other fifteen subjects. Iteration completes
+    and every unit is inspectable, so an incomplete subject is visible before any work
+    is submitted rather than raising partway through a long run.
+    """
+    binding = Binding(
+        anchor={**BOLD, "dataset_id": "ds001"},
+        key=("sub", "ses", "task", "run"),
+        inputs={"other": FileInput(join=("sub",), dataset_id="eyetracking_fmri", where=ANAT)},
+    )
+    units = lake.bind(binding)
+    resolved = [u for u in units if not u.unresolved]
+    missing = [u for u in units if u.unresolved]
+    assert len(resolved) == 3, "sub-01's three runs"
+    assert len(missing) == 45
+    assert all(
+        [(x.name, x.n_matched, x.reason) for x in u.unresolved] == [("other", 0, "missing")]
+        for u in missing
+    )
+
+
+def test_an_input_that_never_resolves_is_an_error_not_45_missing_subjects(lake) -> None:
+    """Zero-of-N is a setup error wearing incomplete data's clothes.
+
+    ds210 ships no anat at all, so every unit reports the input missing — which reads
+    exactly like real absence and hides the cause (a filter matching nothing, or a
+    dataset never indexed). Both are worth stopping for, and saying so beats making
+    someone infer it from N identical `Unresolved` entries.
     """
     binding = Binding(
         anchor={**BOLD, "dataset_id": "ds210", "task": "rest"},
         key=("sub", "ses", "task", "run"),
         inputs={
-            "anat": FileInput(
-                join=("sub",),
-                where={
-                    "datatype": "anat",
-                    "suffix": "T1w",
-                    "extension": ".nii.gz",
-                    "dataset_id": "ds210",
-                },
-            )
+            "anat": FileInput(join=("sub",), dataset_id="ds210", where=ANAT),
         },
     )
-    units = list(lake.bind(binding))
-    assert units, "the anchor still resolves"
-    assert all(u.inputs == {} for u in units)
-    for u in units:
-        assert [(x.name, x.n_matched, x.reason) for x in u.unresolved] == [("anat", 0, "missing")]
+    with pytest.raises(ValueError, match="matched nothing for any of"):
+        lake.bind(binding)
+
+
+def test_an_anchor_matching_nothing_is_an_error(lake) -> None:
+    """Otherwise `for unit in lake.bind(B)` silently does no work.
+
+    A misspelled filter *key* raises, but a value that matches nothing does not — and
+    a wrong value is the likelier mistake, since keys are checked statically.
+    """
+    binding = Binding(
+        anchor={**BOLD, "dataset_id": "ds001", "desc": "nosuchdesc"},
+        key=("sub",),
+        inputs={},
+    )
+    with pytest.raises(ValueError, match="anchor matched no files"):
+        lake.bind(binding)
 
 
 def test_ambiguous_input_is_distinguished_from_missing(lake) -> None:

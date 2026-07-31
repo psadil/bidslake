@@ -333,4 +333,56 @@ def resolve(lake: BidsLake, binding: Binding) -> list[Unit]:
                 unresolved=tuple(unresolved),
             )
         )
+
+    _check_productive(binding, units)
     return units
+
+
+def _check_productive(binding: Binding, units: list[Unit]) -> None:
+    """Refuse a binding that resolves *nothing*, which is never incompleteness.
+
+    Per-unit gaps are data — that is the whole design — but two shapes are not:
+
+    An anchor matching no files yields an empty list, so ``for unit in lake.bind(B)``
+    silently does no work. A wrong *key* raises loudly, but a wrong *value*
+    (``suffix="notasuffix"``) does not, and this is where it would otherwise land.
+
+    An input resolving for *zero of N* units is reported today as N incomplete
+    subjects, which reads exactly like real missing data and hides the actual cause:
+    a filter that matches nothing, or a dataset that was never indexed. Both are
+    setup errors, and both are worth stopping for — whereas an input that resolves
+    for *some* units is genuinely incomplete data and stays a :class:`Unresolved`.
+    """
+    if not units:
+        msg = (
+            f"binding anchor matched no files: {dict(binding.anchor)}. Every filter key "
+            f"is valid, so this is a value that matches nothing — check the values, and "
+            f"that the dataset is indexed into this catalog."
+        )
+        raise ValueError(msg)
+
+    for name, spec in binding.inputs.items():
+        if any(name in u.inputs for u in units):
+            continue
+        # Never resolving is only a *setup* error when the filter matched nothing at
+        # all. An input that was ambiguous everywhere also resolves for zero units,
+        # but its filter matches plenty — too much — which is a different fault with
+        # a different fix, already reported per unit.
+        matched = {x.n_matched for u in units for x in u.unresolved if x.name == name}
+        if matched != {0}:
+            continue
+        if isinstance(spec, FileInput):
+            what = f"filter {dict(spec.where)}"
+            if spec.dataset_id is not None:
+                what += f" in dataset {spec.dataset_id!r}"
+        else:
+            what = f"columns {list(spec.columns)} of table {spec.table!r}"
+        msg = (
+            f"input {name!r} matched nothing for any of {len(units)} units, so it is a "
+            f"binding or indexing problem rather than incomplete data: its {what} "
+            f"joined on {list(spec.join)} found no candidates at all. Check the filter "
+            f"values, and that the dataset it reads is indexed into this catalog. An "
+            f"input that resolves for *some* units is genuinely incomplete data and is "
+            f"reported per unit instead."
+        )
+        raise ValueError(msg)
