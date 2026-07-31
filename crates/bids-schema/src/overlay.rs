@@ -71,9 +71,10 @@ pub fn load_overlay(path: &Path) -> Result<Value, OverlayError> {
     Ok(value)
 }
 
-/// Overlays bidslake ships for common derivative pipelines, addressable by name on
-/// the `--overlay` flag (e.g. `--overlay fmriprep`). Kept alongside [`bundled_overlay`]
-/// so the two never drift.
+/// Overlays bidslake ships for common derivative pipelines. Reached by name on the
+/// `--adapter` flag (e.g. `--adapter fmriprep`), which loads this overlay together with
+/// whatever term map and ingestion fragment are bundled under the same name; `--overlay`
+/// takes file paths only. Kept alongside [`bundled_overlay`] so the two never drift.
 pub const BUNDLED_OVERLAY_NAMES: &[&str] = &["fmriprep", "mriqc", "qsiprep", "freesurfer"];
 
 /// The parsed bundled overlay for a pipeline `name`, or `None` if `name` is not a

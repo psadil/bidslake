@@ -56,11 +56,11 @@ accessors; and the opt-in `python -m bidslake.stubgen`. Remaining follow-ups:
   straight from `sub-…_T1w.json`/`_bold.json` — validated on `ds001761-mriqc`, 475 records.
   The group TSVs remain the only route to *dataset-level* IQM summaries.)
 
-- [ ] **Auto-relax `.bidsignore` under `--overlay`?** Consider having an overlay imply
+- [ ] **Auto-relax `.bidsignore` under `--adapter`?** Consider having an adapter imply
   `--no-bidsignore` (or selectively un-ignore only schema-recognized files), so the common case
   needs one flag, not two. Currently explicit — and now the sharpest edge left for MRIQC, whose
   `.bidsignore` hides the very `*_T1w.json`/`*_bold.json` its metrics live in, so
-  `--overlay mriqc` alone still yields an empty catalog. Interim: an ingest that indexes no data
+  `--adapter mriqc` alone still yields an empty catalog. Interim: an ingest that indexes no data
   files while `.bidsignore` is in force now says so, instead of reporting success over an empty
   database (see `promote_orphan_sidecars`' call site in `bids.rs`).
 

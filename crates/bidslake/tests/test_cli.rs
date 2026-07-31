@@ -4,13 +4,13 @@
 use std::fs;
 use std::process::Command;
 
-/// `bidslake schema --overlay fmriprep --diff` builds from the embedded schema +
+/// `bidslake schema --adapter fmriprep --diff` builds from the embedded schema +
 /// bundled overlay (no dataset, no database) and reports the new `fmriprep_confounds`
 /// table the overlay adds.
 #[test]
 fn schema_diff_reports_overlay_additions() {
     let output = Command::new(env!("CARGO_BIN_EXE_bidslake"))
-        .args(["schema", "--overlay", "fmriprep", "--diff"])
+        .args(["schema", "--adapter", "fmriprep", "--diff"])
         .output()
         .expect("run bidslake");
     assert!(
@@ -26,6 +26,56 @@ fn schema_diff_reports_overlay_additions() {
     assert!(
         stdout.contains("trans_x"),
         "diff should list the typed confound columns:\n{stdout}"
+    );
+}
+
+/// An adapter is a *named bundle*, and its three artifacts are each optional: a name
+/// resolves if bidslake ships any of an overlay, a term map, or an ingestion fragment
+/// under it. `freesurfer` has all three; `fmriprep` has an overlay and an ingestion
+/// fragment but no term map (its filenames already carry BIDS entities), which is the
+/// case that used to be rejected outright.
+#[test]
+fn adapter_resolves_with_a_partial_artifact_set() {
+    for name in ["fmriprep", "mriqc", "qsiprep", "freesurfer"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_bidslake"))
+            .args(["schema", "--adapter", name, "--diff"])
+            .output()
+            .expect("run bidslake");
+        assert!(
+            output.status.success(),
+            "--adapter {name} should resolve: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+/// An unknown adapter names the union of the bundled registries, not just one of them.
+#[test]
+fn unknown_adapter_lists_every_bundled_name() {
+    let output = Command::new(env!("CARGO_BIN_EXE_bidslake"))
+        .args(["schema", "--adapter", "nosuchpipeline", "--diff"])
+        .output()
+        .expect("run bidslake");
+    assert!(!output.status.success(), "unknown adapter should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for name in ["fmriprep", "freesurfer", "mriqc", "qsiprep"] {
+        assert!(stderr.contains(name), "should list {name}:\n{stderr}");
+    }
+}
+
+/// `--overlay` takes paths only. A bundled name there would apply the vocabulary but
+/// not the rest of the bundle, so it is rejected with a message naming the fix.
+#[test]
+fn overlay_rejects_a_bundled_name() {
+    let output = Command::new(env!("CARGO_BIN_EXE_bidslake"))
+        .args(["schema", "--overlay", "fmriprep", "--diff"])
+        .output()
+        .expect("run bidslake");
+    assert!(!output.status.success(), "a bundled name is not a path");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--adapter fmriprep"),
+        "error should point at the flag that works:\n{stderr}"
     );
 }
 
@@ -131,14 +181,14 @@ fn no_bidsignore_reveals_hidden_overlay_files() {
     };
 
     // Default: the confounds file is hidden by .bidsignore — nothing tabular seen.
-    let hidden = run(&["--overlay", "fmriprep"]);
+    let hidden = run(&["--adapter", "fmriprep"]);
     assert!(
         hidden.contains("No skipped tabular files") && !hidden.contains("ingested:"),
         "with .bidsignore in effect, the confounds file should not be walked:\n{hidden}"
     );
 
     // --no-bidsignore reveals it, and the overlay ingests it.
-    let revealed = run(&["--overlay", "fmriprep", "--no-bidsignore"]);
+    let revealed = run(&["--adapter", "fmriprep", "--no-bidsignore"]);
     assert!(
         revealed.contains("ingested: 1"),
         "--no-bidsignore should let the overlay ingest the hidden confounds:\n{revealed}"
