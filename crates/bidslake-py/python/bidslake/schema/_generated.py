@@ -1831,6 +1831,10 @@ COLUMNS: dict[str, dict[str, str]] = {
         "n_rows": "BIGINT",
         "status": "VARCHAR",
     },
+    "tabular_undeclared_columns": {
+        "table_name": "VARCHAR",
+        "name": "VARCHAR",
+    },
 }
 
 
@@ -3602,4 +3606,8 @@ class C:
         table_name: pl.Expr = pl.col("table_name")
         n_rows: pl.Expr = pl.col("n_rows")
         status: pl.Expr = pl.col("status")
+
+    class tabular_undeclared_columns:
+        table_name: pl.Expr = pl.col("table_name")
+        name: pl.Expr = pl.col("name")
 

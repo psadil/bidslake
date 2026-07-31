@@ -226,6 +226,22 @@ this file expected?", not "what does it denote?".
 An adapter is precisely the case where all three are needed at once. An overlay alone suffices
 for a BIDS-named derivative. The ingestion schema alone is what plain BIDS uses.
 
+> **Amended 2026-07-30 (ADR 0004).** The last paragraph assumed artifact needs cluster into
+> exactly two shapes — "overlay alone" or the full trio — and `resolve_adapters` enforced it by
+> requiring a bundled term map. fMRIPrep is the counterexample: its filenames *do* carry BIDS
+> entities, so it needs no term map, but it does need an ingestion fragment for its confounds
+> storage policy. Neither shape fits, and `--adapter fmriprep` failed outright.
+>
+> So **an adapter is a named bundle whose three artifacts are each optional**; a name resolves
+> if bidslake ships any of them. `--adapter <name>` is now the only way to reach a bundled
+> producer, and `--overlay` takes file paths only — accepting names in both would mean
+> `--overlay fmriprep` applied the vocabulary but silently not the storage policy. The layering
+> above is unchanged; only the arity is. The widened word is "adapter": no longer specifically
+> non-BIDS-layout support, but the named bundle of everything bidslake knows about a producer.
+>
+> `.bidslake/` is the hand-written counterpart, and gains `ingestion.json` beside the existing
+> `overlay.json` — the only route for a producer bidslake does not bundle.
+
 ## Consequences
 
 - FreeSurfer `recon-all` is queryable as typed tables (`freesurfer_aseg`, `freesurfer_aparc`,

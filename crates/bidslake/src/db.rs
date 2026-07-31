@@ -89,6 +89,8 @@ impl BidsDb {
         self.conn
             .execute(schema::CREATE_FILE_ASSOCIATIONS_TABLE, [])?;
         self.conn.execute(schema::CREATE_TABULAR_FILES_TABLE, [])?;
+        self.conn
+            .execute(schema::CREATE_TABULAR_UNDECLARED_COLUMNS_TABLE, [])?;
         // Cross-dataset links + the query-time relation view (see docs/adr/0003).
         self.conn.execute(schema::CREATE_DATASET_LINKS_TABLE, [])?;
         self.conn
@@ -239,6 +241,22 @@ impl BidsDb {
             status.as_str()
         ])
         .with_context(|| format!("recording tabular file {file_path} as {}", status.as_str()))?;
+        Ok(())
+    }
+
+    /// Record the column names a `undeclared: catalog` table saw but does not declare
+    /// (`tabular_undeclared_columns`). Idempotent, and deduped by the table's primary
+    /// key, so re-indexing and repeated headers both collapse to one row per name.
+    pub fn record_undeclared_columns(&self, table: &str, names: &[String]) -> Result<()> {
+        if names.is_empty() {
+            return Ok(());
+        }
+        let mut stmt = self.conn.prepare_cached(
+            "INSERT OR IGNORE INTO tabular_undeclared_columns (table_name, name) VALUES (?, ?)",
+        )?;
+        for name in names {
+            stmt.execute(params![table, name])?;
+        }
         Ok(())
     }
 

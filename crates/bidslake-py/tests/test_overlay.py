@@ -41,7 +41,7 @@ def augmented_db(tmp_path_factory: pytest.TempPathFactory) -> str:
 
     db = tmp_path_factory.mktemp("db") / "aug.duckdb"
     subprocess.run(
-        [str(binary), "index", "-i", str(root), "-o", str(db), "--overlay", "fmriprep"],
+        [str(binary), "index", "-i", str(root), "-o", str(db), "--adapter", "fmriprep"],
         check=True,
         capture_output=True,
     )

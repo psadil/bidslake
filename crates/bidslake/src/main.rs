@@ -3,18 +3,15 @@ use clap::{Parser, Subcommand};
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
-mod bids;
-mod db;
-mod fs;
-mod links;
-mod readers;
-mod s3;
-mod schema;
+// The CLI is a consumer of the library, not a second copy of it. Declaring these as
+// `mod` here would compile every one of them a second time, in parallel with the lib
+// and invisible to it.
+use bidslake::{bids, links, s3, schema};
 
-use bids::BidsParser;
-use db::BidsDb;
-use fs::{BidsFileSystem, LocalFileSystem};
-use schema::Schema;
+use bidslake::bids::BidsParser;
+use bidslake::db::BidsDb;
+use bidslake::fs::{BidsFileSystem, LocalFileSystem};
+use bidslake::schema::Schema;
 
 #[derive(Parser)]
 #[command(name = "bidslake")]
@@ -49,18 +46,17 @@ enum Commands {
         #[arg(long)]
         schema_path: Option<PathBuf>,
 
-        /// Schema overlay to merge onto the base schema, so bidslake can index
-        /// "bidsish" derivative outputs (e.g. fMRIPrep). Either a bundled pipeline
-        /// name (fmriprep, mriqc, qsiprep) or a path to an overlay JSON file.
-        /// Repeatable; applied left to right.
+        /// Path to a schema overlay JSON file, merged onto the base schema so bidslake
+        /// can index vocabulary it does not ship. Repeatable; applied left to right.
+        /// For a pipeline or layout bidslake already knows, use `--adapter <name>`.
         #[arg(long = "overlay")]
         overlay: Vec<String>,
 
-        /// Layout adapter for indexing a standardized *non-BIDS* dataset (e.g. FreeSurfer
-        /// `recon-all` derivatives, whose files have no BIDS entities). Either a bundled
-        /// name (`freesurfer`, `freesurfer-long`) or a path to an adapter JSON file.
-        /// Repeatable. Distinct from `--overlay`, which extends the schema for
-        /// BIDS-*named* derivatives.
+        /// Everything bidslake bundles for a data producer, by name (`fmriprep`,
+        /// `mriqc`, `qsiprep`, `freesurfer`): any of a schema overlay (vocabulary), a
+        /// BEP-043 term map (path→concept projection, for layouts whose filenames carry
+        /// no BIDS entities), and an ingestion fragment (read/catalog policy). Which of
+        /// the three exist varies by producer. Repeatable.
         #[arg(long = "adapter")]
         adapter: Vec<String>,
 
@@ -88,13 +84,12 @@ enum Commands {
     /// overlays), or — with `--diff` — only what the overlays add. Writes no database;
     /// for previewing how an overlay changes the catalog.
     Schema {
-        /// Schema overlay to merge (bundled pipeline name or overlay JSON path).
-        /// Repeatable; applied left to right.
+        /// Path to a schema overlay JSON file to merge. Repeatable; applied left to
+        /// right. For a bundled producer, use `--adapter <name>`.
         #[arg(long = "overlay")]
         overlay: Vec<String>,
 
-        /// Layout adapter whose tables to include (bundled name or adapter JSON path).
-        /// Repeatable.
+        /// Bundled adapter whose tables to include, by name. Repeatable.
         #[arg(long = "adapter")]
         adapter: Vec<String>,
 
@@ -122,6 +117,23 @@ enum Commands {
         /// Target storage format (e.g. "zst")
         #[arg(long)]
         to: String,
+    },
+
+    /// Rewrite a catalog into a fresh file, reclaiming space that re-indexing left
+    /// behind.
+    ///
+    /// Re-indexing a dataset DELETEs its rows and re-inserts them; DuckDB reuses those
+    /// blocks for later writes but never returns them to the OS, and `CHECKPOINT` does
+    /// not shrink the file. Only a full rewrite does. A profiled catalog was 28% free
+    /// blocks — 478 MB of a 1.74 GB file.
+    Compact {
+        /// bidslake DuckDB database to compact
+        #[arg(short, long, default_value = "bidslake.duckdb")]
+        database: String,
+
+        /// Write here instead of replacing `database` in place.
+        #[arg(short, long)]
+        output: Option<String>,
     },
 
     /// Manage cross-dataset links in an existing catalog: co-derivatives that share a
@@ -198,9 +210,11 @@ async fn main() -> Result<()> {
             // for the result, but it keeps provenance in dataset-then-flag order.
             let overlay = discover_embedded_overlay(&input, overlay);
             let mut overlays = resolve_overlays(&overlay)?;
-            // `--adapter <name>` contributes an overlay (tables), a term map (projection),
-            // and an ingestion fragment (read/catalog/ignore policy).
-            let bundle = resolve_adapters(&adapter)?;
+            // `--adapter <name>` contributes whichever of an overlay (tables), a term
+            // map (projection), and an ingestion fragment (read/catalog policy) bidslake
+            // bundles under that name; a dataset can supply its own fragment too.
+            let embedded_ingestion = discover_embedded(&input, "ingestion.json");
+            let bundle = resolve_adapters(&adapter, embedded_ingestion.as_deref())?;
             overlays.extend(bundle.overlays);
             let schema = Schema::load_full(schema_path_str, &overlays, bundle.ingestion)?;
             run_indexer(
@@ -224,7 +238,7 @@ async fn main() -> Result<()> {
             diff,
         } => {
             let mut overlays = resolve_overlays(&overlay)?;
-            let bundle = resolve_adapters(&adapter)?;
+            let bundle = resolve_adapters(&adapter, None)?;
             overlays.extend(bundle.overlays);
             let augmented = Schema::load_full(None, &overlays, bundle.ingestion)?;
             if diff {
@@ -247,6 +261,7 @@ async fn main() -> Result<()> {
                  See the README on managed mode. (database: {database}, to: {to})"
             )
         }
+        Commands::Compact { database, output } => run_compact(&database, output.as_deref()),
         Commands::Link { action } => run_link(action),
     }
 }
@@ -476,44 +491,52 @@ fn list_links(db: &BidsDb) -> Result<()> {
     Ok(())
 }
 
-/// Prepend a dataset-embedded overlay (`<input>/.bidslake/overlay.json`) to the
-/// `--overlay` list when the input is a local directory carrying one, so a derivative
-/// dataset can self-describe with no flags. Remote (`s3://`) inputs are not scanned.
-fn discover_embedded_overlay(input: &str, mut overlay: Vec<String>) -> Vec<String> {
+/// A dataset-embedded artifact under `<input>/.bidslake/`, if the input is a local
+/// directory carrying one. Remote (`s3://`) inputs are not scanned.
+///
+/// `.bidslake/` is the hand-written counterpart of a bundled adapter: the same kinds
+/// of artifact, supplied by the dataset rather than by bidslake, so a producer whose
+/// conventions bidslake does not ship can still self-describe with no flags.
+fn discover_embedded(input: &str, file: &str) -> Option<String> {
     if input.starts_with("s3://") {
-        return overlay;
+        return None;
     }
-    let embedded = std::path::Path::new(input)
-        .join(".bidslake")
-        .join("overlay.json");
-    if embedded.is_file() {
-        println!("Using dataset-embedded overlay: {}", embedded.display());
-        overlay.insert(0, embedded.to_string_lossy().into_owned());
+    let embedded = std::path::Path::new(input).join(".bidslake").join(file);
+    embedded.is_file().then(|| {
+        println!("Using dataset-embedded {file}: {}", embedded.display());
+        embedded.to_string_lossy().into_owned()
+    })
+}
+
+/// Prepend a dataset-embedded overlay (`<input>/.bidslake/overlay.json`) to the
+/// `--overlay` list, so an explicit flag still wins on a conflict.
+fn discover_embedded_overlay(input: &str, mut overlay: Vec<String>) -> Vec<String> {
+    if let Some(path) = discover_embedded(input, "overlay.json") {
+        overlay.insert(0, path);
     }
     overlay
 }
 
-/// Resolve each `--overlay` argument to an [`AppliedOverlay`] (source label + parsed
-/// content). An argument that names a bundled pipeline (`fmriprep`, `mriqc`,
-/// `qsiprep`) resolves to the embedded overlay; otherwise it is treated as a path to
-/// an overlay JSON file.
+/// Resolve each `--overlay` argument — a path to an overlay JSON file — to an
+/// [`AppliedOverlay`] (source label + parsed content).
+///
+/// Paths only. A bundled producer is reached through `--adapter <name>`, which loads
+/// its overlay *and* whatever else bidslake bundles for it (see [`resolve_adapters`]);
+/// accepting names here too would mean `--overlay fmriprep` silently applied the
+/// vocabulary but not the storage policy.
 fn resolve_overlays(specs: &[String]) -> Result<Vec<schema::AppliedOverlay>> {
     use anyhow::Context as _;
     specs
         .iter()
         .map(|spec| {
-            let content = if let Some(bundled) = bids_schema::overlay::bundled_overlay(spec) {
-                bundled
-            } else {
-                bids_schema::overlay::load_overlay(std::path::Path::new(spec)).with_context(
-                    || {
-                        format!(
-                            "loading overlay {spec:?} (not a bundled pipeline name; bundled are {:?})",
-                            bids_schema::overlay::BUNDLED_OVERLAY_NAMES
-                        )
-                    },
-                )?
-            };
+            let content = bids_schema::overlay::load_overlay(std::path::Path::new(spec))
+                .with_context(|| {
+                    if bundled_artifact_names().contains(&spec.as_str()) {
+                        format!("{spec:?} is a bundled adapter — use `--adapter {spec}`")
+                    } else {
+                        format!("loading overlay file {spec:?}")
+                    }
+                })?;
             Ok(schema::AppliedOverlay {
                 source: spec.clone(),
                 content,
@@ -534,9 +557,89 @@ struct AdapterBundle {
     ingestion_provenance: Vec<(String, serde_json::Value)>,
 }
 
-/// Resolve each `--adapter` bundled name (e.g. `freesurfer`) into its overlay + term-map +
-/// ingestion trio, validating each artifact against its metaschema.
-fn resolve_adapters(names: &[String]) -> Result<AdapterBundle> {
+/// Rewrite `database` into a fresh file, reclaiming blocks that re-indexing freed but
+/// DuckDB never returned to the OS.
+///
+/// Writes to a temporary sibling and renames over the original when `output` is absent,
+/// so an interrupted compaction leaves the catalog untouched rather than truncated.
+fn run_compact(database: &str, output: Option<&str>) -> Result<()> {
+    use anyhow::Context as _;
+
+    let src = std::path::Path::new(database);
+    if !src.is_file() {
+        anyhow::bail!("no database at {database}");
+    }
+    let in_place = output.is_none();
+    let dst_path = match output {
+        Some(path) => std::path::PathBuf::from(path),
+        // Alongside the original, so the rename is atomic (same filesystem).
+        None => src.with_extension("compact.tmp.duckdb"),
+    };
+    if dst_path.exists() {
+        anyhow::bail!("{} already exists", dst_path.display());
+    }
+
+    let stats =
+        bidslake::compact::compact(database, &dst_path.to_string_lossy()).inspect_err(|_| {
+            // A failed compaction must not leave a half-written file behind.
+            let _ = std::fs::remove_file(&dst_path);
+        })?;
+
+    if in_place {
+        std::fs::rename(&dst_path, src)
+            .with_context(|| format!("replacing {database} with the compacted copy"))?;
+    }
+
+    let pct = if stats.blocks_before > 0 {
+        100.0 * (stats.blocks_before - stats.blocks_after) as f64 / stats.blocks_before as f64
+    } else {
+        0.0
+    };
+    println!(
+        "Compacted {database}: {} tables, {} rows, {} -> {} blocks ({pct:.0}% smaller){}",
+        stats.tables,
+        stats.rows,
+        stats.blocks_before,
+        stats.blocks_after,
+        if in_place {
+            String::new()
+        } else {
+            format!(" -> {}", dst_path.display())
+        }
+    );
+    Ok(())
+}
+
+/// Every name that resolves as an adapter — the union of the three bundled
+/// registries, since an adapter need not carry all three artifacts.
+fn bundled_artifact_names() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = bids_schema::overlay::BUNDLED_OVERLAY_NAMES
+        .iter()
+        .chain(bids_schema::term_map::BUNDLED_TERM_MAP_NAMES)
+        .chain(bids_schema::BUNDLED_INGESTION_NAMES)
+        .copied()
+        .filter(|n| *n != "base")
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
+/// Resolve each `--adapter` bundled name into whatever bidslake ships under it,
+/// validating each artifact against its metaschema.
+///
+/// **All three artifacts are optional**; a name resolves if at least one exists.
+/// ADR 0002 introduced adapters for standardized non-BIDS layouts, where all three
+/// are needed at once, and the two-way overlay/adapter split assumed artifact needs
+/// cluster into exactly two shapes. fMRIPrep is the counterexample: its filenames do
+/// carry BIDS entities, so it needs no term map, but it does need an ingestion
+/// fragment for its confounds storage policy — neither "overlay alone" nor the full
+/// trio. Requiring a term map here is what made `--adapter fmriprep` fail despite the
+/// fmriprep overlay existing.
+///
+/// `embedded_ingestion` is a dataset-supplied fragment path (`.bidslake/ingestion.json`),
+/// applied last so a dataset can adjust the policy for its own contents.
+fn resolve_adapters(names: &[String], embedded_ingestion: Option<&str>) -> Result<AdapterBundle> {
     use anyhow::Context as _;
     let mut bundle = AdapterBundle {
         overlays: Vec::new(),
@@ -553,33 +656,45 @@ fn resolve_adapters(names: &[String]) -> Result<AdapterBundle> {
             .to_string(),
     ];
     for name in names {
-        let overlay = bids_schema::overlay::bundled_overlay(name).ok_or_else(|| {
-            anyhow::anyhow!(
+        let overlay = bids_schema::overlay::bundled_overlay(name);
+        let term_map = bids_schema::term_map::bundled_term_map_source(name);
+        let ingestion = bids_schema::bundled_ingestion_source(name);
+        if overlay.is_none() && term_map.is_none() && ingestion.is_none() {
+            anyhow::bail!(
                 "unknown adapter {name:?}; bundled adapters are {:?}",
-                bids_schema::term_map::BUNDLED_TERM_MAP_NAMES
-            )
-        })?;
-        bundle.overlays.push(schema::AppliedOverlay {
-            source: name.clone(),
-            content: overlay,
-        });
+                bundled_artifact_names()
+            );
+        }
 
-        let tm_src = bids_schema::term_map::bundled_term_map_source(name)
-            .ok_or_else(|| anyhow::anyhow!("adapter {name:?} has no bundled term map"))?;
-        bundle.term_maps.push(
-            bids_schema::term_map::bundled_term_map(name)
-                .with_context(|| format!("compiling term map {name:?}"))?,
-        );
-        bundle
-            .term_map_provenance
-            .push((name.clone(), serde_json::from_str(tm_src)?));
-
-        let ing_src = bids_schema::bundled_ingestion_source(name)
-            .ok_or_else(|| anyhow::anyhow!("adapter {name:?} has no bundled ingestion schema"))?;
-        ingestion_sources.push(ing_src.to_string());
+        if let Some(overlay) = overlay {
+            bundle.overlays.push(schema::AppliedOverlay {
+                source: name.clone(),
+                content: overlay,
+            });
+        }
+        if let Some(tm_src) = term_map {
+            bundle.term_maps.push(
+                bids_schema::term_map::bundled_term_map(name)
+                    .with_context(|| format!("compiling term map {name:?}"))?,
+            );
+            bundle
+                .term_map_provenance
+                .push((name.clone(), serde_json::from_str(tm_src)?));
+        }
+        if let Some(ing_src) = ingestion {
+            ingestion_sources.push(ing_src.to_string());
+            bundle
+                .ingestion_provenance
+                .push((name.clone(), serde_json::from_str(ing_src)?));
+        }
+    }
+    if let Some(path) = embedded_ingestion {
+        let src = std::fs::read_to_string(path)
+            .with_context(|| format!("reading embedded ingestion schema {path:?}"))?;
         bundle
             .ingestion_provenance
-            .push((name.clone(), serde_json::from_str(ing_src)?));
+            .push((path.to_string(), serde_json::from_str(&src)?));
+        ingestion_sources.push(src);
     }
     bundle.ingestion = schema::Ingestion::from_sources(
         &ingestion_sources
@@ -672,9 +787,41 @@ async fn run_indexer(
         print_routing_summary(&db)?;
     } else {
         println!("Conversion complete!");
+        report_reclaimable_space(&db, &output);
     }
 
     Ok(())
+}
+
+/// Point out a catalog that is mostly holes, once the waste is worth a rewrite.
+///
+/// Re-indexing DELETEs a dataset's rows before re-inserting them, and DuckDB never
+/// returns the vacated blocks to the OS. A first index frees nothing, so this stays
+/// quiet until a re-index has actually churned — and the absolute floor keeps it quiet
+/// for a small catalog, where a large *fraction* is still not worth a rewrite.
+///
+/// Advisory, not automatic: compaction rewrites the whole file and transiently needs
+/// twice the disk, which is not something to do behind the user's back.
+fn report_reclaimable_space(db: &BidsDb, output: &str) {
+    const MIN_FREE_FRACTION: f64 = 0.20;
+    const MIN_FREE_MB: f64 = 64.0;
+
+    let Ok((total, free)) = bidslake::compact::free_block_ratio(&db.conn) else {
+        return;
+    };
+    if total == 0 {
+        return;
+    }
+    let block_mb = 0.25; // DuckDB's 256 KiB default
+    let free_mb = free as f64 * block_mb;
+    if (free as f64 / total as f64) < MIN_FREE_FRACTION || free_mb < MIN_FREE_MB {
+        return;
+    }
+    println!(
+        "Note: {free_mb:.0} MB of {output} ({:.0}%) is free blocks left by re-indexing. \
+         DuckDB does not return them to the OS; reclaim with `bidslake compact -d {output}`.",
+        100.0 * free as f64 / total as f64,
+    );
 }
 
 /// Report, for a dry run, how each tabular file was routed — a count by disposition

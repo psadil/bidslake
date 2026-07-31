@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import bidslake
+import polars as pl
 
 
 def test_default_resolves_to_existing_file(lake):
@@ -28,3 +29,21 @@ def test_root_override_wins_over_base_dir(lake_db):
     )
     f = next(lake.get(suffix="bold", dataset_id="ds210"))
     assert f.uri == f"s3://bucket/ds210/{f.file_path}"
+
+
+def test_resolve_opens_a_row_from_any_table(lake):
+    """`resolve` reaches files that are not `scans` rows — the route to columns a
+    catalog deliberately did not store (they stay in the file, indexed by
+    `tabular_files`)."""
+    row = lake.table("tabular_files").pl().filter(pl.col("status") == "ingested").row(0, named=True)
+    path = lake.resolve(row["dataset_id"], row["file_path"])
+    assert path.exists(), f"{path} should be readable"
+    # `.open()`, not `str(path)`: a UPath stringifies back to a URI.
+    assert pl.read_csv(path.open("rb"), separator="\t", null_values="n/a").height >= 0
+
+
+def test_resolve_honors_root_override(lake_db):
+    lake = bidslake.open(str(lake_db), root_override={"ds210": "/relocated/ds210"})
+    assert str(lake.resolve("ds210", "sub-01/anat/x.nii.gz")).endswith(
+        "/relocated/ds210/sub-01/anat/x.nii.gz"
+    )

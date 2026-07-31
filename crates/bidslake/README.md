@@ -73,7 +73,11 @@ BIDS keeps a surprising amount of information in `.tsv` tables — event timings
 
 > Every tabular file a dataset contains is accounted for. Header-bearing tables are ingested into the database; large compressed recordings (`*.tsv.gz`) are, for now, left on disk (a size policy — see the roadmap) but still recorded. Files excluded by `.bidsignore` are never read; a tabular file the BIDS schema does not describe is skipped with a warning and recorded — never silently dropped.
 
-The tables, their columns, and how each file is routed are all **derived from the BIDS schema** (`rules.tabular_data`, `objects.columns`, and — for the headerless recordings — `rules.sidecars` and `meta.associations`), not hardcoded. Each modality gets its own table (`eeg_channels`, `meg_channels`, `blood`, `physio`, …); uncompressed continuous recordings (chiefly `motion`) are stored one row per sample, with their column names taken from the sidecar `Columns` field or the associated `_channels.tsv`. A provenance table, `tabular_files`, records every tabular file with a `status` (`ingested` / `on_disk` / `skipped`) and the table it maps to, and a test asserts nothing is silently dropped.
+Accounted for is not the same as *stored verbatim*. What a table stores is what the schema declares it stores; a table may be configured to leave undeclared columns in the file rather than in the database, in which case the file — still on disk, still in `tabular_files` — is the record of them.
+
+The tables and their columns are **derived from the BIDS schema** (`rules.tabular_data`, `objects.columns`, and — for the headerless recordings — `rules.sidecars` and `meta.associations`), not hardcoded. Each modality gets its own table (`eeg_channels`, `meg_channels`, `blood`, `physio`, …); uncompressed continuous recordings (chiefly `motion`) are stored one row per sample, with their column names taken from the sidecar `Columns` field or the associated `_channels.tsv`. A provenance table, `tabular_files`, records every tabular file with a `status` (`ingested` / `on_disk` / `skipped`) and the table it maps to, and a test asserts nothing is silently dropped.
+
+*What bidslake does* with each file — read its contents, catalog it unread, or ignore it — is a separate, equally declarative layer: the **ingestion schema** ([ADR 0002](../../docs/adr/0002-layout-adapters.md)), a bidslake-specific document whose rules select over projected BIDS concepts and are validated against their own metaschema. That is what routes `.bval`/`.bvec` to the diffusion reader and leaves `*.tsv.gz` on disk, and it is where per-table policy lives (row ordering, materialized concepts, and whether a table stores columns the schema does not declare — see the roadmap).
 
 ## Documentation
 
@@ -96,8 +100,23 @@ cargo test
 
 ## Roadmap
 
-**Where large tabular data lives.** High-rate continuous recordings do not belong in the catalog as-is: stored one row per sample, a single 500 Hz `*_physio` recording is nearly two million rows and dwarfs the metadata it accompanies. **Today bidslake draws a deliberately crude line: compressed tables (`*.tsv.gz`) are left on disk, everything else is ingested.** That is not a principled boundary — it just happens to catch the physio/stim recordings, which BIDS always compresses, while keeping ingestion fast. The files are still recorded in `tabular_files` (`status = 'on_disk'`) so they are tracked, not lost.
+**Where large tabular data lives.** High-rate continuous recordings do not belong in the catalog as-is: stored one row per sample, a single 500 Hz `*_physio` recording is nearly two million rows and dwarfs the metadata it accompanies.
 
-In managed mode the likely answer is the DuckLake split applied one level down: small tabular data stays in the catalog, while large continuous recordings are written to partitioned Parquet (or [Vortex](https://vortex.dev/)) files on disk and exposed as views, so SQL still sees one table. **We do not yet know how to draw that line well.** Candidate signals — row count, byte size, sampling rate from the sidecar, or simply the file's BIDS suffix — all have failure modes, and the choice interacts with the (stubbed) `transcode` and `verify` commands. The `*.tsv.gz` rule is a placeholder until it is settled.
+The **mechanism** for this is settled. [ADR 0002](../../docs/adr/0002-layout-adapters.md) replaced bidslake's hardcoded read-vs-catalog logic with the ingestion schema: selector-driven `read` / `catalog` / `ignore` dispositions, metaschema-validated, with per-table policy alongside. Nothing about deciding what to ingest requires new machinery — it requires writing rules.
+
+What remains crude is the **criterion**. Two levers exist, at different granularities:
+
+- *Whole file* — one rule, `extension == ".tsv.gz"` → `catalog`, is all that stands between a catalog and two million rows of physio. It is a proxy, not a principle: it happens to catch the physio/stim recordings because BIDS always compresses them. The files stay recorded in `tabular_files` (`status = 'on_disk'`), tracked and findable, just unread. Candidate replacements — row count, byte size, sampling rate from the sidecar, the BIDS suffix — all have failure modes, and the choice interacts with the (stubbed) `transcode` and `verify` commands.
+- *Per column* — `undeclared: "catalog"` in a table's policy, which stores the columns a table declares and leaves the rest in the file. This is what keeps fMRIPrep confounds tractable: the file has ~1,800 columns, the schema declares ~13, and storing the remainder as per-row JSON cost 24 MB of database per confounds file. See [ADR 0004](../../docs/adr/0004-undeclared-column-policy.md).
+
+In managed mode the likely answer for the whole-file case is the DuckLake split applied one level down: small tabular data stays in the catalog, while large continuous recordings are written to partitioned Parquet (or [Vortex](https://vortex.dev/)) files on disk and exposed as views, so SQL still sees one table.
+
+**Reclaiming space after a re-index.** Re-indexing a dataset deletes its rows and re-inserts them; DuckDB reuses the vacated blocks for later writes but never returns them to the OS, and `CHECKPOINT` does not shrink the file. A catalog that has been re-indexed a few times can be substantially holes — the one that motivated ADR 0004 was 28% free blocks, 478 MB of a 1.74 GB file. `bidslake compact` rewrites it:
+
+```bash
+bidslake compact -d study.duckdb
+```
+
+It preserves every table, row, key, constraint, and view, verifies per-table row counts before replacing the original, and reports what it reclaimed. An index run that leaves a substantial fraction free says so rather than waiting to be discovered. It is deliberately not automatic: a rewrite transiently needs twice the disk, and a first index has nothing to reclaim.
 
 **S3.** Ingesting a dataset straight from S3 works end-to-end: object listing and JSON metadata via the AWS SDK, `.tsv` contents streamed into DuckDB via the `httpfs` extension (`read_csv` opens `s3://` directly), and Rust-side reads (JSON sidecars, `.bval`/`.bvec`) issued concurrently to overlap network latency. Remaining gaps are minor: dataset-embedded overlay auto-discovery (`.bidslake/overlay.json`) is skipped for remote inputs, and the S3 integration tests are network-gated (`#[ignore]`, run with `cargo test --test s3_ingest -- --ignored`).

@@ -19,9 +19,12 @@
 //! ### Insert-by-`json_key`, with `other_data` overflow
 //!
 //! [`Schema::insert`] takes a `serde_json` object (one row) and, for each column,
-//! pulls the value at `json_key` (falling back to `col_name`). Any input key that
-//! is *not* claimed by a column lands in the table's `other_data JSON` column, so
-//! nothing is dropped. The INSERT SQL is built once per table
+//! pulls the value at `json_key` (falling back to `col_name`, then to a
+//! case-insensitive match — see `table_keys_lower`). Any input key that is *not*
+//! claimed by a column lands in the table's `other_data JSON` column, so nothing is
+//! dropped — unless the ingestion policy declares the table's undeclared columns
+//! `catalog`, in which case there is no `other_data` column and the file on disk is
+//! the record of them. The INSERT SQL is built once per table
 //! (`build_insert_statements`) and executed via `prepare_cached`, so
 //! DuckDB reuses one compiled plan across every row of that table.
 //!
@@ -39,7 +42,7 @@
 //! The static tables `diffusion` and `file_associations` live in the parent
 //! [`crate::schema`] module, not here.
 
-use super::ingestion::Ingestion;
+use super::ingestion::{Ingestion, Undeclared};
 use super::tabular::{RowIdentity, TableSpec, Tabular};
 use duckdb::{Connection, Result};
 use serde_json::Value;
@@ -67,8 +70,22 @@ pub struct Schema {
     tabular: Tabular,
     table_definitions: HashMap<String, String>,
     table_columns: HashMap<String, Vec<(String, String, String)>>, // table -> [(col_name, col_type, json_key)]
-    primary_keys: HashMap<String, Vec<String>>,                    // table -> [pk_col_names]
-    insert_sql: HashMap<String, String>, // table -> prebuilt INSERT statement
+    /// Lowercased `json_key`s of [`Self::table_columns`]: which source fields a table
+    /// has a dedicated column for.
+    ///
+    /// Lowercased because DuckDB folds identifier case, so a table cannot hold two
+    /// columns whose names differ only in case. Where BIDS declares such a pair the
+    /// DDL keeps one and drops the other (`MISCChannelCount` beats
+    /// `MiscChannelCount`), and matching exactly would strand the dropped spelling —
+    /// missing from its own column *and* counted as undeclared. The surviving column
+    /// absorbs both, as DuckDB does with the identifier itself.
+    ///
+    /// Derived, never set directly — see [`Schema::set_table_columns`]. Precomputed
+    /// because the alternative is rebuilding a 449-entry set per `sidecars` row on the
+    /// bulk-insert path.
+    table_keys_lower: HashMap<String, std::collections::HashSet<String>>,
+    primary_keys: HashMap<String, Vec<String>>, // table -> [pk_col_names]
+    insert_sql: HashMap<String, String>,        // table -> prebuilt INSERT statement
     /// The overlays merged into this schema, in application order (empty if none).
     overlays: Vec<AppliedOverlay>,
     /// Ingestion policy (read/catalog/ignore + per-table materialized concepts). Empty for a
@@ -135,6 +152,7 @@ impl Schema {
             tabular,
             table_definitions: HashMap::new(),
             table_columns: HashMap::new(),
+            table_keys_lower: HashMap::new(),
             primary_keys: HashMap::new(),
             insert_sql: HashMap::new(),
             overlays: overlays.to_vec(),
@@ -191,6 +209,27 @@ impl Schema {
                 self.insert_sql.insert(table, sql);
             }
         }
+    }
+
+    /// Record a table's write columns, keeping the derived lowercase key index in
+    /// step. The only way `table_columns` is populated, so the two cannot drift.
+    fn set_table_columns(&mut self, table: &str, fields: Vec<(String, String, String)>) {
+        self.table_keys_lower.insert(
+            table.to_string(),
+            fields
+                .iter()
+                .map(|(_, _, json_key)| json_key.to_lowercase())
+                .collect(),
+        );
+        self.table_columns.insert(table.to_string(), fields);
+    }
+
+    /// Whether `table` has a dedicated column for the source field `key`, matched
+    /// case-insensitively (see [`Self::table_keys_lower`]).
+    pub fn declares(&self, table: &str, key: &str) -> bool {
+        self.table_keys_lower
+            .get(table)
+            .is_some_and(|keys| keys.contains(&key.to_lowercase()))
     }
 
     /// Build the `INSERT ... SELECT ... [WHERE NOT EXISTS ...]` statement for a
@@ -363,13 +402,19 @@ impl Schema {
             fields.push((c.name.clone(), c.sql_type.clone(), c.name.clone()));
         }
 
-        // Overflow for any header without a dedicated column.
-        columns.push("other_data JSON".to_string());
-        fields.push((
-            "other_data".to_string(),
-            "JSON".to_string(),
-            "other_data".to_string(),
-        ));
+        // Overflow for any header without a dedicated column — unless the ingestion
+        // policy declares this table's undeclared columns cataloged, in which case the
+        // column is omitted outright. Omitting it (rather than leaving it NULL) is what
+        // makes `row_values` drop those keys for free: it iterates `table_columns`, so
+        // with no `other_data` field there is no branch to populate.
+        if self.ingestion.undeclared(&spec.table) == Undeclared::Store {
+            columns.push("other_data JSON".to_string());
+            fields.push((
+                "other_data".to_string(),
+                "JSON".to_string(),
+                "other_data".to_string(),
+            ));
+        }
 
         // Virtual BIDS-concept columns (derived from file_path) for file-based
         // tables, computed on read and never written.
@@ -403,7 +448,8 @@ impl Schema {
             columns.join(",\n    ")
         );
         self.table_definitions.insert(spec.table.clone(), sql);
-        self.table_columns.insert(spec.table.clone(), fields);
+        let table = spec.table.clone();
+        self.set_table_columns(&table, fields);
         if !pk.is_empty() {
             self.primary_keys.insert(spec.table.clone(), pk);
         }
@@ -609,8 +655,7 @@ impl Schema {
         );
         self.table_definitions
             .insert("sidecars".to_string(), sidecar_sql);
-        self.table_columns
-            .insert("sidecars".to_string(), sidecar_fields);
+        self.set_table_columns("sidecars", sidecar_fields);
         self.primary_keys.insert(
             "sidecars".to_string(),
             vec!["dataset_id".to_string(), "file_path".to_string()],
@@ -693,7 +738,7 @@ impl Schema {
         );
         self.table_definitions
             .insert(table_name.to_string(), create_sql);
-        self.table_columns.insert(table_name.to_string(), fields);
+        self.set_table_columns(table_name, fields);
         self.primary_keys
             .insert(table_name.to_string(), vec!["dataset_id".to_string()]);
     }
@@ -767,11 +812,11 @@ impl Schema {
             )))
         })?;
 
-        // Build set of all json_keys that have dedicated columns
-        let schema_keys: std::collections::HashSet<&str> = fields
-            .iter()
-            .map(|(_, _, json_key)| json_key.as_str())
-            .collect();
+        // Which source keys have a dedicated column. Case-insensitive, and precomputed
+        // per table rather than rebuilt per row — see `declares` for why both matter.
+        let schema_keys = self.table_keys_lower.get(table_name);
+        let declared =
+            |key: &str| schema_keys.is_some_and(|keys| keys.contains(key.to_lowercase().as_str()));
 
         let mut params: Vec<Option<duckdb::types::Value>> = Vec::new();
         // Owns JSON strings until they're cloned into `Value::Text` just below.
@@ -781,10 +826,10 @@ impl Schema {
             // Special handling for other_data column
             if col_name == "other_data" {
                 if let Some(obj) = data.as_object() {
-                    // Filter: only include keys NOT in schema_keys
+                    // Only the keys with no dedicated column reach the overflow.
                     let mut custom_data = serde_json::Map::new();
                     for (key, value) in obj {
-                        if !schema_keys.contains(key.as_str()) {
+                        if !declared(key) {
                             custom_data.insert(key.clone(), value.clone());
                         }
                     }
@@ -805,7 +850,15 @@ impl Schema {
             }
 
             let val = if let Some(obj) = data.as_object() {
-                obj.get(json_key).or_else(|| obj.get(col_name))
+                obj.get(json_key).or_else(|| obj.get(col_name)).or_else(|| {
+                    // Case-insensitive last resort, for the spelling the DDL dropped
+                    // (see `table_keys_lower`). Only reached when both exact lookups
+                    // miss, and scans the *row's* keys — tens, not the table's hundreds.
+                    let want = json_key.to_lowercase();
+                    obj.iter()
+                        .find(|(k, _)| k.to_lowercase() == want)
+                        .map(|(_, v)| v)
+                })
             } else {
                 None
             };

@@ -30,7 +30,7 @@ use crate::links;
 use crate::readers::{self, ContentReader};
 use crate::schema::Schema;
 use crate::schema::dynamic::{quote_ident, sql_in_list, sql_lit};
-use crate::schema::ingestion::Disposition;
+use crate::schema::ingestion::{Disposition, Undeclared};
 use crate::schema::tabular::{ColumnSpec, FileContext, RowIdentity, TableSpec};
 use anyhow::{Context, Result};
 use bids_core::entities::read_entities;
@@ -633,10 +633,11 @@ impl BidsParser {
                     Value::String(img_file.file_path.clone()),
                 );
 
-                // `filename` has no dedicated column, so it lands in `other_data`.
-                if let Some(filename) = img_file.file_path.split('/').next_back() {
-                    scan_data.insert("filename".to_string(), Value::String(filename.to_string()));
-                }
+                // No `filename` key: it is structural, not data. The `scans.tsv` path
+                // consumes it into `file_path` (see `structural` in
+                // `build_tabular_insert_sql`) rather than storing it, and an
+                // auto-generated row must agree — otherwise every row carries an
+                // `other_data` blob duplicating the tail of `file_path`.
                 scan_rows.push(Value::Object(scan_data));
             }
 
@@ -714,6 +715,17 @@ impl BidsParser {
     /// columns). `None` when `merged` is empty. Collected and bulk-inserted via the
     /// Appender (`sidecars` is very wide and carries the generated columns, so a
     /// per-row INSERT is especially slow).
+    ///
+    /// When the ingestion policy scopes `undeclared: catalog` onto this file, only the
+    /// fields with dedicated columns are kept — the sidecar on disk stays the record of
+    /// the rest. fMRIPrep's `desc-confounds_timeseries.json` is the case that motivates
+    /// it: a 366 KB column dictionary describing ~2,200 confound regressors, one per
+    /// BOLD run, and 100% of the sidecar JSON bytes in a real derivatives catalog.
+    ///
+    /// The filter has to happen *here*, on the flatten loop, not by dropping the
+    /// `other_data` insert below: [`Schema::row_values`] treats `other_data` as one of
+    /// its own `schema_keys`, so it discards the map passed here and recomputes the
+    /// column from these flattened top-level keys. Removing that insert is a no-op.
     fn build_sidecar_row(
         &self,
         dataset_id: &str,
@@ -732,12 +744,34 @@ impl BidsParser {
             "file_path".to_string(),
             Value::String(file_path.to_string()),
         );
+
+        let (suffix, extension) = split_suffix_ext(file_path);
+        let datatype = self.datatype_dir_in_path(file_path);
+        // BIDS selector paths are dataset-relative with a leading slash.
+        let path_with_slash = format!("/{file_path}");
+        let sidecar = Value::Null;
+        let keep_undeclared = self.schema.ingestion().undeclared_for(
+            "sidecars",
+            &FileContext {
+                path: &path_with_slash,
+                datatype: datatype.as_deref(),
+                suffix: Some(&suffix),
+                extension: Some(&extension),
+                sidecar: &sidecar,
+                dataset_type: self.dataset_type.as_deref(),
+            },
+        ) == Undeclared::Store;
+
         // Flatten metadata into top-level fields for known columns (borrowing
         // `merged`), then move the whole map into `other_data` — no clone.
         for (k, v) in &merged {
-            sidecar_entry.insert(k.clone(), v.clone());
+            if keep_undeclared || self.schema.declares("sidecars", k) {
+                sidecar_entry.insert(k.clone(), v.clone());
+            }
         }
-        sidecar_entry.insert("other_data".to_string(), Value::Object(merged));
+        if keep_undeclared {
+            sidecar_entry.insert("other_data".to_string(), Value::Object(merged));
+        }
         Some(Value::Object(sidecar_entry))
     }
 
@@ -1711,7 +1745,8 @@ impl BidsParser {
         // faithful row number; the ordering policy lives in the ingestion schema
         // (`Ingestion::ordered`); see bids-2-devel#98.
         let preserve_order = self.schema.ingestion().ordered(&spec.table);
-        let sql = build_tabular_insert_sql(
+        let store_undeclared = self.schema.ingestion().undeclared(&spec.table) == Undeclared::Store;
+        let (sql, undeclared) = build_tabular_insert_sql(
             spec,
             &source,
             rel_path,
@@ -1720,7 +1755,11 @@ impl BidsParser {
             &sniffed,
             HEADER_READ_OPTS,
             preserve_order,
+            store_undeclared,
         );
+        if !store_undeclared {
+            db.record_undeclared_columns(&spec.table, &undeclared)?;
+        }
         // A single malformed TSV must not abort the whole dataset's ingest — log
         // and move on (the file is still recorded in `tabular_files`, with 0 rows).
         match db.conn.execute(&sql, []) {
@@ -1800,8 +1839,24 @@ impl BidsParser {
             // ingestion schema (`Ingestion::ordered`);
             // see https://github.com/bids-standard/bids-2-devel/issues/98.
             let preserve_order = self.schema.ingestion().ordered(&spec.table);
-            let select =
-                build_tabular_batch_select(spec, &dataset_id, &files, columns, preserve_order);
+            let store_undeclared =
+                self.schema.ingestion().undeclared(&spec.table) == Undeclared::Store;
+            let (select, undeclared) = build_tabular_batch_select(
+                spec,
+                &dataset_id,
+                &files,
+                columns,
+                preserve_order,
+                store_undeclared,
+            );
+            if !store_undeclared
+                && let Err(e) = db.record_undeclared_columns(&spec.table, &undeclared)
+            {
+                eprintln!(
+                    "Warning: recording undeclared columns for {}: {e}",
+                    spec.table
+                );
+            }
             let sql = format!("INSERT INTO {} BY NAME {select}", spec.table);
             // A batch-INSERT execution failure (e.g. an IO/read error) drops this
             // group's rows for the run — record its members as `failed` so the
@@ -2020,7 +2075,8 @@ impl BidsParser {
         let sub = rec.entities.get("sub").map(|s| s.as_str());
         // Recordings are positional (row N is sample N), so preserve line order.
         let preserve_order = self.schema.ingestion().ordered(&spec.table);
-        let sql = build_tabular_insert_sql(
+        let store_undeclared = self.schema.ingestion().undeclared(&spec.table) == Undeclared::Store;
+        let (sql, undeclared) = build_tabular_insert_sql(
             &spec,
             &source,
             &rec.rel_path,
@@ -2029,7 +2085,11 @@ impl BidsParser {
             &colnames,
             &read_opts,
             preserve_order,
+            store_undeclared,
         );
+        if !store_undeclared {
+            db.record_undeclared_columns(&spec.table, &undeclared)?;
+        }
         match db.conn.execute(&sql, []) {
             Ok(n) => Ok((Some(table.to_string()), n as i64)),
             Err(e) => {
@@ -2407,7 +2467,8 @@ fn build_tabular_insert_sql(
     sniffed: &[String],
     read_opts: &str,
     preserve_order: bool,
-) -> String {
+    store_undeclared: bool,
+) -> (String, Vec<String>) {
     let present: HashSet<&str> = sniffed.iter().map(|s| s.as_str()).collect();
     let mut selects: Vec<String> = vec![format!("{} AS dataset_id", sql_lit(dataset_id))];
     // TSV headers consumed structurally (become a key/path, not a data column and
@@ -2481,13 +2542,18 @@ fn build_tabular_insert_sql(
         }
     }
 
-    // Everything else → other_data JSON (in file order).
+    // Everything else → other_data JSON (in file order). An empty name (a trailing
+    // tab in the header) is dropped: it would emit `json_object('', "")`, whose
+    // zero-length delimited identifier is a parser error that drops the whole file.
+    // Under `undeclared: catalog` the table has no `other_data` column, so these are
+    // not projected — the file on disk is the record of them — but they are still
+    // computed, so the caller can record their names (see `build_tabular_batch_select`).
     let extras: Vec<&str> = sniffed
         .iter()
         .map(|s| s.as_str())
-        .filter(|c| !structural.contains(c) && !known.contains(c))
+        .filter(|c| !c.is_empty() && !structural.contains(c) && !known.contains(c))
         .collect();
-    if !extras.is_empty() {
+    if store_undeclared && !extras.is_empty() {
         let pairs: Vec<String> = extras
             .iter()
             .map(|c| format!("{}, {}", sql_lit(c), quote_ident(c)))
@@ -2511,12 +2577,13 @@ fn build_tabular_insert_sql(
     } else {
         ""
     };
-    format!(
+    let sql = format!(
         "{verb} INTO {} BY NAME SELECT {} FROM read_csv({}, {read_opts}{sequential})",
         spec.table,
         selects.join(", "),
         sql_lit(source),
-    )
+    );
+    (sql, extras.into_iter().map(str::to_string).collect())
 }
 
 /// Build the batched `SELECT` for a group of per-row tabular files that share a
@@ -2548,7 +2615,8 @@ fn build_tabular_batch_select(
     files: &[(&str, &str)],
     columns: &[String],
     preserve_order: bool,
-) -> String {
+    store_undeclared: bool,
+) -> (String, Vec<String>) {
     let present: HashSet<&str> = columns.iter().map(|s| s.as_str()).collect();
 
     let row_idx = if preserve_order {
@@ -2578,13 +2646,17 @@ fn build_tabular_batch_select(
     }
 
     // Everything else → other_data JSON. Identical column set across the group, so
-    // these are exactly each file's real extras.
+    // these are exactly each file's real extras. Empty names are dropped for the same
+    // reason as in `build_tabular_insert_sql`. Computed even when they will not be
+    // projected, because the caller records the names in
+    // `tabular_undeclared_columns` — deriving both from this one list is what keeps
+    // "what we dropped" and "what we recorded dropping" in agreement.
     let extras: Vec<&str> = columns
         .iter()
         .map(|s| s.as_str())
-        .filter(|c| !known.contains(c) && *c != "filename")
+        .filter(|c| !c.is_empty() && !known.contains(c) && *c != "filename")
         .collect();
-    if !extras.is_empty() {
+    if store_undeclared && !extras.is_empty() {
         let pairs: Vec<String> = extras
             .iter()
             .map(|c| format!("{}, raw.{}", sql_lit(c), quote_ident(c)))
@@ -2615,11 +2687,12 @@ fn build_tabular_batch_select(
         format!("read_csv([{locals}], {HEADER_READ_OPTS}, filename=true) AS raw")
     };
 
-    format!(
+    let sql = format!(
         "SELECT {selects} FROM {from} \
          JOIN (VALUES {map_values}) AS m(abs, rel) ON raw.filename = m.abs",
         selects = selects.join(", "),
-    )
+    );
+    (sql, extras.into_iter().map(str::to_string).collect())
 }
 
 /// Parse a TSV file's header from its first line — read in Rust (via
@@ -2821,7 +2894,9 @@ mod tests {
                 &[],
                 HEADER_READ_OPTS,
                 preserve,
+                true,
             )
+            .0
         };
 
         // Positional per-row table → sequential read + a row_idx.
@@ -2836,5 +2911,73 @@ mod tests {
         // PK tables carry no row_idx → never forced sequential, even with preserve_order.
         let pk = sql(&spec("participants", RowIdentity::PerEntity), true);
         assert!(!pk.contains("parallel=false"), "{pk}");
+    }
+
+    /// `store_undeclared` gates the `other_data` projection in *both* builders. The
+    /// declared columns must survive either way — this is a column policy, not a
+    /// read/skip policy: the file is still parsed, just not hoarded.
+    #[test]
+    fn store_undeclared_gates_other_data_in_both_builders() {
+        use super::{HEADER_READ_OPTS, build_tabular_batch_select, build_tabular_insert_sql};
+        use crate::schema::tabular::{ColumnSpec, RowIdentity, TableSpec};
+
+        let spec = TableSpec {
+            table: "confounds".to_string(),
+            columns: vec![ColumnSpec {
+                key: "trans_x__confounds".to_string(),
+                name: "trans_x".to_string(),
+                sql_type: "DOUBLE".to_string(),
+            }],
+            identity: RowIdentity::PerRow,
+            file_based: true,
+            rule_ids: Vec::new(),
+        };
+        let header: Vec<String> = ["trans_x", "a_comp_cor_00"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        for store in [true, false] {
+            let (single, dropped_single) = build_tabular_insert_sql(
+                &spec,
+                "/t/f.tsv",
+                "sub-01/func/f.tsv",
+                "ds",
+                None,
+                &header,
+                HEADER_READ_OPTS,
+                true,
+                store,
+            );
+            let (batched, dropped_batched) = build_tabular_batch_select(
+                &spec,
+                "ds",
+                &[("/t/f.tsv", "sub-01/func/f.tsv")],
+                &header,
+                true,
+                store,
+            );
+            // The undeclared names are reported either way — that is what the caller
+            // records in `tabular_undeclared_columns` when it is not storing them.
+            for names in [&dropped_single, &dropped_batched] {
+                assert_eq!(names, &["a_comp_cor_00".to_string()]);
+            }
+            for (which, sql) in [("single-file", &single), ("batched", &batched)] {
+                assert_eq!(
+                    sql.contains("other_data"),
+                    store,
+                    "{which} builder with store_undeclared={store}: {sql}"
+                );
+                assert_eq!(
+                    sql.contains("a_comp_cor_00"),
+                    store,
+                    "{which}: the undeclared column itself must only appear when stored"
+                );
+                assert!(
+                    sql.contains("trans_x"),
+                    "{which}: declared columns are unaffected by the policy"
+                );
+            }
+        }
     }
 }
