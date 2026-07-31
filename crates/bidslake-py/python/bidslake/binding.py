@@ -74,6 +74,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Iterator, Mapping, Sequence
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from polars import DataFrame
@@ -81,6 +82,7 @@ from upath import UPath
 
 from ._sql import quote_ident
 from .file import BidsFile
+from .paths import to_local_path
 from .schema._generated import Entity, GetFilters
 
 if TYPE_CHECKING:
@@ -151,6 +153,23 @@ class Unit:
     anchor: BidsFile
     inputs: Mapping[str, UPath | DataFrame]
     unresolved: tuple[Unresolved, ...]
+
+    def local(self, name: str) -> Path:
+        """The on-disk path of file input ``name``, for handing to a local tool.
+
+        ``inputs`` holds :class:`~upath.UPath` handles, which work for local and
+        remote alike — but a ``UPath`` stringifies back to a *URI*
+        (``file:///data/…``), so passing one to a subprocess, nibabel, or anything
+        else expecting a filename silently produces a path no tool can open. This is
+        the same distinction :attr:`BidsFile.path` and :attr:`BidsFile.local_path`
+        draw, and it raises :class:`RemotePathError` on a remote dataset rather than
+        handing back something broken.
+        """
+        value = self.inputs[name]
+        if isinstance(value, DataFrame):
+            msg = f"input {name!r} is a table slice, not a file"
+            raise TypeError(msg)
+        return to_local_path(str(value))
 
     def __repr__(self) -> str:
         state = f", unresolved={len(self.unresolved)}" if self.unresolved else ""

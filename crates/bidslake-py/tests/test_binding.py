@@ -8,6 +8,8 @@ an input can be genuinely missing), and both carry ``ses IS NULL`` throughout.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from bidslake import Binding, FileInput, TableInput
 
@@ -154,6 +156,35 @@ def test_dataset_id_scopes_an_input(lake) -> None:
     )
     assert not scoped.unresolved
     assert "sub-01/anat" in str(scoped.inputs["anat"])
+
+
+def test_local_gives_a_path_a_tool_can_open(lake) -> None:
+    """``inputs`` holds UPaths, which stringify back to ``file://`` URIs.
+
+    Handing one to a subprocess or to nibabel produces a filename no tool can open,
+    and it fails far from the cause. ``local()`` is the same distinction
+    ``BidsFile.path`` and ``BidsFile.local_path`` already draw.
+    """
+    unit = next(iter(lake.bind(_ds001(sub="01", run="01"))))
+    assert str(unit.inputs["anat"]).startswith("file://")
+
+    local = unit.local("anat")
+    assert isinstance(local, Path)
+    assert not str(local).startswith("file://")
+    assert local.is_file(), "the returned path must actually exist on disk"
+
+
+def test_local_refuses_a_table_slice(lake) -> None:
+    binding = Binding(
+        anchor={**BOLD, "dataset_id": "ds001", "sub": "01", "run": "01"},
+        key=("sub", "ses", "task", "run"),
+        inputs={
+            "events": TableInput(join=("sub", "task", "run"), table="events", columns=("onset",))
+        },
+    )
+    unit = next(iter(lake.bind(binding)))
+    with pytest.raises(TypeError, match="table slice"):
+        unit.local("events")
 
 
 def test_table_input_returns_an_ordered_slice(lake) -> None:
