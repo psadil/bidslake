@@ -220,7 +220,7 @@ async fn undeclared_catalog_drops_the_overflow_column() -> anyhow::Result<()> {
         r#"{ "IngestionSchemaVersion": "0.1.0",
              "tables": { "fmriprep_confounds": { "undeclared": "catalog" } } }"#,
     ])?;
-    let schema = Schema::load_full(None, &[fmriprep_overlay()], ingestion)?;
+    let schema = Schema::load_full(None, &[fmriprep_overlay()], ingestion, &[])?;
     let db = ingest_with_schema(dir.path(), schema).await?;
 
     let has_other_data: bool = db.conn.query_row(
@@ -287,7 +287,7 @@ async fn undeclared_when_scopes_sidecars_per_file() -> anyhow::Result<()> {
                  { "selectors": ["suffix == \"timeseries\"", "extension == \".json\""],
                    "undeclared": "catalog" } ] } } }"#,
     ])?;
-    let schema = Schema::load_full(None, &[fmriprep_overlay()], ingestion)?;
+    let schema = Schema::load_full(None, &[fmriprep_overlay()], ingestion, &[])?;
     let db = ingest_with_schema(dir.path(), schema).await?;
 
     // The confounds sidecar: its undeclared per-column descriptions are gone, but the
@@ -334,7 +334,7 @@ async fn bundled_fmriprep_adapter_catalogs_undeclared_columns() -> anyhow::Resul
         bids_schema::bundled_ingestion_source("base").expect("base ingestion"),
         bids_schema::bundled_ingestion_source("fmriprep").expect("bundled fmriprep ingestion"),
     ])?;
-    let schema = Schema::load_full(None, &[fmriprep_overlay()], ingestion)?;
+    let schema = Schema::load_full(None, &[fmriprep_overlay()], ingestion, &[])?;
     let db = ingest_with_schema(dir.path(), schema).await?;
 
     // Confounds: declared columns kept, undeclared ones recorded but not stored.

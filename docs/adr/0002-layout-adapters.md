@@ -169,15 +169,47 @@ only `ordered` is needed. *Rejected:* `$schema` fields on the artifacts — the 
 so they help no IDE, and the BIDS metaschema's top-level `additionalProperties: false` forbids
 one on an overlay anyway.
 
-### 7. Materialized concept columns for adapter tables; BIDS keeps virtual ones
+### 7. Where a table's concept columns come from — three cases, one generator
 
-BIDS tables get their entity columns as **virtual** generated columns (regexes over
-`file_path`) — cheap, and correct because a BIDS filename *contains* its entities. A
-FreeSurfer path does not, so an adapter table needs **physical** `TEXT` columns populated from
-the projection. The ingestion schema's per-table `concepts` list is what marks a table
-materialized (`freesurfer_aparc: {concepts: ["sub","ses","hemi","parc"]}`). Both kinds are
-emitted by the one shared `generate_tabular_table`; plain BIDS ingest is untouched and pays
-nothing.
+A BIDS filename *contains* its entities, so a regex over `file_path` is both cheap and
+correct. A FreeSurfer path does not. Which source a table uses depends on which kinds of file
+it holds, and all three shapes are emitted by the one shared `generate_tabular_table`:
+
+| Table | Holds | Concept columns |
+|---|---|---|
+| BIDS-native data tables (`events`, `channels`, …) | BIDS-named files only | **virtual**, regex over `file_path` |
+| adapter data tables (`freesurfer_aparc`, …) | reader output only | **physical** `TEXT`, written by the reader |
+| the file registry (`scans`) | **both** | virtual, **falling back from** a stored projection |
+
+The first two are an either/or, selected by the ingestion schema's per-table `concepts` list
+(`freesurfer_aparc: {concepts: ["sub","ses","hemi","parc"]}`), which marks a table
+materialized.
+
+`scans` is the case that either/or does not fit, because it is the one table every cataloged
+file lands in — BIDS-named or term-mapped. Replacing its virtual columns would blank every
+BIDS row; keeping only them discards the projection. So its concept columns read
+`COALESCE(json_extract_string(projected, '$.<name>'), <the existing regex>)`, over a physical
+`projected JSON` column holding what the term map computed. Precedence is explicit and lives
+in the DDL — which is stamped into `bidslake_schema`, so it travels with the catalog.
+
+**Which columns get the fallback is derived, not declared.** A term map already states what it
+can project — its literal `Entities`, its named capture groups, its `Concepts` — so
+`TermMap::projectable_concepts` reads the set off the artifact rather than asking an author to
+restate it in a second place. This matters for more than tidiness: every wrapped column pays
+the `COALESCE` on read, and wrapping all 43 measured **~7.6%** on the `SELECT *`-plus-filter
+shape `bidslake-py`'s `get()` issues, against **~1.8%** for the seven FreeSurfer can supply.
+
+With no term map configured the set is empty, so the `projected` column is not emitted, no
+expression is wrapped, and a plain BIDS catalog keeps byte-identical DDL — and therefore an
+unchanged `_generated.py`. Plain BIDS pays nothing, not merely little.
+
+*Rejected:* a second ingestion-policy key (`projected`) naming the set. It would have been a
+synonym for `concepts` — both answer "which concepts come from projection rather than the
+filename" — and the metaschema says outright that `tables` excludes the registry. *Rejected:*
+a side table joined at query time. It splits "what is this file?" across two places, so
+`get()` must either keep returning nothing for a projected concept or silently learn to join,
+and derived columns like `modality` would need re-implementing in the view. Chained generated
+columns give `modality` the projected `datatype` for free.
 
 ### 8. Hand-written JSON Schema metaschemas, validated per artifact
 
@@ -248,6 +280,18 @@ for a BIDS-named derivative. The ingestion schema alone is what plain BIDS uses.
   `freesurfer_measures`, `freesurfer_labels`) joined to BIDS data by `sub`/`ses` in one
   catalog, with no bespoke code per dataset — only three declarative documents plus a content
   reader for the one thing that is irreducibly code: parsing a `.stats` body.
+- **A projection is worth the same whether the file is read or merely cataloged.** A term map
+  answers "what does this path denote?", and §7 is what makes the file registry answer the
+  same way. Before it, a cataloged file kept nothing: on a real `recon-all` tree, 0 of 249
+  `scans` rows carried a `datatype`, though the term map declares `anat` for every mapping —
+  so consumers fell back to matching paths by hand (`file_path LIKE '%mri/wmparc.mgz'`), which
+  is exactly what a term map exists to remove.
+- Because a projection now reaches the registry, mappings should bind the entity that
+  identifies a file rather than leaning on a catch-all. `mri/[^/]+\.mgz` matched every volume
+  but bound nothing, so the volumetric segmentations were indistinguishable; they now have
+  their own mapping carrying `seg` (`wmparc`, `aseg`, `aparc+aseg`, …) and `suffix: dseg`,
+  ordered before the catch-all, which still claims everything else. `RegexSet` yields the
+  lowest matching index, so specificity is expressed by ordering.
 - Adding another layout (HCP, …) is authoring a trio, not writing an ingester.
 - Two of the three layers are standards-track; the third is honest about not being.
 - Content parsing stays code. The ingestion schema formalizes *which* reader and *how*

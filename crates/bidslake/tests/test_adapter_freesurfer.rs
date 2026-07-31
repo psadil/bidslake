@@ -229,6 +229,153 @@ async fn adapter_dataset_records_a_root_uri() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A term map states what a path denotes; the file registry must answer accordingly.
+///
+/// Cataloged files get no reader, so their `FileFacts` used to pick an ingestion rule and
+/// then be dropped — leaving `scans` rows whose `datatype` was NULL even though the term
+/// map declares `anat` for every mapping. The projection is now stored and the generated
+/// concept columns fall back from it, so a path that carries none of its concepts in its
+/// name still reads as what it is.
+#[tokio::test]
+async fn cataloged_projection_reaches_the_registry() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_fs_tree(dir.path());
+    let db = ingest_with_adapters(dir.path(), &["freesurfer"]).await?;
+
+    // `mri/aseg.mgz` has no BIDS entity in its name: `seg`, `datatype` and `suffix` can
+    // only come from the projection.
+    let (sub, ses, seg, datatype, suffix, modality): (
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+    ) = db.conn.query_row(
+        "SELECT sub, ses, seg, datatype, suffix, modality FROM scans \
+         WHERE file_path LIKE '%sub-01_ses-1/mri/aseg.mgz'",
+        [],
+        |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        },
+    )?;
+    assert_eq!(
+        (
+            sub.as_str(),
+            ses.as_str(),
+            seg.as_str(),
+            datatype.as_str(),
+            suffix.as_str()
+        ),
+        ("01", "1", "aseg", "anat", "dseg")
+    );
+    // `modality` is a CASE over `datatype`, so it only resolves if a generated column can
+    // read another generated column that itself consulted the projection.
+    assert_eq!(
+        modality, "mri",
+        "modality chains off the projected datatype"
+    );
+
+    // Every cataloged file carries its term map's `datatype`, not just the segmentations.
+    let missing: i64 = db.conn.query_row(
+        "SELECT COUNT(*) FROM scans WHERE datatype IS NULL",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(missing, 0, "every projected file records its datatype");
+    Ok(())
+}
+
+/// The projection must not change what a BIDS-named file means. With an adapter active
+/// every concept column is wrapped in a COALESCE, so this pins the fallback: a file the
+/// term map does not claim still reads its concepts off the path.
+#[tokio::test]
+async fn bids_named_files_still_read_concepts_from_the_path() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_fs_tree(dir.path());
+    // Not a FreeSurfer path — no term-map mapping claims it, so `projected` stays NULL.
+    write(
+        dir.path(),
+        "sub-01/func/sub-01_task-rest_run-01_bold.nii.gz",
+        b"\x00nii",
+    );
+    let db = ingest_with_adapters(dir.path(), &["freesurfer"]).await?;
+
+    let (sub, task, run, datatype, suffix, projected_is_null): (
+        String,
+        String,
+        String,
+        String,
+        String,
+        bool,
+    ) = db.conn.query_row(
+        "SELECT sub, task, run, datatype, suffix, projected IS NULL FROM scans \
+         WHERE file_path LIKE '%_task-rest_run-01_bold.nii.gz'",
+        [],
+        |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        },
+    )?;
+    assert_eq!(
+        (
+            sub.as_str(),
+            task.as_str(),
+            run.as_str(),
+            datatype.as_str(),
+            suffix.as_str()
+        ),
+        ("01", "rest", "01", "func", "bold"),
+        "concepts still parsed out of a BIDS filename"
+    );
+    assert!(
+        projected_is_null,
+        "a file no term map claims stores no projection"
+    );
+    Ok(())
+}
+
+/// With no term map configured there is nothing to project, so the registry keeps exactly
+/// the DDL it had before this existed — no `projected` column and no COALESCE on any
+/// concept column. That is what keeps a plain BIDS ingest paying nothing for a feature it
+/// cannot use, and keeps the generated Python types stable.
+#[tokio::test]
+async fn plain_bids_registry_has_no_projection_column() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_fs_tree(dir.path());
+    let db = ingest(dir.path()).await?;
+
+    let has_column: i64 = db.conn.query_row(
+        "SELECT COUNT(*) FROM information_schema.columns \
+         WHERE table_name = 'scans' AND column_name = 'projected'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(has_column, 0, "no projection column without a term map");
+
+    let coalesced: i64 = db.conn.query_row(
+        "SELECT COUNT(*) FROM duckdb_tables() \
+         WHERE table_name = 'scans' AND sql LIKE '%json_extract_string(projected%'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(coalesced, 0, "no concept column consults a projection");
+    Ok(())
+}
+
 #[tokio::test]
 async fn without_adapter_freesurfer_tables_absent() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;

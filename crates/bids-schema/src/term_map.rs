@@ -163,6 +163,41 @@ impl TermMap {
         Ok(TermMap { mappings, set })
     }
 
+    /// Every BIDS concept this term map is capable of projecting onto some path:
+    /// the literal `Entities` keys, the named capture groups of each `Template`
+    /// (aliased to BIDS short keys), and whichever of `datatype`/`suffix` its
+    /// `Concepts` set.
+    ///
+    /// This is the *static* upper bound over all mappings, not what any one path
+    /// yields, and it is deliberately derived rather than declared: a term map
+    /// already states what it projects, so asking an author to repeat that in a
+    /// second artifact would be a second source of truth. bidslake uses it to
+    /// decide which generated concept columns must consult the stored projection
+    /// (see `bidslake::schema::dynamic`) — a set worth keeping tight, because every
+    /// column in it pays a `COALESCE` on read.
+    ///
+    /// `extension` is never included: it is read off the filename, which is
+    /// authoritative even for a projected path.
+    pub fn projectable_concepts(&self) -> std::collections::BTreeSet<String> {
+        let mut out = std::collections::BTreeSet::new();
+        for m in &self.mappings {
+            out.extend(m.spec.entities.keys().map(|k| alias_entity(k).to_string()));
+            out.extend(
+                m.regex
+                    .capture_names()
+                    .flatten()
+                    .map(|n| alias_entity(n).to_string()),
+            );
+            if m.spec.concepts.datatype.is_some() {
+                out.insert("datatype".to_string());
+            }
+            if m.spec.concepts.suffix.is_some() {
+                out.insert("suffix".to_string());
+            }
+        }
+        out
+    }
+
     /// Project a dataset-relative path onto BIDS concepts, or `None` if no rule matches.
     pub fn classify(&self, rel_path: &str) -> Option<FileFacts> {
         let idx = self.set.matches(rel_path).into_iter().next()?;
@@ -324,11 +359,80 @@ mod tests {
         assert_eq!(v.datatype.as_deref(), Some("anat"));
     }
 
+    /// The volumetric segmentations are the ones downstream code actually reaches for
+    /// (`wmparc.mgz` above all), so they carry `seg` rather than being swallowed by the
+    /// `mri/*.mgz` catch-all — which binds no entity and left consumers string-matching
+    /// the path. Order matters: `RegexSet` yields the lowest matching index, so the
+    /// specific mapping must precede the catch-all.
+    #[test]
+    fn volumetric_segmentations_carry_seg() {
+        for (path, seg) in [
+            ("sub-10113_ses-V1/mri/wmparc.mgz", "wmparc"),
+            ("bert/mri/aseg.mgz", "aseg"),
+            ("bert/mri/aparc+aseg.mgz", "aparc+aseg"),
+            ("bert/mri/aparc.a2009s+aseg.mgz", "aparc.a2009s+aseg"),
+            ("bert/mri/aparc.DKTatlas+aseg.mgz", "aparc.DKTatlas+aseg"),
+        ] {
+            let f = fs()
+                .classify(path)
+                .unwrap_or_else(|| panic!("no match: {path}"));
+            assert_eq!(f.get("seg"), Some(seg), "{path}");
+            assert_eq!(f.suffix.as_deref(), Some("dseg"), "{path}");
+            assert_eq!(f.datatype.as_deref(), Some("anat"), "{path}");
+        }
+    }
+
+    /// ...and the catch-all still claims every other volume, so adding the specific
+    /// mapping above it cannot make a file stop being recognized.
+    #[test]
+    fn other_volumes_still_match_the_catch_all() {
+        for path in [
+            "bert/mri/T1.mgz",
+            "bert/mri/brainmask.mgz",
+            "bert/mri/orig.mgz",
+        ] {
+            let f = fs()
+                .classify(path)
+                .unwrap_or_else(|| panic!("no match: {path}"));
+            assert_eq!(f.datatype.as_deref(), Some("anat"), "{path}");
+            assert_eq!(f.get("seg"), None, "{path}");
+        }
+    }
+
     #[test]
     fn unrelated_path_is_none() {
         assert!(
             fs().classify("sub-01/func/sub-01_task-rest_bold.nii.gz")
                 .is_none()
         );
+    }
+
+    /// The set drives DDL (which concept columns consult the projection), so it must
+    /// cover literal `Entities`, named capture groups, and `Concepts` alike — and
+    /// stay tight, since every member costs a `COALESCE` on read.
+    #[test]
+    fn projectable_concepts_span_every_source() {
+        let got = fs().projectable_concepts();
+        let want: std::collections::BTreeSet<String> =
+            ["datatype", "hemi", "parc", "seg", "ses", "sub", "suffix"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+        assert_eq!(got, want);
+    }
+
+    /// `extension` comes off the filename even for a projected path, so wrapping it
+    /// would buy nothing and cost a COALESCE on every row.
+    #[test]
+    fn projectable_concepts_exclude_extension() {
+        assert!(!fs().projectable_concepts().contains("extension"));
+    }
+
+    /// Capture groups use BEP-043's long forms; the DDL needs BIDS short keys.
+    #[test]
+    fn projectable_concepts_are_aliased() {
+        let got = fs().projectable_concepts();
+        assert!(got.contains("sub") && got.contains("ses"));
+        assert!(!got.contains("subject") && !got.contains("session"));
     }
 }

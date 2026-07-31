@@ -124,6 +124,14 @@
 //! `objects.datatypes`, `rules.modalities`) and computed on read, costing nothing
 //! at ingest. See [`dynamic`] for how they're built.
 //!
+//! A path is not always the source. `scans` registers every cataloged file,
+//! including ones a **term map** claimed (`sub-01/mri/wmparc.mgz`), whose names
+//! carry almost no BIDS concepts. Those files store what the term map projected in
+//! a `projected JSON` column, and the concepts it can supply are generated as
+//! `COALESCE(<the projection>, <the path regex>)` — so the same `WHERE seg =
+//! 'wmparc'` reaches a FreeSurfer volume and a BIDS-named one alike. The column
+//! exists only when a term map is configured (ADR 0002 §7).
+//!
 //! ```sql
 //! SELECT dataset_id, sub, ses, run, file_path
 //! FROM scans

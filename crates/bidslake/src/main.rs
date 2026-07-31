@@ -216,7 +216,12 @@ async fn main() -> Result<()> {
             let embedded_ingestion = discover_embedded(&input, "ingestion.json");
             let bundle = resolve_adapters(&adapter, embedded_ingestion.as_deref())?;
             overlays.extend(bundle.overlays);
-            let schema = Schema::load_full(schema_path_str, &overlays, bundle.ingestion)?;
+            let schema = Schema::load_full(
+                schema_path_str,
+                &overlays,
+                bundle.ingestion,
+                &bundle.term_maps,
+            )?;
             run_indexer(
                 input,
                 output,
@@ -240,7 +245,8 @@ async fn main() -> Result<()> {
             let mut overlays = resolve_overlays(&overlay)?;
             let bundle = resolve_adapters(&adapter, None)?;
             overlays.extend(bundle.overlays);
-            let augmented = Schema::load_full(None, &overlays, bundle.ingestion)?;
+            let augmented =
+                Schema::load_full(None, &overlays, bundle.ingestion, &bundle.term_maps)?;
             if diff {
                 // Adapter overlays add tables/columns, so a diff against a base *without*
                 // them shows the adapter's additions.

@@ -33,11 +33,18 @@
 //! On top of the written columns, the `scans` table carries generated columns —
 //! `task`, `sub`, `ses`, `run`, …, plus `datatype`, `suffix`, `extension`, and
 //! `modality` — produced by `generated_bids_columns`. These are
-//! `GENERATED ALWAYS AS (…) VIRTUAL`, computed from `file_path` on read, so they
-//! let callers query by BIDS concept (`WHERE task = 'rest'`) instead of by path
-//! regex, and are *not* part of `table_columns` (the write path never touches
-//! them). They too are generated from `objects.entities` / `objects.datatypes` /
-//! `rules.modalities`.
+//! `GENERATED ALWAYS AS (…) VIRTUAL`, computed on read, so they let callers query
+//! by BIDS concept (`WHERE task = 'rest'`) instead of by path regex, and are *not*
+//! part of `table_columns` (the write path never touches them). They too are
+//! generated from `objects.entities` / `objects.datatypes` / `rules.modalities`.
+//!
+//! They read from `file_path` — except that when a term map is configured, the
+//! concepts *it* can project instead read `COALESCE(<the projection>, <the regex>)`
+//! over a physical `projected JSON` column. A term-mapped path
+//! (`sub-01/mri/wmparc.mgz`) carries almost none of its concepts in its name, so
+//! without the fallback the projection would be computed and discarded. See ADR
+//! 0002 §7; with no term map the wrapping is absent entirely and the DDL is
+//! unchanged.
 //!
 //! The static tables `diffusion` and `file_associations` live in the parent
 //! [`crate::schema`] module, not here.
@@ -91,6 +98,16 @@ pub struct Schema {
     /// Ingestion policy (read/catalog/ignore + per-table materialized concepts). Empty for a
     /// plain BIDS ingest, in which case every table uses the virtual regex concept columns.
     ingestion: Ingestion,
+    /// BIDS concepts some configured term map is capable of projecting, unioned across
+    /// them (see [`bids_schema::term_map::TermMap::projectable_concepts`]). Empty for a
+    /// plain BIDS ingest.
+    ///
+    /// Derived from the term maps rather than declared: a term map already states what
+    /// it projects, so a second declaration would be a second source of truth. It is
+    /// needed at *generation* time — it decides which concept columns consult the
+    /// stored projection — which is why it is threaded in alongside the ingestion
+    /// policy rather than set later.
+    projected_concepts: std::collections::BTreeSet<String>,
 }
 
 impl Schema {
@@ -111,17 +128,25 @@ impl Schema {
         schema_path: Option<&str>,
         overlays: &[AppliedOverlay],
     ) -> anyhow::Result<Self> {
-        Self::load_full(schema_path, overlays, Ingestion::base())
+        Self::load_full(schema_path, overlays, Ingestion::base(), &[])
     }
 
-    /// Like [`Self::load_with_overlays`], but also attaches an [`Ingestion`] policy. Tables
-    /// whose ingestion policy declares materialized `concepts` get physical concept columns
-    /// (adapter data tables); all other tables keep the virtual regex columns. The policy
-    /// must be set before table generation, so it is threaded in here.
+    /// Like [`Self::load_with_overlays`], but also attaches an [`Ingestion`] policy and the
+    /// `term_maps` that will be used for the ingest. Tables whose ingestion policy declares
+    /// materialized `concepts` get physical concept columns (adapter data tables); all other
+    /// tables keep the virtual regex columns. Both must be set before table generation, so
+    /// they are threaded in here.
+    ///
+    /// `term_maps` are consulted only for
+    /// [`projectable_concepts`](bids_schema::term_map::TermMap::projectable_concepts) — which
+    /// generated columns on the file registry must consult a stored projection. Pass `&[]`
+    /// for a plain BIDS ingest, which then produces byte-identical DDL to before this
+    /// existed.
     pub fn load_full(
         schema_path: Option<&str>,
         overlays: &[AppliedOverlay],
         ingestion: Ingestion,
+        term_maps: &[bids_schema::term_map::TermMap],
     ) -> anyhow::Result<Self> {
         use anyhow::Context as _;
         let mut schema: Value = match schema_path {
@@ -157,6 +182,10 @@ impl Schema {
             insert_sql: HashMap::new(),
             overlays: overlays.to_vec(),
             ingestion,
+            projected_concepts: term_maps
+                .iter()
+                .flat_map(|tm| tm.projectable_concepts())
+                .collect(),
         };
         instance.generate_definitions();
         instance.build_insert_statements();
@@ -416,12 +445,18 @@ impl Schema {
             ));
         }
 
-        // Virtual BIDS-concept columns (derived from file_path) for file-based
-        // tables, computed on read and never written.
-        // Concept columns are either MATERIALIZED (physical, adapter-populated — for data
-        // tables fed by a term-map projection, whose paths don't encode BIDS entities) or
-        // VIRTUAL (regex over `file_path` — for BIDS-native, file_based tables). Never both:
-        // the ingestion policy decides, per table.
+        // Where a table's BIDS-concept columns come from — three cases (ADR 0002 §7):
+        //
+        // - MATERIALIZED (physical `TEXT`, written by a reader) for adapter *data* tables,
+        //   whose paths encode no BIDS entities. Marked by the ingestion policy's per-table
+        //   `concepts` list, and exclusive of the virtual form: these tables hold reader
+        //   output only, so a regex over `file_path` would find nothing worth having.
+        // - VIRTUAL (regex over `file_path`) for BIDS-native, file_based tables — cheap and
+        //   correct, because a BIDS filename contains its entities.
+        // - VIRTUAL WITH A PROJECTION FALLBACK for the file *registry*, the one table that
+        //   holds both kinds of file. Handled inside `generated_bids_columns`, which wraps
+        //   the projectable concepts in a COALESCE over the stored `projected` column, so a
+        //   term-mapped row reads as what its term map says without blanking BIDS rows.
         let concepts: Vec<String> = self.ingestion.materialized_concepts(&spec.table).to_vec();
         if !concepts.is_empty() {
             let existing: std::collections::HashSet<String> =
@@ -434,6 +469,19 @@ impl Schema {
                 fields.push((c.clone(), "TEXT".to_string(), c));
             }
         } else if spec.file_based {
+            // The stored term-map projection the concept columns below fall back *from*.
+            // Physical (a term map has no path to regex it out of), and written only for
+            // files a term map claimed — NULL for every BIDS-named file, which measured
+            // no change in block usage. Omitted entirely when no term map is configured,
+            // so a plain BIDS catalog keeps exactly the DDL it had before.
+            if !self.projected_concepts.is_empty() {
+                columns.push("projected JSON".to_string());
+                fields.push((
+                    "projected".to_string(),
+                    "JSON".to_string(),
+                    "projected".to_string(),
+                ));
+            }
             columns.extend(self.generated_bids_columns());
         }
 
@@ -505,6 +553,26 @@ impl Schema {
     /// neither lists nor binds them; DuckDB computes each from `file_path` at
     /// query time. Adding or changing entities is therefore a schema-file change
     /// with no impact on the write path.
+    /// Wrap a generated concept expression so a stored term-map projection wins over
+    /// the path regex, for the concepts some active term map can actually project.
+    ///
+    /// A BIDS filename *contains* its entities, so the regex is right for it and the
+    /// projection is NULL. A term-mapped path (`sub-01/mri/wmparc.mgz`) contains
+    /// almost none of them, so without this the projection a term map computed is
+    /// discarded and the row reads as `seg`/`datatype`/`suffix` NULL.
+    ///
+    /// Only the projectable set is wrapped: every wrapped column pays the COALESCE on
+    /// read, and wrapping all of them measured ~7.6% on the `SELECT *`-plus-filter
+    /// shape `lake.get()` issues, against ~1.8% for the handful a term map can supply.
+    /// With no term maps configured the set is empty and the DDL is byte-identical to
+    /// a plain BIDS catalog's — so BIDS-only ingests pay nothing at all.
+    fn project_expr(&self, name: &str, expr: &str) -> String {
+        if !self.projected_concepts.contains(name) {
+            return expr.to_string();
+        }
+        format!("COALESCE(json_extract_string(projected, '$.{name}'), {expr})")
+    }
+
     fn generated_bids_columns(&self) -> Vec<String> {
         let mut cols = Vec::new();
 
@@ -518,8 +586,12 @@ impl Schema {
                 "[0-9A-Za-z]+"
             };
             let name = &e.name;
+            let expr = self.project_expr(
+                name,
+                &format!("NULLIF(regexp_extract(file_path, '(?:^|[_/]){name}-({valpat})', 1), '')"),
+            );
             cols.push(format!(
-                "\"{name}\" VARCHAR GENERATED ALWAYS AS (NULLIF(regexp_extract(file_path, '(?:^|[_/]){name}-({valpat})', 1), '')) VIRTUAL"
+                "\"{name}\" VARCHAR GENERATED ALWAYS AS ({expr}) VIRTUAL"
             ));
         }
 
@@ -527,16 +599,24 @@ impl Schema {
         let datatypes = bids_schema::datatypes::datatypes(&self.schema);
         if !datatypes.is_empty() {
             let alt = datatypes.join("|");
+            let expr = self.project_expr(
+                "datatype",
+                &format!("NULLIF(regexp_extract(file_path, '/({alt})/', 1), '')"),
+            );
             cols.push(format!(
-                "datatype VARCHAR GENERATED ALWAYS AS (NULLIF(regexp_extract(file_path, '/({alt})/', 1), '')) VIRTUAL"
+                "datatype VARCHAR GENERATED ALWAYS AS ({expr}) VIRTUAL"
             ));
         }
 
-        // suffix (trailing _<suffix> before the extension) and extension.
-        cols.push(
-            "suffix VARCHAR GENERATED ALWAYS AS (NULLIF(regexp_extract(file_path, '_([A-Za-z0-9]+)\\.[^/]+$', 1), '')) VIRTUAL"
-                .to_string(),
+        // suffix (trailing _<suffix> before the extension) and extension. `extension`
+        // is never projected: the filename is authoritative for it either way.
+        let suffix_expr = self.project_expr(
+            "suffix",
+            "NULLIF(regexp_extract(file_path, '_([A-Za-z0-9]+)\\.[^/]+$', 1), '')",
         );
+        cols.push(format!(
+            "suffix VARCHAR GENERATED ALWAYS AS ({suffix_expr}) VIRTUAL"
+        ));
         cols.push(
             "extension VARCHAR GENERATED ALWAYS AS (NULLIF(regexp_extract(file_path, '(\\.[^/]+)$', 1), '')) VIRTUAL"
                 .to_string(),
@@ -562,16 +642,32 @@ impl Schema {
         // modality (mri/eeg/...) mapped from the datatype dir via rules.modalities.
         // Modality set (sorted) comes from the shared owner; the per-modality
         // datatype list is still read from the schema for the CASE arms.
+        //
+        // When `datatype` is projectable this keys off the `datatype` column rather
+        // than re-matching the path: a term-mapped file has no `/anat/` component, so
+        // matching the path directly would leave `modality` NULL on exactly the rows
+        // whose datatype the projection just supplied. DuckDB permits a generated
+        // column to reference another, so this composes with the COALESCE above.
+        let by_datatype = self.projected_concepts.contains("datatype");
         let mut whens = Vec::new();
         for m in bids_schema::datatypes::modalities(&self.schema) {
             if let Some(dts) = self.schema["rules"]["modalities"][&m]["datatypes"].as_array() {
                 let alt: Vec<&str> = dts.iter().filter_map(|d| d.as_str()).collect();
                 if !alt.is_empty() {
-                    whens.push(format!(
-                        "WHEN regexp_matches(file_path, '/({})/') THEN '{}'",
-                        alt.join("|"),
-                        m
-                    ));
+                    whens.push(if by_datatype {
+                        let list = alt
+                            .iter()
+                            .map(|d| format!("'{d}'"))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("WHEN datatype IN ({list}) THEN '{m}'")
+                    } else {
+                        format!(
+                            "WHEN regexp_matches(file_path, '/({})/') THEN '{}'",
+                            alt.join("|"),
+                            m
+                        )
+                    });
                 }
             }
         }
