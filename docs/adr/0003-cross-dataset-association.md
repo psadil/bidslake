@@ -30,7 +30,13 @@ that their `sub-01` is the same subject — *even though the raw dataset is not 
 
 bidslake infers **dataset-to-dataset** relations from explicit `SourceDatasets`. It does **not**
 infer file-to-file correspondence. Inferring which fMRIPrep file matches which MRIQC record by
-comparing entities is the unsound step; we remove it rather than relocate it.
+comparing entities is the unsound step, and bidslake never does it on its own initiative.
+
+It will do it *under direction*. A binding (`bidslake.binding`) lets a `FileInput` carry
+`dataset_id="freesurfer"` and `join=("sub", "ses")`, which is exactly a cross-dataset entity
+match — but the user named the dataset, and a match landing on more than one file comes back
+as `Unresolved(name, n, "ambiguous")` rather than being silently taken. What stays ruled out
+is bidslake *inferring* the correspondence: `resolve` never consults `dataset_relations`.
 
 What a consumer does with the relation is sound *because* of it: once two datasets are known to
 share a source, they share a subject/entity namespace, so matching `sub`/`ses`/`task`/`run`

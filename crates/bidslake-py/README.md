@@ -99,10 +99,19 @@ DENOISE = Binding(
 
 for unit in lake.bind(DENOISE):
     if unit.unresolved:
-        print(unit.key, unit.unresolved)   # data, not an exception
+        print(unit.key, unit.unresolved)   # a per-unit gap is data, not an exception
         continue
-    work(unit.anchor.local_path, unit.inputs["anat"], unit.inputs["motion"])
+    work(unit.anchor.local_path, unit.local("anat"), unit.frame("motion"))
 ```
+
+`local()` and `frame()` rather than `unit.inputs[...]`: `inputs` holds `UPath`s, which
+stringify back to `file://` URIs and are typed `UPath | DataFrame` — so indexing it hands a
+subprocess a filename nothing can open, and hands a type checker a union.
+
+A per-unit gap is data. Two whole-binding failures are not, and raise: an anchor matching no
+files, and an input resolving for *zero* units — a filter value that matches nothing, or a
+dataset never indexed, either of which would otherwise read as a study where every subject
+is incomplete.
 
 Two properties are the point. Resolution costs **one query per input**, not one per input
 per unit, so it does not scale with the study. And a unit whose inputs do not resolve is
@@ -145,6 +154,30 @@ jobs = executor.map_array(run_one_unit, units)   # one job per unit
 now — the dataclasses match what such an artifact would hold, so promoting it later is a
 serializer rather than a redesign. The module docstring and `TODO.md` ("Derivation layer")
 record the reasoning and the trigger.
+
+## Layouts: naming an output before it exists
+
+A binding resolves what a unit *consumes*. A layout is the other direction — where its
+outputs go. Nothing can query for a file a pipeline has not written yet, so without one
+every consumer hardcodes the convention, which is how a wrapper grows two dozen properties
+that are only string joins.
+
+```python
+out = bidslake.layout("feat").under(dst / stem)
+out["highres2standard_mat"]   # <dst>/<stem>/reg/highres2standard.mat
+out["filtered_func_clean"]    # <dst>/<stem>/filtered_func_data_clean.nii.gz
+out.mkdir("melodic_mix")      # the same, with the parent directory created
+```
+
+A layout is a separate artifact from the adapter's term map because a term map cannot be run
+backwards: on a real recon-all tree of 657 files its 8 PCRE mappings recognize all of them,
+while a pure-`{var}` rewrite needs 12, recognizes 430, and loses the 227 matched by
+catch-alls — which name a *class* of files and so have no concept to render from.
+
+The two are kept honest by construction. Loading a layout renders every role under every
+declared example and feeds the result back through its term map; if `classify(render(role))`
+does not reproduce the declared concepts, it raises rather than loading
+([ADR 0002](../../docs/adr/0002-layout-adapters.md) §12).
 
 ## Design
 

@@ -120,6 +120,14 @@ accessors; and the opt-in `python -m bidslake.stubgen`. Remaining follow-ups:
   rather than reading them. A `ContentReader` would make the mixing matrix and motion
   parameters queryable as tables instead of paths.
 
+- [ ] **Stamp a layout when one is used to *produce* a dataset**. Overlays, term maps and
+  ingestion fragments are all recorded in `bidslake_*` tables, so a catalog records how its
+  files were read (ADR 0001 §4). A layout is not, and today that is right — it is consulted
+  by whatever writes a tree, before there is a catalog to stamp. But a FEAT tree's layout is
+  provenance about what those files were *meant to be*, and nothing currently records it.
+  Blocked on there being a producing path inside bidslake at all; revisit alongside the
+  derivation-record work above rather than on its own.
+
 - [ ] **Layouts for the other bundled producers**. `data/layouts/feat.json` is the first;
   fMRIPrep, MRIQC, and QSIPrep have term maps or overlays but no write direction, so code
   producing files in their conventions still hardcodes paths. Each is a layout document

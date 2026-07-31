@@ -287,15 +287,20 @@ class BidsLake:
         """Resolve a :class:`~bidslake.binding.Binding` into units of work.
 
         Returns one :class:`~bidslake.binding.Unit` per anchor file, each carrying its
-        resolved inputs and — rather than raising — a tuple of
-        :class:`~bidslake.binding.Unresolved` entries for the inputs that did not
-        match exactly one thing. Costs one query per declared input, not one per
-        input per unit::
+        resolved inputs and a tuple of :class:`~bidslake.binding.Unresolved` entries
+        for the inputs that did not match exactly one thing — a per-unit gap is data,
+        not an exception. Costs one query per declared input, not one per input per
+        unit::
 
             for unit in lake.bind(MELODIC):
                 if unit.unresolved:
                     continue
-                work(unit.anchor.local_path, unit.inputs["anat"])
+                work(unit.anchor.local_path, unit.local("anat"))
+
+        Raises :class:`ValueError` for the two shapes that are never incomplete data:
+        an anchor matching no files at all, and an input resolving for *zero* units.
+        Both mean a filter value that matches nothing or a dataset that was never
+        indexed, rather than a missing subject.
 
         See :mod:`bidslake.binding` for the declaration format and why it is typed
         Python rather than a stamped JSON artifact.

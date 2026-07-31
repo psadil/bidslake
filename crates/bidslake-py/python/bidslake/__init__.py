@@ -14,12 +14,12 @@ Open a database with :func:`open` and query it by BIDS concept::
 
 Declare a pipeline's units of work — and what each one needs — with a
 :class:`~bidslake.binding.Binding`, which resolves siblings joined on any subset of a
-unit's entities and reports the ones that did not resolve as data rather than raising::
+unit's entities and reports a unit's unresolved inputs as data rather than raising::
 
     for unit in lake.bind(DENOISE):
         if unit.unresolved:
             continue
-        work(unit.anchor.local_path, unit.inputs["anat"])
+        work(unit.anchor.local_path, unit.local("anat"))
 """
 
 from __future__ import annotations

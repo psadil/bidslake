@@ -343,7 +343,7 @@ impl BidsParser {
 
     /// Attach term maps that recognize standardized non-BIDS files (FreeSurfer, …).
     /// Ordinary BIDS ingestion configures none, so the classify hot path in
-    /// [`Self::process_file`] short-circuits on an empty term-map list.
+    /// `process_file` short-circuits on an empty term-map list.
     pub fn with_term_maps(mut self, term_maps: Vec<TermMap>) -> Self {
         self.term_maps = term_maps;
         self

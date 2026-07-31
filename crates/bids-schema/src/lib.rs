@@ -2,12 +2,10 @@
 //! schema-expression-language evaluator.
 //!
 //! This crate is the one place that owns the vendored BIDS schema and how to *evaluate* it.
-//! (The schema-parameterized association resolver and the shared file-context builder are
-//! added in later stages.)
-//!
-//! NOTE: the *typed* rules struct `BidsSchema` does **not** live here — it stays in
-//! `bids_validator_rs::schema::BidsSchema`, built on top of [`SCHEMA_JSON`]. Consumers of this
-//! crate reach for `bids_schema::expression`, … and the [`SCHEMA_JSON`] constant.
+//! It also owns the artifacts that extend BIDS without forking it: [`overlay`]
+//! (vocabulary), [`term_map`] (path → concepts, BEP-043) and [`layout`] (concepts →
+//! path, the write direction), plus the schema-parameterized [`associations`]
+//! resolver and the shared [`context`] file-context builder.
 
 pub mod associations;
 pub mod context;

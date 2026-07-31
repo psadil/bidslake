@@ -65,12 +65,26 @@ _BINDINGS = """\
 # The binding dataclasses, pinned to *this catalog's* vocabulary instead of the one
 # the installed bidslake was built with. Import these rather than the ones on
 # `bidslake` and a binding's `where`/`anchor`/`join`/`key` are checked against the
-# entities, suffixes and datatypes above — the runtime classes are identical, so
-# `lake.bind` takes either.
-FileInput = _FileInputOf[GetFilters, Entity]
-TableInput = _TableInputOf[Entity]
-Binding = _BindingOf[GetFilters, Entity]
-Input = FileInput | TableInput
+# entities, suffixes and datatypes above. `lake.bind` takes either, because
+# resolution tests against the generic bases these subclass.
+#
+# Subclasses rather than `FileInput = _FileInputOf[...]` aliases: a subscripted
+# generic cannot be used with `isinstance`, and an instance built from an alias is
+# not an instance of `bidslake.FileInput` either, so any code branching on the
+# public class would silently mishandle a binding written against this catalog.
+class FileInput(_FileInputOf[GetFilters, Entity]):
+    pass
+
+
+class TableInput(_TableInputOf[Entity]):
+    pass
+
+
+class Binding(_BindingOf[GetFilters, Entity]):
+    pass
+
+
+type Input = FileInput | TableInput
 """
 
 

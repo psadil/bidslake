@@ -30,7 +30,7 @@
 //!
 //! Two documents describing one tree is a drift risk, and co-locating them would only
 //! prevent *textual* drift. Instead every layout must carry `Examples`, and
-//! [`Layout::validate_round_trip`] renders **every role under every example** and feeds the
+//! `Layout::validate_round_trip` renders **every role under every example** and feeds the
 //! result back through the named term map. If `classify(render(role))` does not reproduce
 //! the role's declared concepts, the layout **fails to load**. The two directions are
 //! therefore verifiably in agreement rather than merely adjacent, and a rename on either

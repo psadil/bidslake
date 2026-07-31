@@ -21,7 +21,7 @@ Managed mode is where bidslake is headed; the notes below are design, and the CL
 - **Storage is decoupled from metadata.** A nifti's on-disk path is an opaque storage location bidslake assigns — it does *not* encode `sub-01`, `task-x`, or `run-02`. So metadata edits are pure SQL `UPDATE`s that never move files, and cross-dataset queries/aggregation come for free (many datasets in one database, keyed by `dataset_id`). This is the DuckLake analogy applied to BIDS: opaque data files + a SQL catalog that gives them meaning.
 - **Ingestion is one-way.** Standard BIDS → managed store. Exporting back to a standard BIDS layout is an explicit non-goal — the aim is to supplant BIDS, not round-trip.
 - **The CLI acts on the store, not the metadata** (metadata is edited with SQL): `index` brings data under management (today's command), `verify` *(stub)* integrity-checks the managed files, and `transcode` *(stub)* changes the on-disk storage format (e.g. `.nii.gz` → `.nii.zst`). A managed database carries a mode marker so destructive operations refuse to run against a read-only index.
-- **Beyond BIDS (longer term).** The opaque-files + SQL-catalog model isn't BIDS-specific; a future direction is managing non-BIDS neuroimaging datasets too, supplanting extension efforts such as [BEP043](https://bids.neuroimaging.io/extensions/beps/bep_043.html). The schema/ingestion abstractions avoid hard-coding BIDS-only assumptions with this in mind.
+- **Beyond BIDS.** The opaque-files + SQL-catalog model isn't BIDS-specific, and the read-only half already works: an **adapter** supplies a vocabulary overlay, a [BEP043](https://bids.neuroimaging.io/extensions/beps/bep_043.html) term map projecting paths onto BIDS concepts, and an ingestion policy — so a recon-all or FEAT tree is queryable by `sub`/`seg`/`suffix` beside the BIDS data it came from ([ADR 0002](../../docs/adr/0002-layout-adapters.md)). bidslake *consumes* BEP043 rather than replacing it. What is still ahead is bringing such trees under *management*, where bidslake owns their storage rather than only reading it.
 
 ## Install
 
@@ -29,7 +29,7 @@ Requires a Rust toolchain. DuckDB is bundled (no system library needed).
 
 ```bash
 git clone --recurse-submodules <repo-url>
-cd bids2
+cd bidslake
 cargo build --release
 ```
 
@@ -78,6 +78,34 @@ Accounted for is not the same as *stored verbatim*. What a table stores is what 
 The tables and their columns are **derived from the BIDS schema** (`rules.tabular_data`, `objects.columns`, and — for the headerless recordings — `rules.sidecars` and `meta.associations`), not hardcoded. Each modality gets its own table (`eeg_channels`, `meg_channels`, `blood`, `physio`, …); uncompressed continuous recordings (chiefly `motion`) are stored one row per sample, with their column names taken from the sidecar `Columns` field or the associated `_channels.tsv`. A provenance table, `tabular_files`, records every tabular file with a `status` (`ingested` / `on_disk` / `skipped`) and the table it maps to, and a test asserts nothing is silently dropped.
 
 *What bidslake does* with each file — read its contents, catalog it unread, or ignore it — is a separate, equally declarative layer: the **ingestion schema** ([ADR 0002](../../docs/adr/0002-layout-adapters.md)), a bidslake-specific document whose rules select over projected BIDS concepts and are validated against their own metaschema. That is what routes `.bval`/`.bvec` to the diffusion reader and leaves `*.tsv.gz` on disk, and it is where per-table policy lives (row ordering, materialized concepts, and whether a table stores columns the schema does not declare — see the roadmap).
+
+## Adapters: indexing what BIDS does not describe
+
+A great deal of real data is *standardized but not BIDS*: FreeSurfer `recon-all`, an FSL
+FEAT tree. Their files carry no BIDS entities in their names — `stats/aseg.stats` is
+identified by its position in the tree — so no amount of added vocabulary reaches them.
+
+An **adapter** is what does. `--adapter freesurfer` resolves whatever bidslake bundles under
+that name: an overlay (vocabulary), a BEP-043 **term map** projecting a path onto BIDS
+concepts, and an ingestion fragment (read/catalog/ignore). Bundled today: `fmriprep`,
+`mriqc`, `qsiprep`, `freesurfer`, `feat`.
+
+```bash
+bidslake index --input <study>/derivatives/freesurfer --output study.duckdb \
+    --dataset-id freesurfer --adapter freesurfer
+```
+
+The projection is stored, so those files answer concept queries rather than only path
+matches — `WHERE seg = 'wmparc'` reaches a recon-all volume and a BIDS-named one alike.
+
+Datasets accumulate in one catalog, with one constraint: `scans` is created once and keeps
+the shape of the run that created it, so **the adapter set describes the catalog, not the
+dataset being added**. Name every adapter the catalog uses on every run and order stops
+mattering; a run that would need a concept column `scans` lacks is refused rather than
+silently dropping it.
+
+Adding another layout is authoring those documents, not writing an ingester — see
+[ADR 0002](../../docs/adr/0002-layout-adapters.md).
 
 ## Documentation
 

@@ -17,7 +17,11 @@
 //! document's `BIDSMapVersion`) and support the subset the `regex` crate provides (named
 //! groups, optional groups, character classes — no look-around/back-references), which is
 //! sufficient to collapse, e.g., FreeSurfer's `sub-01_ses-1` / `sub-01` / `01` subject-dir
-//! forms into one rule.
+//! forms into one rule. That collapsing is also why a term map only *reads*: there is no
+//! single filename to render an optional group back into, so this module has no `render`.
+//! Naming a file a pipeline is about to write is [`layout`](crate::layout)'s job — a
+//! separate document whose mandatory `Examples` are rendered and fed back through the term
+//! map it names, so the two directions are checked against each other (ADR 0002 §12).
 
 use std::collections::BTreeMap;
 use std::path::Path;

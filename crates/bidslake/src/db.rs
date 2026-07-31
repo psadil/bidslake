@@ -79,6 +79,10 @@ impl BidsDb {
     /// Create every table: the schema-generated ones ([`Schema::create_tables_sql`])
     /// plus the static `diffusion`, `file_associations`, and cross-dataset
     /// `dataset_links`/`dataset_identity` tables (and the `dataset_relations` view).
+    ///
+    /// Creates nothing and returns `Err` when an existing catalog's `scans` is narrower
+    /// than this run's overlays and term maps need — `check_registry_shape` runs first,
+    /// because `IF NOT EXISTS` would otherwise drop the difference in silence.
     pub fn create_tables(&self, schema: &Schema) -> anyhow::Result<()> {
         self.check_registry_shape(schema)?;
         let sqls = schema.create_tables_sql();

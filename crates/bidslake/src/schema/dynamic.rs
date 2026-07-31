@@ -220,7 +220,7 @@ impl Schema {
     /// drift.
     pub fn registry_concept_columns(&self) -> Vec<String> {
         let mut names: Vec<String> = self
-            .generated_bids_columns()
+            .generated_bids_columns(true)
             .into_iter()
             .map(|(name, _)| name)
             .collect();
@@ -282,7 +282,7 @@ impl Schema {
     }
 
     /// Whether `table` has a dedicated column for the source field `key`, matched
-    /// case-insensitively (see [`Self::table_keys_lower`]).
+    /// case-insensitively (see `table_keys_lower`).
     pub fn declares(&self, table: &str, key: &str) -> bool {
         self.table_keys_lower
             .get(table)
@@ -481,10 +481,16 @@ impl Schema {
         //   output only, so a regex over `file_path` would find nothing worth having.
         // - VIRTUAL (regex over `file_path`) for BIDS-native, file_based tables — cheap and
         //   correct, because a BIDS filename contains its entities.
-        // - VIRTUAL WITH A PROJECTION FALLBACK for the file *registry*, the one table that
-        //   holds both kinds of file. Handled inside `generated_bids_columns`, which wraps
-        //   the projectable concepts in a COALESCE over the stored `projected` column, so a
-        //   term-mapped row reads as what its term map says without blanking BIDS rows.
+        // - VIRTUAL WITH A PROJECTION FALLBACK for the file *registry* — `scans`, the one
+        //   table holding both BIDS-named and term-mapped files. `generated_bids_columns`
+        //   wraps the projectable concepts in a COALESCE over a stored `projected` column,
+        //   so a term-mapped row reads as what its term map says without blanking BIDS rows.
+        //
+        //   Keyed on `RowIdentity::PerFile` rather than `file_based`, which is also true of
+        //   every per-row tabular table (`events`, `physio`, …). Those are reached by the
+        //   tabular readers, never by `ingest_projected`, so a projection can never land on
+        //   one: emitting the column there would add an always-NULL column to 23 tables and
+        //   charge each of their concept columns a COALESCE for a value that cannot arrive.
         let concepts: Vec<String> = self.ingestion.materialized_concepts(&spec.table).to_vec();
         if !concepts.is_empty() {
             let existing: std::collections::HashSet<String> =
@@ -497,12 +503,16 @@ impl Schema {
                 fields.push((c.clone(), "TEXT".to_string(), c));
             }
         } else if spec.file_based {
+            // One binding for both halves, so the stored column and the expressions that
+            // read it can never disagree about whether this table has a projection.
+            let project =
+                !self.projected_concepts.is_empty() && spec.identity == RowIdentity::PerFile;
             // The stored term-map projection the concept columns below fall back *from*.
             // Physical (a term map has no path to regex it out of), and written only for
             // files a term map claimed — NULL for every BIDS-named file, which measured
             // no change in block usage. Omitted entirely when no term map is configured,
             // so a plain BIDS catalog keeps exactly the DDL it had before.
-            if !self.projected_concepts.is_empty() {
+            if project {
                 columns.push("projected JSON".to_string());
                 fields.push((
                     "projected".to_string(),
@@ -510,7 +520,11 @@ impl Schema {
                     "projected".to_string(),
                 ));
             }
-            columns.extend(self.generated_bids_columns().into_iter().map(|(_, d)| d));
+            columns.extend(
+                self.generated_bids_columns(project)
+                    .into_iter()
+                    .map(|(_, d)| d),
+            );
         }
 
         if !pk.is_empty() {
@@ -594,14 +608,14 @@ impl Schema {
     /// shape `lake.get()` issues, against ~1.8% for the handful a term map can supply.
     /// With no term maps configured the set is empty and the DDL is byte-identical to
     /// a plain BIDS catalog's — so BIDS-only ingests pay nothing at all.
-    fn project_expr(&self, name: &str, expr: &str) -> String {
-        if !self.projected_concepts.contains(name) {
+    fn project_expr(&self, name: &str, expr: &str, project: bool) -> String {
+        if !project || !self.projected_concepts.contains(name) {
             return expr.to_string();
         }
         format!("COALESCE(json_extract_string(projected, '$.{name}'), {expr})")
     }
 
-    fn generated_bids_columns(&self) -> Vec<(String, String)> {
+    fn generated_bids_columns(&self, project: bool) -> Vec<(String, String)> {
         let mut cols = Vec::new();
 
         // One column per BIDS entity, keyed by its short `name`. Entity set comes
@@ -617,6 +631,7 @@ impl Schema {
             let expr = self.project_expr(
                 name,
                 &format!("NULLIF(regexp_extract(file_path, '(?:^|[_/]){name}-({valpat})', 1), '')"),
+                project,
             );
             cols.push((
                 name.clone(),
@@ -631,6 +646,7 @@ impl Schema {
             let expr = self.project_expr(
                 "datatype",
                 &format!("NULLIF(regexp_extract(file_path, '/({alt})/', 1), '')"),
+                project,
             );
             cols.push((
                 "datatype".to_string(),
@@ -643,6 +659,7 @@ impl Schema {
         let suffix_expr = self.project_expr(
             "suffix",
             "NULLIF(regexp_extract(file_path, '_([A-Za-z0-9]+)\\.[^/]+$', 1), '')",
+            project,
         );
         cols.push((
             "suffix".to_string(),
@@ -683,7 +700,7 @@ impl Schema {
         // matching the path directly would leave `modality` NULL on exactly the rows
         // whose datatype the projection just supplied. DuckDB permits a generated
         // column to reference another, so this composes with the COALESCE above.
-        let by_datatype = self.projected_concepts.contains("datatype");
+        let by_datatype = project && self.projected_concepts.contains("datatype");
         let mut whens = Vec::new();
         for m in bids_schema::datatypes::modalities(&self.schema) {
             if let Some(dts) = self.schema["rules"]["modalities"][&m]["datatypes"].as_array() {

@@ -57,6 +57,11 @@ enum Commands {
         /// (vocabulary), a BEP-043 term map (path→concept projection, for layouts whose
         /// filenames carry no BIDS entities), and an ingestion fragment (read/catalog
         /// policy). Which of the three exist varies by producer. Repeatable.
+        ///
+        /// The set describes the CATALOG, not the dataset being added: `scans` is created
+        /// once and keeps the shape of the run that created it, so name every adapter the
+        /// catalog uses on every run and order stops mattering. A run needing a concept
+        /// column `scans` lacks is refused rather than silently dropping it.
         #[arg(long = "adapter")]
         adapter: Vec<String>,
 

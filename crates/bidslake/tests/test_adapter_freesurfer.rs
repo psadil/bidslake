@@ -293,6 +293,37 @@ async fn cataloged_projection_reaches_the_registry() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Only the file registry can receive a projection, so only it pays for one.
+///
+/// `file_based` is true of every per-row tabular table as well as `scans`, so keying the
+/// fallback on it put an always-NULL `projected` column on 24 tables and charged each of
+/// their concept columns a COALESCE for a value that `ingest_projected` can never write
+/// there — those tables are reached by the tabular readers instead.
+#[tokio::test]
+async fn only_the_file_registry_carries_a_projection() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_fs_tree(dir.path());
+    let db = ingest_with_adapters(dir.path(), &["freesurfer"]).await?;
+
+    let mut stmt = db.conn.prepare(
+        "SELECT table_name FROM information_schema.columns WHERE column_name = 'projected'",
+    )?;
+    let tables: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<Result<_, _>>()?;
+    assert_eq!(tables, ["scans"], "only `scans` should carry a projection");
+
+    // ...and no other file-based table wraps its concepts in a COALESCE for it.
+    let wrapped: i64 = db.conn.query_row(
+        "SELECT COUNT(*) FROM duckdb_tables() \
+         WHERE table_name <> 'scans' AND sql LIKE '%json_extract_string(projected%'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(wrapped, 0);
+    Ok(())
+}
+
 /// The projection must not change what a BIDS-named file means. With an adapter active
 /// every concept column is wrapped in a COALESCE, so this pins the fallback: a file the
 /// term map does not claim still reads its concepts off the path.

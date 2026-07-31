@@ -16,21 +16,21 @@ reached, after everything before it has already been computed.
 A binding states that shape once::
 
     MELODIC = Binding(
-        anchor=GetFilters(datatype="func", suffix="bold", desc="preproc",
-                          extension=".nii.gz", space=None),
+        anchor={"datatype": "func", "suffix": "bold", "desc": "preproc",
+                "extension": ".nii.gz", "space": None},
         key=("sub", "ses", "task", "run"),
         inputs={
             "brain": FileInput(
                 join=("sub", "ses", "task", "run"),
-                where=GetFilters(datatype="func", suffix="mask", desc="brain",
-                                 extension=".nii.gz", space=None)),
+                where={"datatype": "func", "suffix": "mask", "desc": "brain",
+                       "extension": ".nii.gz", "space": None}),
             "anat": FileInput(
                 join=("sub", "ses"),
-                where=GetFilters(datatype="anat", suffix="T1w", desc="preproc",
-                                 extension=".nii.gz", space=None)),
+                where={"datatype": "anat", "suffix": "T1w", "desc": "preproc",
+                       "extension": ".nii.gz", "space": None}),
             "wmparc": FileInput(
                 join=("sub", "ses"), dataset_id="freesurfer",
-                where=GetFilters(seg="wmparc", extension=".mgz")),
+                where={"seg": "wmparc", "extension": ".mgz"}),
             "motion": TableInput(
                 join=("sub", "ses", "task", "run"), table="fmriprep_confounds",
                 columns=("rot_x", "rot_y", "rot_z", "trans_x", "trans_y", "trans_z"),
@@ -42,13 +42,20 @@ A binding states that shape once::
         if unit.unresolved:
             log.warning("skipping %s: %s", unit.key, unit.unresolved)
             continue
-        run_the_pipeline(unit.anchor.local_path, unit.inputs["anat"], ...)
+        run_the_pipeline(unit.anchor.local_path, unit.local("anat"),
+                         unit.frame("motion"))
 
 Two properties are the point. Resolution costs **one query per input**, not one per
 input per unit, so the cost does not grow with the size of the study. And a unit
 whose inputs do not resolve is *returned*, carrying :class:`Unresolved` entries that
 say whether each was missing or ambiguous — so an incomplete subject is visible
 before any work is submitted rather than fatal midway through it.
+
+That holds *per unit*. Two whole-binding failures are not incompleteness and raise
+``ValueError`` from :meth:`BidsLake.bind`: an anchor matching no files at all, and an
+input resolving for zero of the units. Both mean a filter value that matches nothing
+or a dataset that was never indexed, and both would otherwise read as a study in which
+every subject is missing data.
 
 A binding is only a query. It composes identically with a ``for`` loop, a process
 pool, ``submitit.AutoExecutor.map_array``, a SLURM array job, or a Snakemake input
@@ -242,7 +249,10 @@ class BindingOf[F: Mapping[str, Any], E: str]:
 # augmented catalog re-pins them to their own generated vocabulary, which is what
 # `python -m bidslake.stubgen` emits (see its module docstring). They are subclasses
 # rather than aliases so that `isinstance`, `dataclasses.fields`, and `repr` are
-# unchanged.
+# unchanged — a subscripted generic cannot be used with `isinstance` at all, and an
+# instance built from one is not an instance of these either, so any code branching
+# on the public class would silently mishandle a catalog-pinned binding. `stubgen`
+# emits subclasses for the same reason.
 
 
 class FileInput(FileInputOf[GetFilters, Entity]):
