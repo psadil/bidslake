@@ -18,7 +18,7 @@ from . import _bidslake
 from ._arrow import ipc_to_df
 from ._lazy import build_lazy
 from ._sql import quote_ident
-from .binding import Binding, Unit, resolve
+from .binding import BindingOf, Unit, resolve
 from .file import BidsFile
 from .paths import to_upath, to_uri
 from .relations import Relation
@@ -283,7 +283,7 @@ class BidsLake:
             uri = self._resolve(dataset_id, file_path)
             yield BidsFile._from_row(dataset_id, file_path, uri, row, self)
 
-    def bind(self, binding: Binding) -> list[Unit]:
+    def bind(self, binding: BindingOf[Any, Any]) -> list[Unit]:
         """Resolve a :class:`~bidslake.binding.Binding` into units of work.
 
         Returns one :class:`~bidslake.binding.Unit` per anchor file, each carrying its

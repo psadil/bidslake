@@ -54,6 +54,19 @@ A binding is only a query. It composes identically with a ``for`` loop, a proces
 pool, ``submitit.AutoExecutor.map_array``, a SLURM array job, or a Snakemake input
 function; bidslake does not schedule anything.
 
+Augmented catalogs
+------------------
+``Binding``, ``FileInput`` and ``TableInput`` check their filters against the BIDS
+schema *this build ships*. A catalog carrying an overlay knows more words than that
+— fMRIPrep's ``from``/``to`` entities and ``xfm`` suffix, a FreeSurfer adapter's
+``seg`` — and a binding over them would be flagged key by key against a vocabulary
+that does not contain them. They are therefore the generic :class:`BindingOf` /
+:class:`FileInputOf` / :class:`TableInputOf` pinned to this build's ``GetFilters``
+and ``Entity``; ``python -m bidslake.stubgen my.duckdb`` emits the same three names
+pinned to *that catalog's* vocabulary, so importing them from the generated module
+is the whole opt-in. The runtime classes are identical either way, and
+:meth:`BidsLake.bind` accepts both.
+
 Staged on purpose
 -----------------
 This is deliberately **typed Python, not a JSON artifact**, for now. The dataclasses
@@ -90,7 +103,7 @@ if TYPE_CHECKING:
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
-class FileInput:
+class FileInputOf[F: Mapping[str, Any], E: str]:
     """One sibling file, resolved per unit.
 
     ``join`` names the entities matched against the anchor — a *subset* of the
@@ -102,16 +115,19 @@ class FileInput:
 
     ``dataset_id`` scopes the search to one dataset; ``None`` searches them all,
     which is usually what you want when a study is one catalog of several datasets.
+
+    The type parameters name the *vocabulary* the filters are checked against —
+    see :class:`FileInput` below, which pins them to this build's BIDS schema.
     """
 
-    join: tuple[Entity, ...]
-    where: GetFilters
+    join: tuple[E, ...]
+    where: F
     dataset_id: str | None = None
     table: str = "scans"
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
-class TableInput:
+class TableInputOf[E: str]:
     """A slice of an ingested table, resolved per unit.
 
     For the inputs that are not files at all — a few columns of a confounds table,
@@ -119,13 +135,13 @@ class TableInput:
     (``row_idx`` preserves the original TSV order).
     """
 
-    join: tuple[Entity, ...]
+    join: tuple[E, ...]
     table: str
     columns: tuple[str, ...]
     order_by: str | None = None
 
 
-type Input = FileInput | TableInput
+type InputOf[F: Mapping[str, Any], E: str] = FileInputOf[F, E] | TableInputOf[E]
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -209,13 +225,45 @@ class Unit:
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
-class Binding:
+class BindingOf[F: Mapping[str, Any], E: str]:
     """A declared unit of work: what anchors it, what identifies it, what it needs."""
 
-    anchor: GetFilters
-    key: tuple[Entity, ...]
-    inputs: Mapping[str, Input]
+    anchor: F
+    key: tuple[E, ...]
+    inputs: Mapping[str, InputOf[F, E]]
     table: str = "scans"
+
+
+# The vocabulary a binding is checked against is the catalog's, not the library's:
+# an overlay-augmented catalog knows entities (`from`, `to`) and suffixes (`xfm`)
+# that the BIDS schema this build ships does not. The three names below pin the
+# generic forms to *this build's* schema, so a plain BIDS user writes `FileInput`
+# and `Binding` and gets every key and value checked with no ceremony; a user of an
+# augmented catalog re-pins them to their own generated vocabulary, which is what
+# `python -m bidslake.stubgen` emits (see its module docstring). They are subclasses
+# rather than aliases so that `isinstance`, `dataclasses.fields`, and `repr` are
+# unchanged.
+
+
+class FileInput(FileInputOf[GetFilters, Entity]):
+    """:class:`FileInputOf`, pinned to the BIDS schema this build ships."""
+
+    __slots__ = ()
+
+
+class TableInput(TableInputOf[Entity]):
+    """:class:`TableInputOf`, pinned to the BIDS schema this build ships."""
+
+    __slots__ = ()
+
+
+class Binding(BindingOf[GetFilters, Entity]):
+    """:class:`BindingOf`, pinned to the BIDS schema this build ships."""
+
+    __slots__ = ()
+
+
+type Input = InputOf[GetFilters, Entity]
 
 
 def _check_columns(lake: BidsLake, table: str, names: Sequence[str], what: str) -> None:
@@ -230,7 +278,7 @@ def _check_columns(lake: BidsLake, table: str, names: Sequence[str], what: str) 
 
 
 def _index_files(
-    lake: BidsLake, name: str, spec: FileInput
+    lake: BidsLake, name: str, spec: FileInputOf[Any, Any]
 ) -> dict[tuple[Any, ...], list[tuple[str, str]]]:
     """Every candidate for one file input, bucketed by its join key.
 
@@ -256,7 +304,9 @@ def _index_files(
     return index
 
 
-def _index_table(lake: BidsLake, name: str, spec: TableInput) -> dict[tuple[Any, ...], DataFrame]:
+def _index_table(
+    lake: BidsLake, name: str, spec: TableInputOf[Any]
+) -> dict[tuple[Any, ...], DataFrame]:
     """Every row of one table input, bucketed by its join key, ordered if asked."""
     _check_columns(lake, spec.table, (*spec.join, *spec.columns), f"input {name!r}")
     if spec.order_by is not None:
@@ -274,8 +324,12 @@ def _index_table(lake: BidsLake, name: str, spec: TableInput) -> dict[tuple[Any,
     return {key: part.select(list(spec.columns)) for key, part in parts.items()}
 
 
-def resolve(lake: BidsLake, binding: Binding) -> list[Unit]:
+def resolve(lake: BidsLake, binding: BindingOf[Any, Any]) -> list[Unit]:
     """Resolve `binding` against `lake`, one :class:`Unit` per anchor file.
+
+    Takes the *generic* `BindingOf`, so a binding pinned to a generated catalog
+    vocabulary resolves exactly as one pinned to the shipped schema — the runtime
+    classes are identical, and only the checked vocabulary differs.
 
     Eager, and returns a `list` rather than a generator so that it *is*: a malformed
     binding and every unresolved input surface when this is called, not on the first
@@ -296,8 +350,8 @@ def resolve(lake: BidsLake, binding: Binding) -> list[Unit]:
             )
             raise KeyError(msg)
 
-    file_specs = {n: s for n, s in binding.inputs.items() if isinstance(s, FileInput)}
-    table_specs = {n: s for n, s in binding.inputs.items() if isinstance(s, TableInput)}
+    file_specs = {n: s for n, s in binding.inputs.items() if isinstance(s, FileInputOf)}
+    table_specs = {n: s for n, s in binding.inputs.items() if isinstance(s, TableInputOf)}
     file_index = {n: _index_files(lake, n, s) for n, s in file_specs.items()}
     table_index = {n: _index_table(lake, n, s) for n, s in table_specs.items()}
 
@@ -338,7 +392,7 @@ def resolve(lake: BidsLake, binding: Binding) -> list[Unit]:
     return units
 
 
-def _check_productive(binding: Binding, units: list[Unit]) -> None:
+def _check_productive(binding: BindingOf[Any, Any], units: list[Unit]) -> None:
     """Refuse a binding that resolves *nothing*, which is never incompleteness.
 
     Per-unit gaps are data — that is the whole design — but two shapes are not:
@@ -371,7 +425,7 @@ def _check_productive(binding: Binding, units: list[Unit]) -> None:
         matched = {x.n_matched for u in units for x in u.unresolved if x.name == name}
         if matched != {0}:
             continue
-        if isinstance(spec, FileInput):
+        if isinstance(spec, FileInputOf):
             what = f"filter {dict(spec.where)}"
             if spec.dataset_id is not None:
                 what += f" in dataset {spec.dataset_id!r}"

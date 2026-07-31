@@ -9,6 +9,7 @@ opt-in stubgen types the augmented schema.
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 import bidslake
@@ -73,3 +74,70 @@ def test_stubgen_types_the_augmented_schema(augmented_db: str) -> None:
     assert '"timeseries"' in module, "augmented Suffix should include timeseries"
     assert "class fmriprep_confounds" in module, "C should gain the augmented table"
     assert '"from"' in module, "augmented entity should reach GetFilters/Entity"
+
+
+GOOD_BINDING = '''\
+"""A binding over overlay-added vocabulary: must type-check."""
+
+from _bids_types import Binding, FileInput
+
+DENOISE = Binding(
+    anchor={"datatype": "func", "suffix": "bold", "desc": "preproc"},
+    key=("sub", "ses", "task", "run"),
+    inputs={
+        "xfm": FileInput(
+            join=("sub", "ses"),
+            where={"suffix": "xfm", "from": "boldref", "to": "T1w"},
+        ),
+    },
+)
+'''
+
+BAD_BINDING = '''\
+"""Bindings the augmented vocabulary must still reject."""
+
+from _bids_types import Binding, FileInput
+
+bad_key = FileInput(join=("sub",), where={"frm": "boldref"})
+bad_suffix = FileInput(join=("sub",), where={"suffix": "notarealsuffix"})
+bad_join = FileInput(join=("notanentity",), where={"from": "boldref"})
+bad_anchor = Binding(anchor={"datatype": "fnuc"}, key=("sub",), inputs={})
+'''
+
+
+def _ty(path: Path, search: Path) -> subprocess.CompletedProcess[str]:
+    ty = Path(sys.executable).with_name("ty")
+    if not ty.exists():
+        pytest.skip("ty not installed in this environment")
+    venv = Path(sys.executable).resolve().parents[1]
+    return subprocess.run(
+        [str(ty), "check", "--python", str(venv), "--extra-search-path", str(search), str(path)],
+        capture_output=True,
+        text=True,
+        cwd=Path(__file__).resolve().parents[1],
+    )
+
+
+def test_stubgen_bindings_check_against_the_augmented_vocabulary(
+    augmented_db: str, tmp_path: Path
+) -> None:
+    """The generated `Binding`/`FileInput` accept overlay entities — and only real ones.
+
+    The bundled dataclasses are pinned to the BIDS schema this build ships, so
+    `from`/`xfm` are type errors there; the point of re-emitting them from a catalog
+    is that they stop being errors *without* the vocabulary going untyped.
+    """
+    (tmp_path / "_bids_types.py").write_text(stubgen.generate(augmented_db))
+    good = tmp_path / "good_binding.py"
+    good.write_text(GOOD_BINDING)
+    bad = tmp_path / "bad_binding.py"
+    bad.write_text(BAD_BINDING)
+
+    ok = _ty(good, tmp_path)
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+
+    rejected = _ty(bad, tmp_path)
+    out = rejected.stdout + rejected.stderr
+    assert rejected.returncode != 0
+    for expected in ("frm", "notarealsuffix", "notanentity", "fnuc"):
+        assert expected in out, f"{expected} was not flagged:\n{out}"

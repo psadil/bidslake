@@ -27,7 +27,16 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 
-from .binding import Binding, FileInput, TableInput, Unit, Unresolved
+from .binding import (
+    Binding,
+    BindingOf,
+    FileInput,
+    FileInputOf,
+    TableInput,
+    TableInputOf,
+    Unit,
+    Unresolved,
+)
 from .file import BidsFile
 from .layout import BidsLake, Table
 from .layouts import Layout, LayoutAt, layout
@@ -42,14 +51,17 @@ __all__ = [
     "BidsFile",
     "BidsLake",
     "Binding",
+    "BindingOf",
     "C",
     "FileInput",
+    "FileInputOf",
     "Layout",
     "LayoutAt",
     "Relation",
     "RemotePathError",
     "Table",
     "TableInput",
+    "TableInputOf",
     "Unit",
     "Unresolved",
     "layout",

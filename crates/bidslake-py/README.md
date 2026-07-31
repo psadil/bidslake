@@ -111,6 +111,24 @@ per unit, so it does not scale with the study. And a unit whose inputs do not re
 `sub` alone across datasets whose subject labels collide). Incomplete subjects are visible
 before anything is submitted.
 
+`Binding`, `FileInput` and `TableInput` check their filters against the BIDS schema this
+build ships, so a binding over an *overlay-augmented* catalog — fMRIPrep's `from`/`to` and
+`xfm`, a FreeSurfer adapter's `seg` — would be flagged key by key against a vocabulary that
+does not contain those words. Generate the catalog's own vocabulary and import the same
+three names from it instead; nothing else about the declaration changes, and `lake.bind`
+takes either:
+
+```console
+$ python -m bidslake.stubgen study.duckdb --out _bids_types.py
+```
+
+```python
+from _bids_types import Binding, FileInput   # instead of `from bidslake import …`
+
+"xfm": FileInput(join=("sub", "ses"),
+                 where={"suffix": "xfm", "from": "T1w", "to": "MNI152NLin6Asym"}),
+```
+
 A binding is only a query; bidslake schedules nothing. The same declaration drives a
 `for` loop, a process pool, a SLURM array, or a Snakemake input function:
 
