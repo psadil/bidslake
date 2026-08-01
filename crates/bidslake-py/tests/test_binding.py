@@ -112,6 +112,25 @@ def test_an_input_that_never_resolves_is_an_error_not_45_missing_subjects(lake) 
         lake.bind(binding)
 
 
+def test_naming_a_dataset_the_catalog_lacks_says_so(lake) -> None:
+    """The easiest version of this mistake to make, and the hardest to read.
+
+    Dataset ids are free text, so a study indexed one subject at a time has
+    `sub-01-freesurfer` rather than `freesurfer`. Reporting only "no candidates"
+    leaves the reader checking their filter values, which are fine.
+    """
+    binding = Binding(
+        anchor={**BOLD, "dataset_id": "ds001"},
+        key=("sub",),
+        inputs={"anat": FileInput(join=("sub",), dataset_id="nosuchdataset", where=ANAT)},
+    )
+    with pytest.raises(ValueError, match="not in this catalog"):
+        lake.bind(binding)
+    # ...and it names what the catalog does hold, so the fix is visible.
+    with pytest.raises(ValueError, match="ds001"):
+        lake.bind(binding)
+
+
 def test_an_anchor_matching_nothing_is_an_error(lake) -> None:
     """Otherwise `for unit in lake.bind(B)` silently does no work.
 

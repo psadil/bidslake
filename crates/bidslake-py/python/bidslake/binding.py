@@ -276,6 +276,11 @@ class Binding(BindingOf[GetFilters, Entity]):
 type Input = InputOf[GetFilters, Entity]
 
 
+def _dataset_ids(lake: BidsLake) -> set[str]:
+    """Every `dataset_id` in the catalog, for naming what a bad scope could have meant."""
+    return set(lake._query("SELECT DISTINCT dataset_id FROM scans", [])["dataset_id"])
+
+
 def _check_columns(lake: BidsLake, table: str, names: Sequence[str], what: str) -> None:
     """Fail before any query runs, naming the table — a missing join entity is a
     typo far more often than it is a real absence, and the SQL error for it is
@@ -398,11 +403,11 @@ def resolve(lake: BidsLake, binding: BindingOf[Any, Any]) -> list[Unit]:
             )
         )
 
-    _check_productive(binding, units)
+    _check_productive(lake, binding, units)
     return units
 
 
-def _check_productive(binding: BindingOf[Any, Any], units: list[Unit]) -> None:
+def _check_productive(lake: BidsLake, binding: BindingOf[Any, Any], units: list[Unit]) -> None:
     """Refuse a binding that resolves *nothing*, which is never incompleteness.
 
     Per-unit gaps are data — that is the whole design — but two shapes are not:
@@ -436,6 +441,20 @@ def _check_productive(binding: BindingOf[Any, Any], units: list[Unit]) -> None:
         if matched != {0}:
             continue
         if isinstance(spec, FileInputOf):
+            # A `dataset_id` naming a dataset the catalog does not have is the sharpest
+            # version of this failure and the easiest to make: ids are free text, so a
+            # study indexed per subject has `sub-01-freesurfer`, not `freesurfer`. Say
+            # that outright rather than making someone infer it from "no candidates".
+            if spec.dataset_id is not None and spec.dataset_id not in _dataset_ids(lake):
+                known = ", ".join(sorted(_dataset_ids(lake))) or "(none)"
+                msg = (
+                    f"input {name!r} names dataset {spec.dataset_id!r}, which is not in "
+                    f"this catalog. It holds: {known}. Dataset ids are free text — a "
+                    f"study indexed one subject at a time has one dataset per subject — "
+                    f"so either name them all, or drop `dataset_id` and let the join on "
+                    f"{list(spec.join)} scope the input."
+                )
+                raise ValueError(msg)
             what = f"filter {dict(spec.where)}"
             if spec.dataset_id is not None:
                 what += f" in dataset {spec.dataset_id!r}"
