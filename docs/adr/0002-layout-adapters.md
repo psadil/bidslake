@@ -122,7 +122,16 @@ bidslake index --input <fmriprep>/sourcedata/freesurfer --adapter fmriprep --ada
 ```
 
 Put that way — **the adapter set describes the catalog, not the dataset being added** — run
-order stops mattering again. The check is deliberately narrow: it guards the file registry
+order stops mattering again.
+
+A dataset also has exactly one root. Subject-sharded output — one fMRIPrep run per subject,
+each with its own directory — is therefore several datasets, not one: `root_uri` is stored
+per dataset and is what turns a `file_path` back into an openable URI, so a second root
+under one id would leave every file from it resolving under the first root, to a path that
+does not exist. `BidsParser::check_dataset_root` refuses that before walking. Indexing from
+a shared parent instead is the other honest option, but an anchored term map will not
+project through the extra prefix it introduces (§3 above), so a nested recon-all tree goes
+uncatalogued — which is why the per-subject ids are usually right. The check is deliberately narrow: it guards the file registry
 only, and only against widening, so a fresh catalog is unconstrained and a later *narrower*
 run simply leaves columns NULL. Rebuilding `scans` in place would lift the constraint
 entirely and is not free — `sidecars` carries a foreign key to it — so it is recorded in

@@ -384,7 +384,54 @@ impl BidsParser {
         Some(cols)
     }
 
+    /// Refuse to extend an existing `dataset_id` from a different root.
+    ///
+    /// `root_uri` is stored once per dataset and is what turns a stored, dataset-relative
+    /// `file_path` back into an openable URI. Indexing a second root under the same id is
+    /// therefore not additive: the `WHERE NOT EXISTS` guard on `dataset_description` keeps
+    /// the *first* root (see the `eh-04` TODO), so every file from the second resolves
+    /// under the first one's directory — to a path that does not exist. Nothing errors, and
+    /// a binding reports the files as missing, which sends the reader looking for data that
+    /// is on disk all along.
+    ///
+    /// This is the shape a study processed one subject at a time falls into, because
+    /// subject-sharded output has one root per subject. The honest models are a distinct
+    /// `--dataset-id` per root, or one index run from a root that contains them all —
+    /// though note an anchored term map will not project through the extra path prefix
+    /// that second option introduces (ADR 0002 §3).
+    fn check_dataset_root(&self, db: &BidsDb) -> Result<()> {
+        let Some(id) = self.dataset_id.as_deref() else {
+            // An inferred id comes from the dataset's own description, so it travels with
+            // the root rather than being asserted across two.
+            return Ok(());
+        };
+        let root = self.fs.root();
+        let mut stmt = db
+            .conn
+            .prepare("SELECT root_uri FROM dataset_description WHERE dataset_id = ?")?;
+        let stored: Vec<String> = stmt
+            .query_map([id], |r| r.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        if let Some(existing) = stored.first()
+            && existing != &root
+        {
+            anyhow::bail!(
+                "dataset {id:?} is already in this catalog with root {existing}, and this \
+                 run indexes {root}. A dataset has one root, and the stored one wins — so \
+                 every file added now would resolve under the old root, to a path that does \
+                 not exist. Use a distinct --dataset-id per root, or index once from a root \
+                 containing them all."
+            );
+        }
+        Ok(())
+    }
+
     pub async fn parse(&mut self, db: &BidsDb) -> Result<()> {
+        // Before the walk: a dataset has exactly one root, and adding a second one
+        // under the same id silently misresolves every file from it.
+        self.check_dataset_root(db)?;
+
         // Configure httpfs on the read-preflight connection (if this is an S3
         // ingest) before any `read_csv` sniff runs. No-op for local datasets.
         self.configure_s3_httpfs()?;

@@ -7,6 +7,8 @@
 //! the remedy work: the adapter set describes the *catalog*, so passing all of them on
 //! every run gives the same registry whatever the order.
 
+mod common;
+
 use bidslake::db::BidsDb;
 use bidslake::schema::{AppliedOverlay, Ingestion, Schema};
 
@@ -125,5 +127,33 @@ fn narrowing_is_allowed() -> anyhow::Result<()> {
     let db = BidsDb::new(":memory:")?;
     db.create_tables(&schema_for(&["fmriprep", "freesurfer"])?)?;
     db.create_tables(&Schema::load(None)?)?;
+    Ok(())
+}
+
+/// A dataset has one root, and `root_uri` is what turns a stored `file_path` back into an
+/// openable URI. Indexing a second root under the same id is therefore not additive: the
+/// first root wins, so every file from the second resolves under it — to a path that does
+/// not exist, with nothing raised. A study processed one subject at a time falls into this
+/// shape naturally, because subject-sharded output has one root per subject.
+#[tokio::test]
+async fn a_second_root_under_one_dataset_id_is_refused() -> anyhow::Result<()> {
+    let first = tempfile::tempdir()?;
+    let second = tempfile::tempdir()?;
+    for (dir, sub) in [(&first, "01"), (&second, "02")] {
+        let anat = dir.path().join(format!("sub-{sub}/anat"));
+        std::fs::create_dir_all(&anat)?;
+        std::fs::write(anat.join(format!("sub-{sub}_T1w.nii.gz")), b"nii")?;
+    }
+
+    let db = common::ingest_as(first.path(), "study").await?;
+    let err = common::ingest_into(&db, second.path(), "study")
+        .await
+        .expect_err("a second root under one id must be refused");
+    let msg = err.to_string();
+    assert!(msg.contains("one root"), "{msg}");
+    assert!(msg.contains("distinct --dataset-id"), "{msg}");
+
+    // Re-indexing the *same* root is the common case and must stay a no-op.
+    common::ingest_into(&db, first.path(), "study").await?;
     Ok(())
 }

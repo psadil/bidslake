@@ -33,6 +33,31 @@ pub async fn ingest(dataset_path: impl AsRef<Path>) -> Result<BidsDb> {
     Ok(db)
 }
 
+/// Ingest into an existing catalog under an explicit `dataset_id`, as
+/// `bidslake index --dataset-id` does — for tests about accumulating datasets across
+/// runs, where the id and the root are asserted rather than inferred.
+pub async fn ingest_into(
+    db: &BidsDb,
+    dataset_path: impl AsRef<Path>,
+    dataset_id: &str,
+) -> Result<()> {
+    let schema = Schema::load(None).unwrap();
+    db.create_tables(&schema)?;
+    let fs = Box::new(LocalFileSystem::new(dataset_path.as_ref().to_path_buf()));
+    let mut parser = BidsParser::new(fs, Some(dataset_id.to_string()), schema, None, true);
+    let txn = db.conn.unchecked_transaction()?;
+    parser.parse(db).await?;
+    txn.commit()?;
+    Ok(())
+}
+
+/// A fresh catalog holding one dataset, ingested under an explicit `dataset_id`.
+pub async fn ingest_as(dataset_path: impl AsRef<Path>, dataset_id: &str) -> Result<BidsDb> {
+    let db = BidsDb::new(":memory:")?;
+    ingest_into(&db, dataset_path, dataset_id).await?;
+    Ok(db)
+}
+
 /// Like [`ingest`], but with a caller-provided schema — e.g. one built via
 /// `Schema::load_with_overlays` so tests can exercise overlay-augmented indexing.
 pub async fn ingest_with_schema(dataset_path: impl AsRef<Path>, schema: Schema) -> Result<BidsDb> {
