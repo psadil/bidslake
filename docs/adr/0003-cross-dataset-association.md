@@ -35,7 +35,9 @@ comparing entities is the unsound step, and bidslake never does it on its own in
 It will do it *under direction*. A binding (`bidslake.binding`) lets a `FileInput` carry
 `dataset_id="freesurfer"` and `join=("sub", "ses")`, which is exactly a cross-dataset entity
 match — but the user named the dataset, and a match landing on more than one file comes back
-as `Unresolved(name, n, "ambiguous")` rather than being silently taken. What stays ruled out
+as `Unresolved(name, n, "ambiguous")` rather than being silently taken. `dataset_id` also takes
+a sequence, for a study whose derivative was produced one subject at a time and so occupies one
+dataset per subject rather than one dataset overall. What stays ruled out
 is bidslake *inferring* the correspondence: `resolve` never consults `dataset_relations`.
 
 What a consumer does with the relation is sound *because* of it: once two datasets are known to

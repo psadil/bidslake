@@ -124,10 +124,55 @@ def test_naming_a_dataset_the_catalog_lacks_says_so(lake) -> None:
         key=("sub",),
         inputs={"anat": FileInput(join=("sub",), dataset_id="nosuchdataset", where=ANAT)},
     )
-    with pytest.raises(ValueError, match="not in this catalog"):
+    with pytest.raises(ValueError, match="are not in this catalog"):
         lake.bind(binding)
     # ...and it names what the catalog does hold, so the fix is visible.
     with pytest.raises(ValueError, match="ds001"):
+        lake.bind(binding)
+
+
+def test_dataset_id_accepts_several(lake) -> None:
+    """A study sharded across datasets has one per subject, not one to name.
+
+    The runtime always compiled a sequence to `IN (...)` — every other filter accepts
+    one — so this pins the behaviour the annotation used to hide.
+    """
+    binding = Binding(
+        anchor={**BOLD, "dataset_id": "ds001", "sub": "01", "run": "01"},
+        key=("sub", "ses", "task", "run"),
+        inputs={
+            "anat": FileInput(
+                join=("sub",),
+                dataset_id=["ds001", "eyetracking_fmri"],
+                where=ANAT,
+            )
+        },
+    )
+    unit = next(iter(lake.bind(binding)))
+    # Both datasets have a sub-01 T1w, so widening the scope re-introduces exactly the
+    # ambiguity `dataset_id` exists to remove — reported, not guessed.
+    assert [(x.name, x.n_matched, x.reason) for x in unit.unresolved] == [("anat", 2, "ambiguous")]
+
+    # Narrowed to one of them, it resolves.
+    narrowed = Binding(
+        anchor={**BOLD, "dataset_id": "ds001", "sub": "01", "run": "01"},
+        key=("sub", "ses", "task", "run"),
+        inputs={"anat": FileInput(join=("sub",), dataset_id=["ds001"], where=ANAT)},
+    )
+    assert not next(iter(lake.bind(narrowed))).unresolved
+
+
+def test_a_missing_name_among_several_is_reported(lake) -> None:
+    """`str` is one name, not four characters — and one bad name in a list still names
+    itself, rather than being lost among the valid ones."""
+    binding = Binding(
+        anchor={**BOLD, "dataset_id": "ds001"},
+        key=("sub",),
+        inputs={
+            "anat": FileInput(join=("sub",), dataset_id=["ds001", "nosuchdataset"], where=ANAT)
+        },
+    )
+    with pytest.raises(ValueError, match="'nosuchdataset'"):
         lake.bind(binding)
 
 

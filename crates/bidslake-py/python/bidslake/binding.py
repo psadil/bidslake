@@ -120,8 +120,17 @@ class FileInputOf[F: Mapping[str, Any], E: str]:
     NULL`` (how a native-space image is distinguished from its ``space-*``
     resamplings).
 
-    ``dataset_id`` scopes the search to one dataset; ``None`` searches them all,
-    which is usually what you want when a study is one catalog of several datasets.
+    ``dataset_id`` scopes the search: one id, several, or ``None`` to search them
+    all. A sequence is for a study sharded across datasets — one processing run per
+    subject means one dataset per subject, so the FreeSurfer trees are
+    ``sub-01-freesurfer``, ``sub-02-freesurfer``, … rather than one ``freesurfer``.
+
+    Scoping is often unnecessary, and leaving it ``None`` is usually right: ``join``
+    already narrows an input to its unit, and an input that then matches more than
+    one file is reported as *ambiguous* rather than guessed. Reach for a scope when
+    the join alone genuinely is not enough — two versions of the same derivative in
+    one catalog, say — because naming ids couples the binding to a particular
+    catalog's contents.
 
     The type parameters name the *vocabulary* the filters are checked against —
     see :class:`FileInput` below, which pins them to this build's BIDS schema.
@@ -129,7 +138,7 @@ class FileInputOf[F: Mapping[str, Any], E: str]:
 
     join: tuple[E, ...]
     where: F
-    dataset_id: str | None = None
+    dataset_id: str | Sequence[str] | None = None
     table: str = "scans"
 
 
@@ -276,6 +285,40 @@ class Binding(BindingOf[GetFilters, Entity]):
 type Input = InputOf[GetFilters, Entity]
 
 
+def _named_datasets(scope: str | Sequence[str] | None) -> tuple[str, ...]:
+    """The dataset ids a scope names, as a tuple. A bare `str` is one name, not four
+    characters — which is the bug a plain `tuple(scope)` would introduce."""
+    if scope is None:
+        return ()
+    return (scope,) if isinstance(scope, str) else tuple(scope)
+
+
+def _check_scopes(lake: BidsLake, binding: BindingOf[Any, Any]) -> None:
+    """Reject a `dataset_id` naming a dataset the catalog does not have.
+
+    Checked up front rather than after resolution, because a scope can be *partly*
+    wrong: `["ds001", "typo"]` still resolves from `ds001`, so a late check sees a
+    working input and the misspelled half is silently dropped from the search. Ids
+    are free text, and a study indexed one subject at a time has one dataset per
+    subject, so a name that looks obvious is often not the one in the catalog.
+    """
+    known = _dataset_ids(lake)
+    for name, spec in binding.inputs.items():
+        if not isinstance(spec, FileInputOf):
+            continue
+        absent = sorted(set(_named_datasets(spec.dataset_id)) - known)
+        if not absent:
+            continue
+        msg = (
+            f"input {name!r} names dataset(s) {', '.join(map(repr, absent))}, which "
+            f"are not in this catalog. It holds: {', '.join(sorted(known)) or '(none)'}. "
+            f"Dataset ids are free text — a study indexed one subject at a time has one "
+            f"dataset per subject — so either name them all, or drop `dataset_id` and "
+            f"let the join on {list(spec.join)} scope the input."
+        )
+        raise ValueError(msg)
+
+
 def _dataset_ids(lake: BidsLake) -> set[str]:
     """Every `dataset_id` in the catalog, for naming what a bad scope could have meant."""
     return set(lake._query("SELECT DISTINCT dataset_id FROM scans", [])["dataset_id"])
@@ -365,6 +408,8 @@ def resolve(lake: BidsLake, binding: BindingOf[Any, Any]) -> list[Unit]:
             )
             raise KeyError(msg)
 
+    _check_scopes(lake, binding)
+
     file_specs = {n: s for n, s in binding.inputs.items() if isinstance(s, FileInputOf)}
     table_specs = {n: s for n, s in binding.inputs.items() if isinstance(s, TableInputOf)}
     file_index = {n: _index_files(lake, n, s) for n, s in file_specs.items()}
@@ -441,20 +486,9 @@ def _check_productive(lake: BidsLake, binding: BindingOf[Any, Any], units: list[
         if matched != {0}:
             continue
         if isinstance(spec, FileInputOf):
-            # A `dataset_id` naming a dataset the catalog does not have is the sharpest
-            # version of this failure and the easiest to make: ids are free text, so a
-            # study indexed per subject has `sub-01-freesurfer`, not `freesurfer`. Say
-            # that outright rather than making someone infer it from "no candidates".
-            if spec.dataset_id is not None and spec.dataset_id not in _dataset_ids(lake):
-                known = ", ".join(sorted(_dataset_ids(lake))) or "(none)"
-                msg = (
-                    f"input {name!r} names dataset {spec.dataset_id!r}, which is not in "
-                    f"this catalog. It holds: {known}. Dataset ids are free text — a "
-                    f"study indexed one subject at a time has one dataset per subject — "
-                    f"so either name them all, or drop `dataset_id` and let the join on "
-                    f"{list(spec.join)} scope the input."
-                )
-                raise ValueError(msg)
+            # Any named dataset exists — `_check_scopes` ran first — so the scope is
+            # still worth printing: the filter can match nothing merely because it was
+            # narrowed to datasets that happen not to hold this kind of file.
             what = f"filter {dict(spec.where)}"
             if spec.dataset_id is not None:
                 what += f" in dataset {spec.dataset_id!r}"
