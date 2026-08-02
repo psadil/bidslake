@@ -48,11 +48,15 @@ def freesurfer_db(tmp_path_factory: pytest.TempPathFactory) -> str:
     root = tmp_path_factory.mktemp("freesurfer")
     stats = root / "sub-01_ses-1" / "stats"
     surf = root / "sub-01_ses-1" / "surf"
+    mri = root / "sub-01_ses-1" / "mri"
     stats.mkdir(parents=True)
     surf.mkdir(parents=True)
+    mri.mkdir(parents=True)
     (stats / "aseg.stats").write_text(ASEG_STATS)
     (stats / "lh.aparc.stats").write_text(APARC_STATS)
     (surf / "lh.thickness").write_bytes(b"binary")
+    # Cataloged, not read: its concepts can only come from the term-map projection.
+    (mri / "wmparc.mgz").write_bytes(b"MGZ")
 
     db = tmp_path_factory.mktemp("db") / "fs.duckdb"
     subprocess.run(
@@ -103,3 +107,33 @@ def test_adapter_measures(freesurfer_db: str) -> None:
 def test_adapter_provenance(freesurfer_db: str) -> None:
     with bidslake.open(freesurfer_db) as lake:
         assert [source for _idx, source, _sha in lake.term_maps] == ["freesurfer"]
+
+
+def test_cataloged_file_is_reachable_by_projected_concept(freesurfer_db: str) -> None:
+    """A term-mapped file answers `get()` by what its term map says it is.
+
+    `mri/wmparc.mgz` carries no BIDS entity in its name, so before the projection was
+    retained the only way to reach it was matching the path by hand. This is the
+    query that replaces `file_path.endswith("mri/wmparc.mgz")`.
+    """
+    with bidslake.open(freesurfer_db) as lake:
+        hits = list(lake.get(sub="01", ses="1", seg="wmparc", extension=".mgz"))
+        assert len(hits) == 1
+        assert hits[0].file_path.endswith("mri/wmparc.mgz")
+        assert hits[0].datatype == "anat"
+        assert hits[0].suffix == "dseg"
+
+
+def test_projection_is_not_exposed_as_an_entity(freesurfer_db: str) -> None:
+    """`projected` backs the concept columns; it is not itself a concept.
+
+    It is a real column on adapter catalogs, so without an explicit exclusion it
+    would surface as a JSON blob in `entities` — on adapter catalogs only, which is
+    exactly the kind of difference that is painful to discover later.
+    """
+    with bidslake.open(freesurfer_db) as lake:
+        hit = next(iter(lake.get(seg="wmparc", extension=".mgz")))
+        assert "projected" not in hit.entities
+        # The concepts it supplied are present, under their own names.
+        assert hit.entities["seg"] == "wmparc"
+        assert hit.entities["sub"] == "01"

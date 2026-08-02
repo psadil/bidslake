@@ -83,7 +83,9 @@ pub async fn ingest_with_adapters(
             .map(String::as_str)
             .collect::<Vec<_>>(),
     )?;
-    let schema = Schema::load_full(None, &overlays, ingestion)?;
+    // Term maps must reach schema generation, not just the parser: they decide which
+    // concept columns fall back from a stored projection, and that is a DDL question.
+    let schema = Schema::load_full(None, &overlays, ingestion, &term_maps)?;
 
     db.create_tables(&schema)?;
     db.stamp_term_maps(&term_map_prov)?;

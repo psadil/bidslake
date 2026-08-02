@@ -18,7 +18,15 @@ if TYPE_CHECKING:
 
 # Columns present on every file-based row that are not BIDS concepts; excluded
 # from the ``entities`` mapping.
-_NON_CONCEPT = frozenset({"dataset_id", "file_path", "other_data", "HED", "acq_time", "row_idx"})
+#
+# ``projected`` is the stored term-map projection backing the generated concept
+# columns (ADR 0002 §7). It is the *source* of some of this row's entities, not an
+# entity itself, and it only exists on catalogs built with a term map — so leaving
+# it in would surface a JSON blob as ``f.entities["projected"]`` on adapter
+# catalogs and nowhere else.
+_NON_CONCEPT = frozenset(
+    {"dataset_id", "file_path", "other_data", "HED", "acq_time", "row_idx", "projected"}
+)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)

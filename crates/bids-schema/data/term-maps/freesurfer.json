@@ -29,6 +29,10 @@
       "Concepts": { "datatype": "anat" }
     },
     {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/mri/(?P<seg>wmparc|aparc\\.a2009s\\+aseg|aparc\\.DKTatlas\\+aseg|aparc\\+aseg|aseg)\\.mgz",
+      "Concepts": { "datatype": "anat", "suffix": "dseg" }
+    },
+    {
       "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/mri/[^/]+\\.mgz",
       "Concepts": { "datatype": "anat" }
     }

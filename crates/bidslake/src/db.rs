@@ -79,7 +79,12 @@ impl BidsDb {
     /// Create every table: the schema-generated ones ([`Schema::create_tables_sql`])
     /// plus the static `diffusion`, `file_associations`, and cross-dataset
     /// `dataset_links`/`dataset_identity` tables (and the `dataset_relations` view).
-    pub fn create_tables(&self, schema: &Schema) -> Result<()> {
+    ///
+    /// Creates nothing and returns `Err` when an existing catalog's `scans` is narrower
+    /// than this run's overlays and term maps need — `check_registry_shape` runs first,
+    /// because `IF NOT EXISTS` would otherwise drop the difference in silence.
+    pub fn create_tables(&self, schema: &Schema) -> anyhow::Result<()> {
+        self.check_registry_shape(schema)?;
         let sqls = schema.create_tables_sql();
         for sql in sqls {
             self.conn.execute(&sql, [])?;
@@ -100,6 +105,56 @@ impl BidsDb {
         self.stamp_meta(schema)?;
         self.stamp_schema(schema)?;
         Ok(())
+    }
+
+    /// Refuse to index into a catalog whose file registry is narrower than this run
+    /// needs.
+    ///
+    /// Tables are created `IF NOT EXISTS`, so `scans` keeps the shape the *first* run
+    /// gave it — while datasets are meant to accumulate across runs (ADR 0002 §3).
+    /// A second run whose overlays or term maps are wider therefore has nowhere to put
+    /// the difference, and drops it silently: fMRIPrep's `from`/`to` entities, or the
+    /// projection a FreeSurfer term map computed, are simply absent from the registry
+    /// with nothing to indicate anything was lost. Silence is the problem; the catalog
+    /// looks fine.
+    ///
+    /// The remedy is that the adapter set describes the **catalog**, not the dataset
+    /// being added: pass every adapter the catalog uses on every run and the shape is
+    /// identical whatever the order. Rebuilding `scans` in place would be the fuller
+    /// fix, but it is not free — `sidecars` carries a foreign key to it — so this is a
+    /// loud error with a remedy rather than a silent truncation.
+    fn check_registry_shape(&self, schema: &Schema) -> anyhow::Result<()> {
+        let exists: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'scans'",
+            [],
+            |r| r.get(0),
+        )?;
+        if exists == 0 {
+            return Ok(()); // fresh catalog; the DDL below defines the shape
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'scans'",
+        )?;
+        let have: std::collections::HashSet<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        let missing: Vec<String> = schema
+            .registry_concept_columns()
+            .into_iter()
+            .filter(|c| !have.contains(c))
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "this catalog's `scans` table has no column for {}, so what this run would \
+             record there is dropped. Tables are created only if absent, so the registry \
+             keeps the shape of the run that created it. The adapter set describes the \
+             catalog rather than one dataset: pass every adapter this catalog uses on \
+             every index run (order then does not matter), or index into a new catalog.",
+            missing.join(", ")
+        )
     }
 
     /// Record which BIDS schema version (and bidslake build) produced this

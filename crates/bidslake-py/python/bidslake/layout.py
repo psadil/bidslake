@@ -18,6 +18,7 @@ from . import _bidslake
 from ._arrow import ipc_to_df
 from ._lazy import build_lazy
 from ._sql import quote_ident
+from .binding import BindingOf, Unit, resolve
 from .file import BidsFile
 from .paths import to_upath, to_uri
 from .relations import Relation
@@ -281,6 +282,30 @@ class BidsLake:
             file_path = row["file_path"]
             uri = self._resolve(dataset_id, file_path)
             yield BidsFile._from_row(dataset_id, file_path, uri, row, self)
+
+    def bind(self, binding: BindingOf[Any, Any]) -> list[Unit]:
+        """Resolve a :class:`~bidslake.binding.Binding` into units of work.
+
+        Returns one :class:`~bidslake.binding.Unit` per anchor file, each carrying its
+        resolved inputs and a tuple of :class:`~bidslake.binding.Unresolved` entries
+        for the inputs that did not match exactly one thing — a per-unit gap is data,
+        not an exception. Costs one query per declared input, not one per input per
+        unit::
+
+            for unit in lake.bind(MELODIC):
+                if unit.unresolved:
+                    continue
+                work(unit.anchor.local_path, unit.local("anat"))
+
+        Raises :class:`ValueError` for the two shapes that are never incomplete data:
+        an anchor matching no files at all, and an input resolving for *zero* units.
+        Both mean a filter value that matches nothing or a dataset that was never
+        indexed, rather than a missing subject.
+
+        See :mod:`bidslake.binding` for the declaration format and why it is typed
+        Python rather than a stamped JSON artifact.
+        """
+        return resolve(self, binding)
 
     # -- escape hatch ------------------------------------------------------
 

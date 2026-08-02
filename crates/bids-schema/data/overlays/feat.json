@@ -1,0 +1,78 @@
+{
+  "objects": {
+    "entities": {
+      "from": {
+        "name": "from",
+        "display_name": "From",
+        "description": "The source space or reference of a spatial transform (e.g. `from-T1w`). Only applicable to derivative data.\n",
+        "type": "string",
+        "format": "label"
+      },
+      "to": {
+        "name": "to",
+        "display_name": "To",
+        "description": "The target space or reference of a spatial transform (e.g. `to-MNI152NLin2009cAsym`). Only applicable to derivative data.\n",
+        "type": "string",
+        "format": "label"
+      },
+      "mode": {
+        "name": "mode",
+        "display_name": "Mode",
+        "description": "The interpretation of a transform file (e.g. `mode-image`). Only applicable to derivative data.\n",
+        "type": "string",
+        "format": "label"
+      },
+      "rater": {
+        "name": "rater",
+        "display_name": "Rater",
+        "description": "The person or procedure that produced a manual annotation (e.g. `rater-01`). Distinguishes a hand-edited artifact from the automatic one it was derived from.\n",
+        "type": "string",
+        "format": "label"
+      }
+    },
+    "suffixes": {
+      "timeseries": {
+        "value": "timeseries",
+        "display_name": "Time series",
+        "description": "A tabular file whose rows are ordered samples in register with an associated time series (e.g. fMRIPrep confounds, one row per functional volume).\n"
+      },
+      "xfm": {
+        "value": "xfm",
+        "display_name": "Transformation",
+        "description": "A spatial transform mapping one space to another, typically named with `from-`, `to-`, and `mode-` entities.\n"
+      },
+      "boldref": {
+        "value": "boldref",
+        "display_name": "BOLD reference image",
+        "description": "A single 3D volume used as the reference for a BOLD run.\n"
+      },
+      "mixing": {
+        "value": "mixing",
+        "display_name": "Mixing matrix",
+        "description": "The mixing matrix of a decomposition: one column per component, one row per volume of the decomposed time series.\n"
+      },
+      "components": {
+        "value": "components",
+        "display_name": "Component maps",
+        "description": "The spatial maps of a decomposition, concatenated along a component axis.\n"
+      },
+      "classification": {
+        "value": "classification",
+        "display_name": "Component classification",
+        "description": "A labelling of a decomposition's components (e.g. signal versus noise), produced automatically or by a rater.\n"
+      }
+    },
+    "extensions": {
+      "mat": {
+        "value": ".mat",
+        "display_name": "FSL affine transform",
+        "description": "A plain-text 4x4 affine matrix in FSL's convention, as written by `flirt` and `convert_xfm`.\n"
+      },
+      "par": {
+        "value": ".par",
+        "display_name": "Motion parameters",
+        "description": "A whitespace-delimited, headerless table of rigid-body motion parameters, one row per volume, as written by `mcflirt`.\n"
+      }
+    }
+  }
+}

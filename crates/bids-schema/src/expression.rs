@@ -82,7 +82,7 @@ impl ValueExt for Value {
 /// (`suffix == "bold"`, `"RepetitionTime" in sidecar`, `intersects(dataset.modalities, …)`).
 /// Pairing such an expression with this environment forms something like a
 /// *quosure*, and evaluating it is *data-masking*: an identifier names a slot in
-/// the bound data rather than a lexical variable. [`eval_ir`] performs that
+/// the bound data rather than a lexical variable. `eval_ir` performs that
 /// masking, resolving each identifier against the bindings below.
 ///
 /// The bindings come from two scopes, held by reference:
@@ -144,8 +144,8 @@ impl<'a> EvalContext<'a> {
 
 /// Parse and evaluate a BIDS schema expression, returning its value.
 ///
-/// The expression is parsed and lowered to an owned [`Expr`] exactly once — the result is
-/// cached per source string (see [`compile_expression`]) — so evaluating the same selector
+/// The expression is parsed and lowered to an owned `Expr` exactly once — the result is
+/// cached per source string (see `compile_expression`) — so evaluating the same selector
 /// across thousands of files walks the cached tree without re-invoking the oxc parser.
 pub fn evaluate(expr_str: &str, context: &EvalContext) -> Result<Value, String> {
     if expr_str.trim().is_empty() {

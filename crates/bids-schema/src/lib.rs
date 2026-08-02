@@ -2,17 +2,16 @@
 //! schema-expression-language evaluator.
 //!
 //! This crate is the one place that owns the vendored BIDS schema and how to *evaluate* it.
-//! (The schema-parameterized association resolver and the shared file-context builder are
-//! added in later stages.)
-//!
-//! NOTE: the *typed* rules struct `BidsSchema` does **not** live here — it stays in
-//! `bids_validator_rs::schema::BidsSchema`, built on top of [`SCHEMA_JSON`]. Consumers of this
-//! crate reach for `bids_schema::expression`, … and the [`SCHEMA_JSON`] constant.
+//! It also owns the artifacts that extend BIDS without forking it: [`overlay`]
+//! (vocabulary), [`term_map`] (path → concepts, BEP-043) and [`layout`] (concepts →
+//! path, the write direction), plus the schema-parameterized [`associations`]
+//! resolver and the shared [`context`] file-context builder.
 
 pub mod associations;
 pub mod context;
 pub mod datatypes;
 pub mod expression;
+pub mod layout;
 pub mod overlay;
 pub mod term_map;
 
@@ -58,7 +57,7 @@ pub const INGESTION_METASCHEMA_JSON: &str = include_str!("../data/ingestion-meta
 
 /// Ingestion fragments bidslake ships, addressable by name on `--adapter`. Excludes
 /// `base`, which is not an adapter — it is applied on every ingest.
-pub const BUNDLED_INGESTION_NAMES: &[&str] = &["fmriprep", "freesurfer"];
+pub const BUNDLED_INGESTION_NAMES: &[&str] = &["fmriprep", "freesurfer", "feat"];
 
 /// The raw JSON of a bundled ingestion fragment, or `None` if `name` is not bundled.
 pub fn bundled_ingestion_source(name: &str) -> Option<&'static str> {
@@ -66,6 +65,7 @@ pub fn bundled_ingestion_source(name: &str) -> Option<&'static str> {
         "base" => include_str!("../data/ingestion/base.json"),
         "fmriprep" => include_str!("../data/ingestion/fmriprep.json"),
         "freesurfer" => include_str!("../data/ingestion/freesurfer.json"),
+        "feat" => include_str!("../data/ingestion/feat.json"),
         _ => return None,
     })
 }

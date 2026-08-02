@@ -174,6 +174,42 @@ pub struct BidsParser {
 struct ImagingFile {
     dataset_id: String,
     file_path: String,
+    /// The term-map projection for this file, serialized, or `None` for a BIDS-named
+    /// file (whose concepts the generated columns read straight off `file_path`).
+    ///
+    /// A projected path carries almost none of its concepts in its name, so without
+    /// this the `FileFacts` a term map computed would be used to pick an ingestion
+    /// rule and then thrown away — leaving the row's `datatype`/`suffix`/entity
+    /// columns NULL. Lands in the `projected` column that
+    /// `Schema::generated_bids_columns` makes the concept columns fall back from.
+    projected: Option<Value>,
+}
+
+/// Serialize the concepts a term map projected onto a file, for the `projected` column.
+///
+/// `extension` is deliberately omitted: it is read off the filename, which is
+/// authoritative even for a projected path, so storing it would cost a column in every
+/// row's JSON to restate what the generated column already computes. `None` when the
+/// projection is empty, so a mapping that binds nothing writes no JSON at all.
+///
+/// Returns the `Value` itself rather than serialized text: handing the appender a
+/// `Value::String` of JSON stores a JSON *string* (`"{\"seg\":\"wmparc\"}"`, whose
+/// `json_type` is VARCHAR), and `json_extract_string` then returns NULL for every key.
+fn projected_json(facts: &FileFacts) -> Option<Value> {
+    let mut map = serde_json::Map::new();
+    for (k, v) in &facts.entities {
+        map.insert(k.clone(), Value::String(v.clone()));
+    }
+    if let Some(dt) = &facts.datatype {
+        map.insert("datatype".to_string(), Value::String(dt.clone()));
+    }
+    if let Some(sfx) = &facts.suffix {
+        map.insert("suffix".to_string(), Value::String(sfx.clone()));
+    }
+    if map.is_empty() {
+        return None;
+    }
+    Some(Value::Object(map))
 }
 
 struct PendingDiffusion {
@@ -307,7 +343,7 @@ impl BidsParser {
 
     /// Attach term maps that recognize standardized non-BIDS files (FreeSurfer, …).
     /// Ordinary BIDS ingestion configures none, so the classify hot path in
-    /// [`Self::process_file`] short-circuits on an empty term-map list.
+    /// `process_file` short-circuits on an empty term-map list.
     pub fn with_term_maps(mut self, term_maps: Vec<TermMap>) -> Self {
         self.term_maps = term_maps;
         self
@@ -633,6 +669,14 @@ impl BidsParser {
                     Value::String(img_file.file_path.clone()),
                 );
 
+                // The term-map projection, for a file whose name does not carry its
+                // concepts. Absent for BIDS-named files, and the column itself only
+                // exists when a term map is configured — `append_rows` writes by
+                // column, so an unset key is simply NULL.
+                if let Some(projected) = &img_file.projected {
+                    scan_data.insert("projected".to_string(), projected.clone());
+                }
+
                 // No `filename` key: it is structural, not data. The `scans.tsv` path
                 // consumes it into `file_path` (see `structural` in
                 // `build_tabular_insert_sql`) rather than storing it, and an
@@ -829,6 +873,7 @@ impl BidsParser {
                 .map(|i| ImagingFile {
                     dataset_id: self.sidecars[i].dataset_id.clone(),
                     file_path: self.sidecars[i].file_path.clone(),
+                    projected: None,
                 })
                 .collect()
         };
@@ -1162,6 +1207,7 @@ impl BidsParser {
             self.imaging_files.push(ImagingFile {
                 dataset_id: dataset_id.to_string(),
                 file_path: rel_path.to_string(), // Use rel_path not file_name
+                projected: None,                 // BIDS-named: its concepts are in the filename
             });
             return Ok(());
         }
@@ -1253,11 +1299,16 @@ impl BidsParser {
             }
         };
 
-        // `read` and `catalog` both register the file in the standard `scans` registry.
+        // `read` and `catalog` both register the file in the standard `scans` registry,
+        // carrying the projection so the registry row answers "what is this file?" the
+        // way the term map said it would. Without it a cataloged projected file reaches
+        // `scans` as a bare path and reads back with every concept NULL — including the
+        // `datatype` its term map states outright.
         if matches!(disposition, Disposition::Read | Disposition::Catalog) {
             self.imaging_files.push(ImagingFile {
                 dataset_id: dataset_id.to_string(),
                 file_path: rel_path.to_string(),
+                projected: projected_json(&facts),
             });
         }
 

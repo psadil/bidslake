@@ -12,6 +12,27 @@ can see the augmented catalog::
 Then ``from _bids_types import C, Suffix`` for typed Polars expressions and checks.
 Runtime querying of augmented columns needs none of this — ``get`` and the table
 accessors validate against the live database.
+
+The module also re-pins the :mod:`bidslake.binding` dataclasses to *this catalog's*
+vocabulary, so a binding written against an augmented catalog is checked key by key::
+
+    from _bids_types import Binding, FileInput   # not `from bidslake import …`
+
+    DENOISE = Binding(
+        anchor={"datatype": "func", "suffix": "bold", "space": None},
+        key=("sub", "ses", "task", "run"),
+        inputs={
+            "xfm": FileInput(
+                join=("sub", "ses"),
+                where={"suffix": "xfm", "from": "T1w", "to": "MNI152NLin6Asym"},
+            ),
+        },
+    )
+
+``bidslake.FileInput`` is ``FileInputOf[GetFilters, Entity]`` pinned to the shipped
+schema; these are the same generics pinned to the generated ones, so nothing about
+the declaration changes except which vocabulary ``from``/``xfm``/``seg`` are measured
+against. ``lake.bind`` accepts either.
 """
 
 from __future__ import annotations
@@ -34,8 +55,37 @@ from collections.abc import Sequence
 from typing import Literal, TypedDict
 
 import polars as pl
+from bidslake.binding import BindingOf as _BindingOf
+from bidslake.binding import FileInputOf as _FileInputOf
+from bidslake.binding import TableInputOf as _TableInputOf
 
 '''
+
+_BINDINGS = """\
+# The binding dataclasses, pinned to *this catalog's* vocabulary instead of the one
+# the installed bidslake was built with. Import these rather than the ones on
+# `bidslake` and a binding's `where`/`anchor`/`join`/`key` are checked against the
+# entities, suffixes and datatypes above. `lake.bind` takes either, because
+# resolution tests against the generic bases these subclass.
+#
+# Subclasses rather than `FileInput = _FileInputOf[...]` aliases: a subscripted
+# generic cannot be used with `isinstance`, and an instance built from an alias is
+# not an instance of `bidslake.FileInput` either, so any code branching on the
+# public class would silently mishandle a binding written against this catalog.
+class FileInput(_FileInputOf[GetFilters, Entity]):
+    pass
+
+
+class TableInput(_TableInputOf[Entity]):
+    pass
+
+
+class Binding(_BindingOf[GetFilters, Entity]):
+    pass
+
+
+type Input = FileInput | TableInput
+"""
 
 
 def _literal_alias(name: str, values: list[str]) -> str:
@@ -91,6 +141,8 @@ def render(schema: dict[str, Any], columns: dict[str, dict[str, str]]) -> str:
     gf_lines += ["    },", "    total=False,", ")"]
     out.append("\n".join(gf_lines))
     out.append("")
+
+    out.append(_BINDINGS)
 
     # COLUMNS: runtime column->type map per table.
     cols_lines = ["COLUMNS: dict[str, dict[str, str]] = {"]

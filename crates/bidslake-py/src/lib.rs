@@ -11,6 +11,7 @@
 //! FFI) and pyarrow-free. A later pass can switch to a zero-copy PyCapsule
 //! stream if profiling of large results calls for it.
 
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use anyhow::Context;
@@ -314,9 +315,72 @@ fn anyhow_err_from(e: duckdb::Error) -> PyErr {
     PyRuntimeError::new_err(e.to_string())
 }
 
+/// A compiled, validated bidslake **layout**: the concepts-to-path direction, for
+/// naming an output file before it exists.
+///
+/// Rendering lives here rather than in Python so there is exactly one implementation
+/// of the template semantics, and because constructing it is what runs the round-trip
+/// check against the layout's term map (see `bids_schema::layout`) — a layout whose
+/// rendered paths do not read back as declared fails to load rather than silently
+/// producing a tree nothing can index.
+#[pyclass(module = "bidslake._bidslake")]
+struct PyLayout {
+    layout: bids_schema::layout::Layout,
+    name: String,
+}
+
+#[pymethods]
+impl PyLayout {
+    /// Load a bundled layout by name (`feat`).
+    #[new]
+    fn new(name: &str) -> PyResult<Self> {
+        let layout = bids_schema::layout::bundled_layout(name).ok_or_else(|| {
+            PyRuntimeError::new_err(format!(
+                "unknown layout {name:?}; bundled layouts are {:?}",
+                bids_schema::layout::BUNDLED_LAYOUT_NAMES
+            ))
+        })?;
+        Ok(Self {
+            layout,
+            name: name.to_string(),
+        })
+    }
+
+    /// The declared role names, sorted.
+    fn roles(&self) -> Vec<String> {
+        self.layout.roles().into_iter().map(String::from).collect()
+    }
+
+    /// The term map this layout is checked against.
+    fn term_map(&self) -> &str {
+        self.layout.term_map_name()
+    }
+
+    /// One role's human-readable description, if it declares one.
+    fn description(&self, role: &str) -> Option<String> {
+        self.layout.role(role).and_then(|r| r.description.clone())
+    }
+
+    /// Render `role` relative to a unit's output root. `None` when the role is unknown
+    /// or a `{placeholder}` is unbound — an unbound placeholder must not render as
+    /// empty, since that yields a plausible path pointing at the wrong file.
+    fn render(&self, role: &str, bindings: BTreeMap<String, String>) -> Option<String> {
+        self.layout.render(role, &bindings)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "PyLayout({:?}, roles={})",
+            self.name,
+            self.layout.roles().len()
+        )
+    }
+}
+
 #[pymodule]
 fn _bidslake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyLake>()?;
+    m.add_class::<PyLayout>()?;
     m.add_function(wrap_pyfunction!(resolve_uri, m)?)?;
     Ok(())
 }

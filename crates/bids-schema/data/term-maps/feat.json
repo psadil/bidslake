@@ -1,0 +1,239 @@
+{
+  "BIDSVersion": "1.11.1",
+  "BIDSMapVersion": "0.1.0",
+  "Mappings": [
+    {
+      "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/fix/[^/]+",
+      "Concepts": {
+        "datatype": "func"
+      },
+      "Entities": {
+        "desc": "fixscratch"
+      }
+    },
+    {
+      "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/mc/prefiltered_func_data_mcf\\.par",
+      "Entities": {
+        "desc": "motion"
+      },
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "timeseries"
+      }
+    },
+    {
+      "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/mc/[^/]+",
+      "Concepts": {
+        "datatype": "func"
+      },
+      "Entities": {
+        "desc": "mcscratch"
+      }
+    },
+    {
+      "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/filtered_func_data\\.nii\\.gz",
+      "Entities": {
+        "desc": "filtered"
+      },
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "bold"
+      }
+    },
+    {
+      "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/filtered_func_data_clean\\.nii\\.gz",
+      "Entities": {
+        "desc": "clean"
+      },
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "bold"
+      }
+    },
+    {
+      "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/filtered_func_data_clean_vn\\.nii\\.gz",
+      "Entities": {
+        "desc": "cleanvn"
+      },
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "bold"
+      }
+    },
+    {
+      "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/mask\\.nii\\.gz",
+      "Entities": {
+        "desc": "brain"
+      },
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "mask"
+      }
+    },
+    {
+      "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/filtered_func_data\\.ica/melodic_mix",
+      "Entities": {
+        "desc": "MELODIC"
+      },
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "mixing"
+      }
+    },
+    {
+      "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/filtered_func_data\\.ica/melodic_(?P<desc>o?IC)\\.nii\\.gz",
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "components"
+      }
+    },
+    {
+      "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/filtered_func_data\\.ica/[^/]+",
+      "Concepts": {
+        "datatype": "func"
+      },
+      "Entities": {
+        "desc": "icascratch"
+      }
+    },
+    {
+      "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/fix4melview_(?P<desc>[0-9A-Za-z]+)_thr[0-9]+_(?P<rater>[0-9A-Za-z]+)\\.txt",
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "classification"
+      }
+    },
+    {
+      "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/fix4melview_(?P<desc>[0-9A-Za-z]+)_thr[0-9]+\\.txt",
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "classification"
+      }
+    },
+    {
+      "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/reg/example_func\\.nii\\.gz",
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "boldref"
+      }
+    },
+    {
+      "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/reg/highres\\.nii\\.gz",
+      "Concepts": {
+        "datatype": "anat",
+        "suffix": "T1w"
+      }
+    },
+    {
+      "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/reg/standard\\.nii\\.gz",
+      "Entities": {
+        "desc": "standard"
+      },
+      "Concepts": {
+        "datatype": "anat",
+        "suffix": "T1w"
+      }
+    },
+    {
+      "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/reg/wmparc\\.nii\\.gz",
+      "Entities": {
+        "seg": "wmparc"
+      },
+      "Concepts": {
+        "datatype": "anat",
+        "suffix": "dseg"
+      }
+    },
+    {
+      "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/reg/highres_pveseg\\.nii\\.gz",
+      "Entities": {
+        "desc": "pveseg"
+      },
+      "Concepts": {
+        "datatype": "anat",
+        "suffix": "dseg"
+      }
+    },
+    {
+      "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/reg/example_func2highres(?:\\.mat|_warp\\.nii\\.gz)",
+      "Entities": {
+        "from": "exfunc",
+        "to": "highres",
+        "mode": "image"
+      },
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "xfm"
+      }
+    },
+    {
+      "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/reg/highres2example_func(?:\\.mat|_warp\\.nii\\.gz)",
+      "Entities": {
+        "from": "highres",
+        "to": "exfunc",
+        "mode": "image"
+      },
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "xfm"
+      }
+    },
+    {
+      "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/reg/highres2standard(?:\\.mat|_warp\\.nii\\.gz)",
+      "Entities": {
+        "from": "highres",
+        "to": "standard",
+        "mode": "image"
+      },
+      "Concepts": {
+        "datatype": "anat",
+        "suffix": "xfm"
+      }
+    },
+    {
+      "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/reg/standard2highres(?:\\.mat|_warp\\.nii\\.gz)",
+      "Entities": {
+        "from": "standard",
+        "to": "highres",
+        "mode": "image"
+      },
+      "Concepts": {
+        "datatype": "anat",
+        "suffix": "xfm"
+      }
+    },
+    {
+      "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/reg/example_func2standard(?:\\.mat|_warp\\.nii\\.gz)",
+      "Entities": {
+        "from": "exfunc",
+        "to": "standard",
+        "mode": "image"
+      },
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "xfm"
+      }
+    },
+    {
+      "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/reg/standard2example_func(?:\\.mat|_warp\\.nii\\.gz)",
+      "Entities": {
+        "from": "standard",
+        "to": "exfunc",
+        "mode": "image"
+      },
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "xfm"
+      }
+    },
+    {
+      "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/(?:pyfix\\.log|report\\.html|report_log\\.html)",
+      "Concepts": {
+        "datatype": "func"
+      },
+      "Entities": {
+        "desc": "log"
+      }
+    }
+  ]
+}

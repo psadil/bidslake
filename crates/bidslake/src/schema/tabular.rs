@@ -166,7 +166,7 @@ pub struct TabularRule {
 
 impl TabularRule {
     /// A rule matches a file iff all its selectors evaluate true against an
-    /// already-built [`EvalContext`] — delegated to the shared BIDS expression
+    /// already-built `bids_schema::expression::EvalContext` — delegated to the shared BIDS expression
     /// evaluator (`bids_schema::expression`) over the raw selector strings, so the
     /// full schema selector language is honoured (not bidslake's partial parser).
     /// `route`/`matching_rules` build the (loop-invariant) context once per file
