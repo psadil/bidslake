@@ -43,7 +43,7 @@ jobs:
       # `cargo index` (the pytest session fixture) and `maturin develop` both
       # need the Rust toolchain.
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
       - name: Create venv (Python 3.14)
         working-directory: crates/bidslake-py
         run: uv venv --python 3.14
@@ -70,7 +70,7 @@ jobs:
         with:
           submodules: recursive
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
       - name: Create venv (Python 3.14)
         working-directory: crates/bidslake-py
         run: uv venv --python 3.14
