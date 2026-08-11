@@ -103,7 +103,7 @@ identified by its position in the tree — so no amount of added vocabulary reac
 An **adapter** is what does. `--adapter freesurfer` resolves whatever bidslake bundles under
 that name: an overlay (vocabulary), a BEP-043 **term map** projecting a path onto BIDS
 concepts, and an ingestion fragment (read/catalog/ignore). Bundled today: `fmriprep`,
-`mriqc`, `qsiprep`, `freesurfer`, `feat`.
+`mriqc`, `qsiprep`, `freesurfer`, `feat`, `dcmstack`.
 
 ```bash
 bidslake index --input <study>/derivatives/freesurfer --output study.duckdb \
@@ -112,6 +112,22 @@ bidslake index --input <study>/derivatives/freesurfer --output study.duckdb \
 
 The projection is stored, so those files answer concept queries rather than only path
 matches — `WHERE seg = 'wmparc'` reaches a recon-all volume and a BIDS-named one alike.
+
+Not every adapter is a pipeline. `dcmstack` names a *converter convention*: dcmstack's
+DcmMeta extension attaches per-slice DICOM dumps to an otherwise ordinary sidecar under
+`global` and `time`, which on a real study runs to megabytes per file — one measured
+`_bold.json` was 3.6 MB, of which `global` alone was 1.7 MB. Those keys describe the
+conversion, not the data, and nothing queries them, so its fragment declares them
+`ignoreKeys` and they are dropped as the sidecar is parsed:
+
+```bash
+bidslake index --input <study>/rawdata --output study.duckdb --adapter dcmstack
+```
+
+On a 1,800-scan tree with sidecars of that shape, that is the difference between a
+**2.8 GB** catalog and an **8 MB** one, and between 4.4 s and 0.08 s of inheritance.
+`ignoreKeys` is deliberately narrower than the table-wide `undeclared: catalog` dial,
+which would have discarded every other custom field along with these two.
 
 Datasets accumulate in one catalog, with one constraint: `scans` is created once and keeps
 the shape of the run that created it, so **the adapter set describes the catalog, not the

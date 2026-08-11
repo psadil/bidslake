@@ -93,6 +93,22 @@ pub struct TablePolicy {
     /// [`TablePolicy::undeclared`], then to [`Undeclared::Store`].
     #[serde(default, rename = "undeclaredWhen")]
     pub undeclared_when: Vec<ScopedUndeclared>,
+    /// Source keys this table never stores, by name.
+    ///
+    /// The key-level counterpart of [`Disposition::Ignore`], completing the vocabulary:
+    /// a file is read/cataloged/ignored, the columns a table does not declare are
+    /// stored or cataloged, and a *named key* can be dropped outright. It exists
+    /// because the other two dials are the wrong shape for a converter that attaches
+    /// something enormous and non-BIDS to otherwise ordinary metadata — dcmstack's
+    /// DcmMeta writes per-slice DICOM dumps under `global` and `time`, megabytes per
+    /// sidecar — where `undeclared: catalog` would discard every other custom field
+    /// along with it.
+    ///
+    /// Dropped before anything reads the metadata, so an ignored key costs nothing to
+    /// merge, store, or hold in memory. Applies whether or not the key has a declared
+    /// column.
+    #[serde(default, rename = "ignoreKeys")]
+    pub ignore_keys: Vec<String>,
 }
 
 impl TablePolicy {
@@ -103,6 +119,9 @@ impl TablePolicy {
     fn merge_from(&mut self, other: TablePolicy) {
         if !other.concepts.is_empty() {
             self.concepts = other.concepts;
+        }
+        if !other.ignore_keys.is_empty() {
+            self.ignore_keys = other.ignore_keys;
         }
         if other.ordered.is_some() {
             self.ordered = other.ordered;
@@ -210,6 +229,15 @@ impl Ingestion {
         self.tables
             .get(table)
             .and_then(|p| p.undeclared)
+            .unwrap_or_default()
+    }
+
+    /// The source keys `table` never stores (see [`TablePolicy::ignore_keys`]). Empty
+    /// for every table by default, so the check is one `is_empty` on the hot path.
+    pub fn ignore_keys(&self, table: &str) -> &[String] {
+        self.tables
+            .get(table)
+            .map(|p| p.ignore_keys.as_slice())
             .unwrap_or_default()
     }
 

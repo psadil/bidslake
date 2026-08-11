@@ -1470,7 +1470,20 @@ impl BidsParser {
         entities: &HashMap<String, String>,
     ) -> Result<()> {
         let content = self.read_cached(path, rel_path).await?;
-        let json_value: Value = serde_json::from_str(&content).unwrap_or(Value::Null);
+        let mut json_value: Value = serde_json::from_str(&content).unwrap_or(Value::Null);
+
+        // Drop the keys the ingestion policy says `sidecars` never stores, here at the
+        // parse rather than at the insert. A key dropped now is never merged for the
+        // files that inherit it, never copied into a row, and never held in memory for
+        // the rest of the run — which is the whole point, since what motivates the
+        // policy is single keys of a few megabytes.
+        let ignore = self.schema.ingestion().ignore_keys("sidecars");
+        if !ignore.is_empty()
+            && let Some(obj) = json_value.as_object_mut()
+        {
+            obj.retain(|k, _| !ignore.iter().any(|i| i == k));
+        }
+        let json_value = json_value;
 
         // Extract the BIDS suffix from the filename via the shared bids-core parser.
         let file_name = path.file_name().unwrap().to_str().unwrap();
