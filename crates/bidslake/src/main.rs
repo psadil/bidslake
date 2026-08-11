@@ -6,7 +6,9 @@ use std::path::PathBuf;
 // The CLI is a consumer of the library, not a second copy of it. Declaring these as
 // `mod` here would compile every one of them a second time, in parallel with the lib
 // and invisible to it.
-use bidslake::{bids, links, s3, schema};
+#[cfg(feature = "s3")]
+use bidslake::s3;
+use bidslake::{bids, links, schema};
 
 use bidslake::bids::BidsParser;
 use bidslake::db::BidsDb;
@@ -39,7 +41,9 @@ enum Commands {
         #[arg(short, long)]
         dataset_id: Option<String>,
 
-        /// Use anonymous access for S3 (no AWS credentials required)
+        /// Use anonymous access for S3 (no AWS credentials required). Applies only to
+        /// an `s3://` input; inert in a build without the `s3` feature, which refuses
+        /// such inputs outright.
         #[arg(long)]
         no_sign_request: bool,
 
@@ -745,6 +749,11 @@ async fn run_indexer(
     temp_dir: Option<PathBuf>,
 ) -> Result<()> {
     println!("Input BIDS location: {}", input);
+
+    // Before anything is created on disk, so a run this build cannot serve fails
+    // without leaving an empty catalog behind.
+    check_input_supported(&input)?;
+
     // A dry run parses into a throwaway in-memory database and reports routing rather
     // than writing anything to disk.
     let db_path = if dry_run { ":memory:" } else { &output };
@@ -772,42 +781,8 @@ async fn run_indexer(
         db.stamp_ingestion(&ingestion_provenance)?;
     }
 
-    // Region/anonymous settings for httpfs, when the input is S3.
-    let mut s3_httpfs: Option<(String, bool)> = None;
-    let fs: Box<dyn BidsFileSystem> = if input.starts_with("s3://") {
-        {
-            // Parse bucket and prefix from s3://bucket/prefix
-            let parts: Vec<&str> = input.trim_start_matches("s3://").splitn(2, '/').collect();
-            let bucket = parts[0];
-            let prefix = if parts.len() > 1 { parts[1] } else { "" };
+    let (fs, s3_httpfs_cfg) = open_backend(&input, no_sign_request, &db).await?;
 
-            println!("Using S3 backend: bucket={}, prefix={}", bucket, prefix);
-            let signing = if no_sign_request {
-                s3::SigningMode::Anonymous
-            } else {
-                s3::SigningMode::Signed
-            };
-            let client = s3::S3Client::new(bucket, prefix, signing).await?;
-            s3_httpfs = Some((client.region().to_string(), client.anonymous()));
-            Box::new(client)
-        }
-    } else {
-        println!("Using local filesystem backend");
-        Box::new(LocalFileSystem::new(PathBuf::from(&input)))
-    };
-
-    // Teach DuckDB to read `s3://` TSVs directly (both the write connection and the
-    // parser's read-preflight connection run `read_csv` over them).
-    if let Some((region, anonymous)) = &s3_httpfs {
-        s3::configure_httpfs(&db.conn, region, *anonymous)?;
-    }
-
-    let s3_httpfs_cfg = s3_httpfs
-        .as_ref()
-        .map(|(region, anonymous)| bids::S3Httpfs {
-            region: region.clone(),
-            anonymous: *anonymous,
-        });
     let mut parser: BidsParser =
         BidsParser::new(fs, dataset_id, schema, s3_httpfs_cfg, apply_bidsignore)
             .with_term_maps(term_maps)
@@ -830,6 +805,82 @@ async fn run_indexer(
         report_reclaimable_space(&db, &output);
     }
 
+    Ok(())
+}
+
+/// Open the filesystem backend for `input`, returning it with the httpfs settings the
+/// parser's read-preflight connection needs.
+///
+/// For an `s3://` input this also teaches the *write* connection to read `s3://` TSVs,
+/// so the two connections are configured in one place rather than from two call sites
+/// that must agree.
+#[cfg(feature = "s3")]
+async fn open_backend(
+    input: &str,
+    no_sign_request: bool,
+    db: &BidsDb,
+) -> Result<(Box<dyn BidsFileSystem>, Option<bids::S3Httpfs>)> {
+    if !input.starts_with("s3://") {
+        println!("Using local filesystem backend");
+        return Ok((Box::new(LocalFileSystem::new(PathBuf::from(input))), None));
+    }
+
+    // Parse bucket and prefix from s3://bucket/prefix
+    let parts: Vec<&str> = input.trim_start_matches("s3://").splitn(2, '/').collect();
+    let bucket = parts[0];
+    let prefix = if parts.len() > 1 { parts[1] } else { "" };
+
+    println!("Using S3 backend: bucket={}, prefix={}", bucket, prefix);
+    let signing = if no_sign_request {
+        s3::SigningMode::Anonymous
+    } else {
+        s3::SigningMode::Signed
+    };
+    let client = s3::S3Client::new(bucket, prefix, signing).await?;
+    let region = client.region().to_string();
+    let anonymous = client.anonymous();
+
+    // Both the write connection and the parser's preflight connection run `read_csv`
+    // over `s3://` paths, so both need httpfs.
+    s3::configure_httpfs(&db.conn, &region, anonymous)?;
+
+    Ok((Box::new(client), Some(bids::S3Httpfs { region, anonymous })))
+}
+
+/// Open the filesystem backend for `input` in a build without the `s3` feature.
+///
+/// Only the local backend exists here; [`check_input_supported`] has already rejected
+/// an `s3://` input.
+#[cfg(not(feature = "s3"))]
+async fn open_backend(
+    input: &str,
+    _no_sign_request: bool,
+    _db: &BidsDb,
+) -> Result<(Box<dyn BidsFileSystem>, Option<bids::S3Httpfs>)> {
+    println!("Using local filesystem backend");
+    Ok((Box::new(LocalFileSystem::new(PathBuf::from(input))), None))
+}
+
+/// Every input location is openable when the `s3` feature is on.
+#[cfg(feature = "s3")]
+fn check_input_supported(_input: &str) -> Result<()> {
+    Ok(())
+}
+
+/// Refuse an `s3://` input this build cannot open.
+///
+/// Checked up front, before the output database is created, so a rejected run leaves
+/// nothing behind. And refused explicitly rather than falling through to the local
+/// backend, which would take the URI as a relative directory name and complain about a
+/// missing path — hiding the real answer, that this binary cannot talk to S3 at all.
+#[cfg(not(feature = "s3"))]
+fn check_input_supported(input: &str) -> Result<()> {
+    if input.starts_with("s3://") {
+        anyhow::bail!(
+            "cannot index {input}: this bidslake was built without the `s3` feature. \
+             Rebuild with `--features s3` (the default), or pass a local directory."
+        );
+    }
     Ok(())
 }
 

@@ -156,6 +156,9 @@ pub mod db;
 pub mod fs;
 pub mod links;
 pub mod readers;
+/// S3-backed ingestion. Requires the `s3` feature (on by default); building with
+/// `--no-default-features` drops it along with the AWS SDK.
+#[cfg(feature = "s3")]
 pub mod s3;
 pub mod schema;
 pub mod timing;

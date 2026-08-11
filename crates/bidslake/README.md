@@ -39,6 +39,21 @@ If you cloned without `--recurse-submodules`, fetch the test corpus with:
 git submodule update --init
 ```
 
+### Building without S3
+
+Reading datasets from `s3://` is the `s3` feature, on by default. If you only ever
+index local datasets, turning it off drops the AWS SDK — most of the dependency tree,
+and none of it on the local path:
+
+```bash
+cargo build --release --no-default-features
+```
+
+Measured: 457 → 274 dependency crates, and a 90 MB binary → 68 MB. Everything else is
+unchanged; DuckDB's httpfs extension, which is what actually reads `s3://` tabular
+files, is part of the bundled engine either way. An `s3://` input is then refused with
+an explanation rather than mistaken for a directory name.
+
 ## Quickstart
 
 Index a dataset into a DuckDB file:

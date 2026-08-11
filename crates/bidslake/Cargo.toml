@@ -10,8 +10,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = "1.0"
 tokio = { workspace = true }
-aws-sdk-s3 = { version = "1.15" }
-aws-config = { version = "1.1" }
+aws-sdk-s3 = { version = "1.15", optional = true }
+aws-config = { version = "1.1", optional = true }
 futures = { workspace = true }
 ignore = { workspace = true }
 sha2 = "0.10"
@@ -31,4 +31,17 @@ name = "ingest"
 harness = false
 
 [features]
-default = []
+default = ["s3"]
+
+# Ingest datasets straight from S3 (`bidslake index -i s3://bucket/prefix`).
+#
+# On by default, so nothing changes unless you ask. `--no-default-features` drops
+# the AWS SDK — a large dependency tree that a purely local install never
+# executes — leaving a smaller binary and a much shorter build. Without it, an
+# `s3://` input is refused with an explanation rather than being mistaken for a
+# relative directory.
+#
+# Only the `aws-sdk-s3` client is behind the feature. DuckDB's httpfs extension,
+# which is what actually reads `s3://` tabular files, is part of the bundled
+# engine either way.
+s3 = ["dep:aws-sdk-s3", "dep:aws-config"]

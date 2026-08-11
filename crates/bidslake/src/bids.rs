@@ -57,6 +57,11 @@ macro_rules! non_poisoning_read_flags {
 /// S3/httpfs configuration for reading `s3://` tabular data via DuckDB. Passed to
 /// [`BidsParser::new`] so the read-preflight connection is configured as part of
 /// construction — there is no separate must-call-before-`parse` step to forget.
+///
+/// Defined unconditionally, though only a build with the `s3` feature can act on it:
+/// it names two plain values and pulls in no AWS types, and keeping it means
+/// [`BidsParser::new`]'s signature does not change between feature configurations.
+/// Supplying one to a build without the feature is an error, not a silent no-op.
 pub struct S3Httpfs {
     /// The AWS region httpfs should target.
     pub region: String,
@@ -410,9 +415,27 @@ impl BidsParser {
     /// [`S3Httpfs`] config given to [`Self::new`]) so its `read_csv` sniff can open
     /// `s3://` tabular files, mirroring the write connection. Called once at the
     /// start of [`Self::parse`]; a no-op for local datasets.
+    #[cfg(feature = "s3")]
     fn configure_s3_httpfs(&self) -> Result<()> {
         if let Some(cfg) = &self.s3_httpfs {
             crate::s3::configure_httpfs(&self.validator, &cfg.region, cfg.anonymous)?;
+        }
+        Ok(())
+    }
+
+    /// Without the `s3` feature there is no httpfs configuration to apply.
+    ///
+    /// A caller that supplied an [`S3Httpfs`] asked for something this build cannot
+    /// do, so this refuses rather than proceeding with the preflight connection
+    /// silently unconfigured — which would surface much later as an unexplained
+    /// `read_csv` failure on the first `s3://` tabular file.
+    #[cfg(not(feature = "s3"))]
+    fn configure_s3_httpfs(&self) -> Result<()> {
+        if self.s3_httpfs.is_some() {
+            anyhow::bail!(
+                "an S3 configuration was supplied, but this bidslake was built without \
+                 the `s3` feature; rebuild with `--features s3` (the default)"
+            );
         }
         Ok(())
     }
