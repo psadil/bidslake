@@ -91,6 +91,12 @@ pub struct Schema {
     /// because the alternative is rebuilding a 449-entry set per `sidecars` row on the
     /// bulk-insert path.
     table_keys_lower: HashMap<String, std::collections::HashSet<String>>,
+    /// The same lowercased `json_key`s, kept in column order rather than as a set, so
+    /// the case-insensitive column lookup in [`Schema::row_values`] can fold the
+    /// table's side once at load instead of once per row.
+    ///
+    /// Derived alongside [`Self::table_keys_lower`], from the same single writer.
+    table_json_keys_lower: HashMap<String, Vec<String>>,
     primary_keys: HashMap<String, Vec<String>>, // table -> [pk_col_names]
     insert_sql: HashMap<String, String>,        // table -> prebuilt INSERT statement
     /// The overlays merged into this schema, in application order (empty if none).
@@ -178,6 +184,7 @@ impl Schema {
             table_definitions: HashMap::new(),
             table_columns: HashMap::new(),
             table_keys_lower: HashMap::new(),
+            table_json_keys_lower: HashMap::new(),
             primary_keys: HashMap::new(),
             insert_sql: HashMap::new(),
             overlays: overlays.to_vec(),
@@ -271,13 +278,13 @@ impl Schema {
     /// Record a table's write columns, keeping the derived lowercase key index in
     /// step. The only way `table_columns` is populated, so the two cannot drift.
     fn set_table_columns(&mut self, table: &str, fields: Vec<(String, String, String)>) {
-        self.table_keys_lower.insert(
-            table.to_string(),
-            fields
-                .iter()
-                .map(|(_, _, json_key)| json_key.to_lowercase())
-                .collect(),
-        );
+        let lower: Vec<String> = fields
+            .iter()
+            .map(|(_, _, json_key)| json_key.to_lowercase())
+            .collect();
+        self.table_keys_lower
+            .insert(table.to_string(), lower.iter().cloned().collect());
+        self.table_json_keys_lower.insert(table.to_string(), lower);
         self.table_columns.insert(table.to_string(), fields);
     }
 
@@ -966,22 +973,42 @@ impl Schema {
         // Which source keys have a dedicated column. Case-insensitive, and precomputed
         // per table rather than rebuilt per row — see `declares` for why both matter.
         let schema_keys = self.table_keys_lower.get(table_name);
-        let declared =
-            |key: &str| schema_keys.is_some_and(|keys| keys.contains(key.to_lowercase().as_str()));
+        let json_keys_lower = self.table_json_keys_lower.get(table_name);
+
+        // The row's keys, folded to lowercase once.
+        //
+        // Two case-insensitive tests below need this form: the `other_data` overflow
+        // check, and the last-resort column match. Both used to fold on the spot, and
+        // the second ran for every column the row does not carry — which for a wide
+        // table is nearly all of them, each time scanning and re-folding every key in
+        // the row. Against the 449-column `sidecars` table and a ~100-key sidecar that
+        // is some 45,000 fresh `String`s per row; profiling a raw-BIDS ingest put it at
+        // over half of the entire inheritance phase. Folding the row's side once turns
+        // that into one hash lookup per column.
+        let obj = data.as_object();
+        let mut lower_keys: HashMap<String, (&String, &Value)> = HashMap::new();
+        if let Some(obj) = obj {
+            for (key, value) in obj {
+                lower_keys.insert(key.to_lowercase(), (key, value));
+            }
+        }
 
         let mut params: Vec<Option<duckdb::types::Value>> = Vec::new();
         // Owns JSON strings until they're cloned into `Value::Text` just below.
         let mut string_values: Vec<String> = Vec::new();
 
-        for (col_name, col_type, json_key) in fields {
+        for (idx, (col_name, col_type, json_key)) in fields.iter().enumerate() {
             // Special handling for other_data column
             if col_name == "other_data" {
-                if let Some(obj) = data.as_object() {
+                if obj.is_some() {
                     // Only the keys with no dedicated column reach the overflow.
+                    // Iterated over the folded index rather than the row: order is
+                    // immaterial because `serde_json::Map` is a `BTreeMap` here, so the
+                    // serialized overflow is key-sorted either way.
                     let mut custom_data = serde_json::Map::new();
-                    for (key, value) in obj {
-                        if !declared(key) {
-                            custom_data.insert(key.clone(), value.clone());
+                    for (lower, (key, value)) in &lower_keys {
+                        if !schema_keys.is_some_and(|keys| keys.contains(lower.as_str())) {
+                            custom_data.insert((*key).clone(), (*value).clone());
                         }
                     }
 
@@ -1000,19 +1027,18 @@ impl Schema {
                 continue;
             }
 
-            let val = if let Some(obj) = data.as_object() {
+            let val = obj.and_then(|obj| {
                 obj.get(json_key).or_else(|| obj.get(col_name)).or_else(|| {
                     // Case-insensitive last resort, for the spelling the DDL dropped
-                    // (see `table_keys_lower`). Only reached when both exact lookups
-                    // miss, and scans the *row's* keys — tens, not the table's hundreds.
-                    let want = json_key.to_lowercase();
-                    obj.iter()
-                        .find(|(k, _)| k.to_lowercase() == want)
-                        .map(|(_, v)| v)
+                    // (see `table_keys_lower`). One hash lookup against the row's
+                    // pre-folded keys — this path is taken for every column the row
+                    // does not carry, so it must not scan.
+                    json_keys_lower
+                        .and_then(|lower| lower.get(idx))
+                        .and_then(|want| lower_keys.get(want.as_str()))
+                        .map(|(_, v)| *v)
                 })
-            } else {
-                None
-            };
+            });
 
             if col_type == "JSON" {
                 let s = val.map(|v| v.to_string());
