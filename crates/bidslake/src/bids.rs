@@ -1042,6 +1042,10 @@ impl BidsParser {
         let mut rows: Vec<Value> = Vec::new();
         // Reused across files rather than reallocated per file.
         let mut scratch: Vec<usize> = Vec::new();
+        // Split from the append below: the two are different kinds of work — merging
+        // and shaping happen in Rust, appending happens inside DuckDB — and which of
+        // them dominates decides where a fix goes.
+        let merge_phase = timing::scope(Phase::InheritMerge);
         for img_file in &self.imaging_files {
             // Extract entities and suffix from imaging file
             let file_name = img_file.file_path.split('/').next_back().unwrap();
@@ -1054,6 +1058,10 @@ impl BidsParser {
                 &img_parts.entities,
                 &mut scratch,
             );
+            // How much metadata inheritance actually moves, which the row count alone
+            // does not say: a dataset whose sidecars carry ten keys and one whose
+            // sidecars carry three hundred look identical by row count.
+            timing::count(Counter::MergedKeys, merged_metadata.len() as u64);
 
             if let Some(row) =
                 self.build_sidecar_row(&img_file.dataset_id, &img_file.file_path, merged_metadata)
@@ -1061,6 +1069,8 @@ impl BidsParser {
                 rows.push(row);
             }
         }
+        drop(merge_phase);
+        let _append_phase = timing::scope(Phase::InheritAppend);
         if let Err(e) = db.append_rows(&self.schema, "sidecars", &rows) {
             eprintln!("Failed to bulk-insert sidecars: {e}");
         }

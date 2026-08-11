@@ -51,6 +51,10 @@ pub enum Phase {
     Finalize,
     /// Sidecar inheritance and the `sidecars` append.
     Inherit,
+    /// The slice of `Inherit` spent merging sidecars and shaping rows in Rust.
+    InheritMerge,
+    /// The slice of `Inherit` spent handing those rows to DuckDB.
+    InheritAppend,
     /// Ingesting the deferred headerless recordings.
     Flush,
     /// `COMMIT` — where a file-backed database is actually written and fsynced.
@@ -68,6 +72,8 @@ const PHASES: &[Phase] = &[
     Phase::ScansScan,
     Phase::Associations,
     Phase::Inherit,
+    Phase::InheritMerge,
+    Phase::InheritAppend,
     Phase::Flush,
     Phase::Commit,
 ];
@@ -85,6 +91,8 @@ impl Phase {
             Phase::Associations => "  associations",
             Phase::Finalize => "finalize",
             Phase::Inherit => "inherit",
+            Phase::InheritMerge => "  merge + shape",
+            Phase::InheritAppend => "  append",
             Phase::Flush => "flush",
             Phase::Commit => "commit",
         }
@@ -95,7 +103,11 @@ impl Phase {
     fn is_nested(self) -> bool {
         matches!(
             self,
-            Phase::TabularReadCsv | Phase::ScansScan | Phase::Associations
+            Phase::TabularReadCsv
+                | Phase::ScansScan
+                | Phase::Associations
+                | Phase::InheritMerge
+                | Phase::InheritAppend
         )
     }
 }
@@ -124,6 +136,9 @@ pub enum Counter {
     TabularGroupMax,
     /// File-association rows resolved.
     Associations,
+    /// Metadata keys across every merged sidecar row — the size of the work
+    /// inheritance does, as distinct from the number of rows it does it for.
+    MergedKeys,
 }
 
 const COUNTERS: &[Counter] = &[
@@ -137,6 +152,7 @@ const COUNTERS: &[Counter] = &[
     Counter::TabularGroups,
     Counter::TabularGroupMax,
     Counter::Associations,
+    Counter::MergedKeys,
 ];
 
 impl Counter {
@@ -152,6 +168,7 @@ impl Counter {
             Counter::TabularGroups => "tabular_groups",
             Counter::TabularGroupMax => "tabular_group_max",
             Counter::Associations => "associations",
+            Counter::MergedKeys => "merged_keys",
         }
     }
 }
