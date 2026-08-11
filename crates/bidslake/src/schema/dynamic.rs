@@ -994,8 +994,6 @@ impl Schema {
         }
 
         let mut params: Vec<Option<duckdb::types::Value>> = Vec::new();
-        // Owns JSON strings until they're cloned into `Value::Text` just below.
-        let mut string_values: Vec<String> = Vec::new();
 
         for (idx, (col_name, col_type, json_key)) in fields.iter().enumerate() {
             // Special handling for other_data column
@@ -1005,19 +1003,23 @@ impl Schema {
                     // Iterated over the folded index rather than the row: order is
                     // immaterial because `serde_json::Map` is a `BTreeMap` here, so the
                     // serialized overflow is key-sorted either way.
-                    let mut custom_data = serde_json::Map::new();
-                    for (lower, (key, value)) in &lower_keys {
-                        if !schema_keys.is_some_and(|keys| keys.contains(lower.as_str())) {
-                            custom_data.insert((*key).clone(), (*value).clone());
-                        }
-                    }
+                    // Borrowed, not cloned: serializing a map of references produces
+                    // the same JSON without copying the values, and sidecar values are
+                    // not always small — a single real `_bold.json` can run to
+                    // megabytes. `BTreeMap<&str, _>` orders by key exactly as
+                    // `serde_json::Map` (a `BTreeMap<String, _>` here) does, so the
+                    // output is byte-identical.
+                    let overflow: std::collections::BTreeMap<&str, &Value> = lower_keys
+                        .iter()
+                        .filter(|(lower, _)| {
+                            !schema_keys.is_some_and(|keys| keys.contains(lower.as_str()))
+                        })
+                        .map(|(_, (key, value))| (key.as_str(), *value))
+                        .collect();
 
-                    if !custom_data.is_empty() {
-                        let json_str = serde_json::to_string(&custom_data).unwrap();
-                        string_values.push(json_str);
-                        params.push(Some(duckdb::types::Value::Text(
-                            string_values.last().unwrap().clone(),
-                        )));
+                    if !overflow.is_empty() {
+                        let json_str = serde_json::to_string(&overflow).unwrap();
+                        params.push(Some(duckdb::types::Value::Text(json_str)));
                     } else {
                         params.push(None);
                     }
@@ -1041,14 +1043,9 @@ impl Schema {
             });
 
             if col_type == "JSON" {
-                let s = val.map(|v| v.to_string());
-                if let Some(s_val) = s {
-                    string_values.push(s_val);
-                    params.push(Some(duckdb::types::Value::Text(
-                        string_values.last().unwrap().clone(),
-                    )));
-                } else {
-                    params.push(None);
+                match val.map(|v| v.to_string()) {
+                    Some(s_val) => params.push(Some(duckdb::types::Value::Text(s_val))),
+                    None => params.push(None),
                 }
             } else {
                 // A dedicated column has a fixed scalar type, but BIDS metadata is
@@ -1115,10 +1112,7 @@ impl Schema {
                         // Non-numeric column: arrays/objects serialize to JSON text.
                         if v.is_array() || v.is_object() {
                             let json_str = v.to_string();
-                            string_values.push(json_str);
-                            params.push(Some(duckdb::types::Value::Text(
-                                string_values.last().unwrap().clone(),
-                            )));
+                            params.push(Some(duckdb::types::Value::Text(json_str)));
                         } else {
                             params.push(Some(duckdb::types::Value::Text(v.to_string())));
                         }

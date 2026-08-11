@@ -909,16 +909,6 @@ impl BidsParser {
         if merged.is_empty() {
             return None;
         }
-        let mut sidecar_entry = serde_json::Map::new();
-        sidecar_entry.insert(
-            "dataset_id".to_string(),
-            Value::String(dataset_id.to_string()),
-        );
-        sidecar_entry.insert(
-            "file_path".to_string(),
-            Value::String(file_path.to_string()),
-        );
-
         let (suffix, extension) = split_suffix_ext(file_path);
         let datatype = self.datatype_dir_in_path(file_path);
         // BIDS selector paths are dataset-relative with a leading slash.
@@ -936,16 +926,29 @@ impl BidsParser {
             },
         ) == Undeclared::Store;
 
-        // Flatten metadata into top-level fields for known columns (borrowing
-        // `merged`), then move the whole map into `other_data` — no clone.
-        for (k, v) in &merged {
-            if keep_undeclared || self.schema.declares("sidecars", k) {
-                sidecar_entry.insert(k.clone(), v.clone());
-            }
+        // The merged map *is* the row: `Schema::row_values` reads each declared column
+        // from it by key and rebuilds the `other_data` overflow from whatever is left
+        // over, so nothing has to be copied into a fresh map first.
+        //
+        // What this replaces was two full copies of the metadata per row — one from
+        // cloning every entry into a new map, and a second from also storing the whole
+        // map under `other_data`, which `row_values` then ignored in favour of
+        // recomputing the overflow itself. Sidecar values are not reliably small (a real
+        // `_bold.json` can run to megabytes), so those copies dominated inheritance on a
+        // metadata-heavy dataset.
+        let mut sidecar_entry = merged;
+        if !keep_undeclared {
+            sidecar_entry.retain(|k, _| self.schema.declares("sidecars", k));
         }
-        if keep_undeclared {
-            sidecar_entry.insert("other_data".to_string(), Value::Object(merged));
-        }
+        // Structural keys added only where the metadata does not already claim them.
+        // That is the same precedence as before: these were inserted first and a sidecar
+        // key of the same name overwrote them, so the sidecar's value still wins.
+        sidecar_entry
+            .entry("dataset_id".to_string())
+            .or_insert_with(|| Value::String(dataset_id.to_string()));
+        sidecar_entry
+            .entry("file_path".to_string())
+            .or_insert_with(|| Value::String(file_path.to_string()));
         Some(Value::Object(sidecar_entry))
     }
 
