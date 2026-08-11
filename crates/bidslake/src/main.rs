@@ -788,7 +788,6 @@ async fn run_indexer(
 
     let mut parser: BidsParser =
         BidsParser::new(fs, dataset_id, schema, s3_httpfs_cfg, apply_bidsignore)
-            .with_staging_dir(temp_dir.clone())
             .with_term_maps(term_maps)
             .with_declared_sources(declared_sources);
 

@@ -14,7 +14,7 @@
 //! Degrades quietly: outside a git checkout (a published crate, a source tarball) the
 //! version alone is stamped.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn git(args: &[&str]) -> Option<String> {
@@ -27,18 +27,51 @@ fn git(args: &[&str]) -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
+fn watch(path: &Path) {
+    if path.exists() {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+}
+
+/// Everything whose change should re-stamp the build.
+///
+/// `.git/HEAD` alone is not enough, and getting this wrong is how a stale stamp once
+/// mislabelled a profiling run: on a branch, `HEAD` holds `ref: refs/heads/<branch>`
+/// and that text is identical before and after a commit — the new sha lands in the
+/// ref file it points at, or in `packed-refs` once the ref has been packed. So all
+/// three are watched.
+///
+/// The crate's own sources are watched too, since editing them is what makes the tree
+/// dirty in practice. That part is best-effort by nature: a build script cannot watch
+/// the whole repository, so `-dirty` can lag a change made in a sibling crate. The
+/// commit hash, which is the part a measurement is traced by, cannot.
+fn watch_git_state(manifest: &Path) {
+    watch(&manifest.join("src"));
+    watch(&manifest.join("Cargo.toml"));
+
+    let Some(git_dir) = manifest
+        .ancestors()
+        .map(|a| a.join(".git"))
+        .find(|p| p.is_dir())
+    else {
+        return;
+    };
+    let head = git_dir.join("HEAD");
+    watch(&head);
+    watch(&git_dir.join("packed-refs"));
+
+    // Follow the symref to the file that actually carries the sha.
+    if let Ok(contents) = std::fs::read_to_string(&head)
+        && let Some(reference) = contents.strip_prefix("ref: ")
+    {
+        watch(&git_dir.join(reference.trim()));
+    }
+}
+
 fn main() {
     let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
-
-    // Rebuild when HEAD moves. `.git` may be a file (a worktree or submodule), in
-    // which case there is no HEAD to watch and the stamp is simply refreshed on the
-    // next full build.
-    if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
-        let head = Path::new(&manifest).join("../../.git/HEAD");
-        if head.is_file() {
-            println!("cargo:rerun-if-changed={}", head.display());
-        }
-    }
+    let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default());
+    watch_git_state(&manifest);
 
     let build = match git(&["rev-parse", "--short", "HEAD"]) {
         Some(hash) => {

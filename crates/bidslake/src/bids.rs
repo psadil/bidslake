@@ -40,8 +40,7 @@ use duckdb::Connection;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::path::Path;
 
 /// The `read_csv` relaxations that make a tabular read non-poisoning: a malformed
 /// row is padded or dropped rather than aborting the ingest transaction (so
@@ -139,12 +138,6 @@ pub struct BidsParser {
     root_description_json: Option<Value>,
     /// `--source-dataset` references declared on the CLI; recorded as `declared` links.
     declared_sources: Vec<String>,
-    /// Local directory the batched tabular ingest stages files into (see
-    /// [`Self::stage_batch`]). Defaults to the platform temp directory.
-    staging_dir: PathBuf,
-    /// Whether staging can help at all, probed once per run — see
-    /// [`Self::staging_helps`].
-    staging_helps: OnceLock<bool>,
 }
 
 #[derive(Clone)]
@@ -360,6 +353,11 @@ struct PendingTabular {
     /// bytes — one `read_csv` dialect, and `other_data` stays exact (no
     /// `union_by_name` NULL fillers).
     group_key: String,
+    /// The per-file value this table's row identity needs, carried into the batch's
+    /// path map: the containing directory for a `PerFile` table (whose `file_path` is
+    /// built from its `filename` column), or the `sub-…` label for a session table.
+    /// Empty when the identity needs neither.
+    aux: String,
     /// Normalized header column names, used to build the batch SQL.
     columns: Vec<String>,
 }
@@ -400,8 +398,6 @@ impl BidsParser {
             readers: readers::default_readers(),
             root_description_json: None,
             declared_sources: Vec::new(),
-            staging_dir: std::env::temp_dir(),
-            staging_helps: OnceLock::new(),
         }
     }
 
@@ -415,16 +411,6 @@ impl BidsParser {
     /// Attach term maps that recognize standardized non-BIDS files (FreeSurfer, …).
     /// Ordinary BIDS ingestion configures none, so the classify hot path in
     /// `process_file` short-circuits on an empty term-map list.
-    /// Stage batched tabular reads into `dir` instead of the platform temp directory.
-    /// Wired to `--temp-dir`, alongside DuckDB's own spill location, so one flag says
-    /// where a run is allowed to put scratch data.
-    pub fn with_staging_dir(mut self, dir: Option<PathBuf>) -> Self {
-        if let Some(dir) = dir {
-            self.staging_dir = dir;
-        }
-        self
-    }
-
     pub fn with_term_maps(mut self, term_maps: Vec<TermMap>) -> Self {
         self.term_maps = term_maps;
         self
@@ -468,19 +454,6 @@ impl BidsParser {
         self.validator
             .prepare(&sql)
             .is_ok_and(|mut stmt| stmt.query([]).is_ok())
-    }
-
-    /// Column names of a header-bearing file, sniffed on the validator connection.
-    /// `None` if the file can't be read (so it is skipped, not ingested).
-    fn sniff_columns(&self, read_csv_from: &str) -> Option<Vec<String>> {
-        let sql = format!("DESCRIBE SELECT * FROM {read_csv_from}");
-        let mut stmt = self.validator.prepare(&sql).ok()?;
-        let cols = stmt
-            .query_map([], |r| r.get::<_, String>(0))
-            .ok()?
-            .filter_map(|r| r.ok())
-            .collect();
-        Some(cols)
     }
 
     /// Refuse to extend an existing `dataset_id` from a different root.
@@ -1799,14 +1772,18 @@ impl BidsParser {
 
         let table = self.schema.tabular().route(&ctx).cloned();
         match table {
-            Some(spec) if spec.identity == RowIdentity::PerRow => {
-                // Lever 1b: defer per-row files so siblings sharing a header can be
-                // ingested in one batched `read_csv`. The header is read in Rust
-                // (no per-file DuckDB sniff — that fixed cost is what batching
-                // exists to remove) purely to group by signature; the batch's
-                // dry-run rebinds these names authoritatively before any write, so
-                // a Rust/DuckDB header mismatch can only trigger a per-file
-                // fallback, never wrong data.
+            Some(spec) => {
+                // Defer every tabular file so siblings sharing a header are ingested
+                // in one batched `read_csv`. The header is read in Rust — no per-file
+                // DuckDB sniff, that fixed cost being what batching exists to remove —
+                // purely to group by signature.
+                //
+                // This once applied only to per-row tables, leaving `scans.tsv` and
+                // `sessions.tsv` on a statement-per-file path. That was the dominant
+                // ingest cost on a real study: a statement against a table carrying
+                // ~40 generated regex columns re-binds all of them, measured at 13 ms
+                // per `scans.tsv` and 5 ms per `sessions.tsv`, or 18.6 s for 2,038
+                // files that now take one statement each per header group.
                 // Scoped so the timer closes before the match below, whose arms time
                 // themselves — otherwise the per-file fallback would be counted twice.
                 let (source, header) = {
@@ -1840,23 +1817,25 @@ impl BidsParser {
                             TabularStatus::Ingested,
                         )?;
                     }
-                    Some((_, columns)) if columns.iter().any(|c| c == "filename") => {
-                        // A real `filename` column would collide with `read_csv`'s
-                        // `filename=true`; such files fall back to the per-file path.
-                        let _t = timing::scope(Phase::TabularReadCsv);
-                        let n = self
-                            .ingest_tabular(db, &spec, rel_path, dataset_id, entities)
-                            .await?;
-                        db.record_tabular_file(
-                            dataset_id,
-                            rel_path,
-                            Some(&spec.table),
-                            n,
-                            TabularStatus::Ingested,
-                        )?;
-                    }
                     Some((group_key, columns)) => {
+                        // `scans.tsv` builds its `file_path` from its own `filename`
+                        // column relative to the directory it sits in; a session table
+                        // stamps the subject it belongs to. Both vary per file, so they
+                        // travel with it into the batch's path map.
+                        let aux = match spec.identity {
+                            RowIdentity::PerFile => rel_path
+                                .rsplit_once('/')
+                                .map(|(dir, _)| dir)
+                                .unwrap_or("")
+                                .to_string(),
+                            RowIdentity::PerEntity if spec.table != "participants" => entities
+                                .get("sub")
+                                .map(|s| format!("sub-{s}"))
+                                .unwrap_or_default(),
+                            _ => String::new(),
+                        };
                         self.pending_tabular.push(PendingTabular {
+                            aux,
                             spec,
                             rel_path: rel_path.to_string(),
                             source,
@@ -1865,19 +1844,6 @@ impl BidsParser {
                         });
                     }
                 }
-            }
-            Some(spec) => {
-                let _t = timing::scope(Phase::TabularReadCsv);
-                let n = self
-                    .ingest_tabular(db, &spec, rel_path, dataset_id, entities)
-                    .await?;
-                db.record_tabular_file(
-                    dataset_id,
-                    rel_path,
-                    Some(&spec.table),
-                    n,
-                    TabularStatus::Ingested,
-                )?;
             }
             None => {
                 // A validated dataset should not reach here (all its tabular files
@@ -1888,71 +1854,6 @@ impl BidsParser {
             }
         }
         Ok(())
-    }
-
-    /// Ingest a header-bearing tabular file into `spec`'s table via a single
-    /// `read_csv` INSERT. Returns the number of rows written.
-    async fn ingest_tabular(
-        &self,
-        db: &BidsDb,
-        spec: &TableSpec,
-        rel_path: &str,
-        dataset_id: &str,
-        entities: &HashMap<String, String>,
-    ) -> Result<i64> {
-        let source = self.fs.read_csv_source(Path::new(rel_path)).await?;
-
-        // Sniff the actual headers on the validator connection (so a parse error
-        // can't poison the ingest transaction). An unreadable or column-less file
-        // is classified but contributes no rows.
-        let read_from = format!("read_csv({}, {HEADER_READ_OPTS})", sql_lit(&source));
-        let sniffed = self.sniff_columns(&read_from).unwrap_or_default();
-        if sniffed.is_empty() {
-            return Ok(0);
-        }
-
-        // Re-index idempotency for keyless row tables: clear this file's prior rows
-        // before re-inserting. (PK tables dedup via INSERT OR IGNORE.)
-        if matches!(spec.identity, RowIdentity::PerRow) {
-            let del = format!(
-                "DELETE FROM {} WHERE dataset_id = {} AND file_path = {}",
-                spec.table,
-                sql_lit(dataset_id),
-                sql_lit(rel_path)
-            );
-            db.conn.execute(&del, [])?;
-        }
-
-        let sub = entities.get("sub").map(|s| s.as_str());
-        // Positional per-row tables (`*timeseries.tsv` &c., reached here when the file
-        // has a literal `filename` column) must keep TSV line order so `row_idx` is a
-        // faithful row number; the ordering policy lives in the ingestion schema
-        // (`Ingestion::ordered`); see bids-2-devel#98.
-        let preserve_order = self.schema.ingestion().ordered(&spec.table);
-        let store_undeclared = self.schema.ingestion().undeclared(&spec.table) == Undeclared::Store;
-        let (sql, undeclared) = build_tabular_insert_sql(
-            spec,
-            &source,
-            rel_path,
-            dataset_id,
-            sub,
-            &sniffed,
-            HEADER_READ_OPTS,
-            preserve_order,
-            store_undeclared,
-        );
-        if !store_undeclared {
-            db.record_undeclared_columns(&spec.table, &undeclared)?;
-        }
-        // A single malformed TSV must not abort the whole dataset's ingest — log
-        // and move on (the file is still recorded in `tabular_files`, with 0 rows).
-        match db.conn.execute(&sql, []) {
-            Ok(n) => Ok(n as i64),
-            Err(e) => {
-                eprintln!("Warning: failed to ingest tabular file {rel_path}: {e}");
-                Ok(0)
-            }
-        }
     }
 
     /// Ingest every deferred per-row tabular file (Lever 1b), grouped by
@@ -2013,29 +1914,25 @@ impl BidsParser {
                 let members: Vec<&PendingTabular> = window.iter().map(|&i| &pending[i]).collect();
                 let spec = &members[0].spec;
                 let columns = &members[0].columns;
-                // Local copies where staging applied; the originals otherwise.
-                let staged = self.stage_batch(&members).await;
-                let files: Vec<(&str, &str)> = members
+                let files: Vec<(&str, &str, &str)> = members
                     .iter()
-                    .enumerate()
-                    .map(|(i, m)| {
-                        let source = staged
-                            .as_ref()
-                            .and_then(|s| s.local[i].as_deref())
-                            .unwrap_or(m.source.as_str());
-                        (source, m.rel_path.as_str())
-                    })
+                    .map(|m| (m.source.as_str(), m.rel_path.as_str(), m.aux.as_str()))
                     .collect();
 
-                // Re-index idempotency (per-row tables have no PK): clear these files'
-                // prior rows in one DELETE before re-inserting.
-                let rel_list = sql_in_list(members.iter().map(|m| m.rel_path.as_str()));
-                let del = format!(
-                    "DELETE FROM {} WHERE dataset_id = {} AND file_path IN ({rel_list})",
-                    spec.table,
-                    sql_lit(&dataset_id),
-                );
-                db.conn.execute(&del, [])?;
+                // Re-index idempotency for keyless row tables: clear these files'
+                // prior rows in one DELETE before re-inserting. Keyed tables
+                // (participants, sessions, scans) dedup on insert instead, via
+                // `INSERT OR IGNORE`, so an explicit TSV row and an implicit one
+                // cannot collide — and they have no `file_path` to delete by.
+                if matches!(spec.identity, RowIdentity::PerRow) {
+                    let rel_list = sql_in_list(members.iter().map(|m| m.rel_path.as_str()));
+                    let del = format!(
+                        "DELETE FROM {} WHERE dataset_id = {} AND file_path IN ({rel_list})",
+                        spec.table,
+                        sql_lit(&dataset_id),
+                    );
+                    db.conn.execute(&del, [])?;
+                }
 
                 // Write the batch directly — no dry-run. `read_csv`'s non-erroring
                 // relaxations (see `HEADER_READ_OPTS`) mean a malformed row is
@@ -2068,7 +1965,21 @@ impl BidsParser {
                         spec.table
                     );
                 }
-                let sql = format!("INSERT INTO {} BY NAME {select}", spec.table);
+                // Keyed tables take the TSV's row over one the walk synthesized.
+                //
+                // That precedence used to come from ordering: `participants.tsv` and
+                // `sessions.tsv` were read in their own passes, before the per-file
+                // loop created an implicit stub for every subject and session it saw,
+                // so `INSERT OR IGNORE` kept the richer row that arrived first.
+                // Batching moves every tabular read to the flush, which is *after*
+                // those stubs exist, and `OR IGNORE` would then discard the real
+                // metadata. `OR REPLACE` states the precedence outright instead of
+                // depending on when each row happens to be written.
+                let verb = match spec.identity {
+                    RowIdentity::PerRow => "INSERT",
+                    _ => "INSERT OR REPLACE",
+                };
+                let sql = format!("{verb} INTO {} BY NAME {select}", spec.table);
                 // A batch-INSERT execution failure (e.g. an IO/read error) drops this
                 // group's rows for the run — record its members as `failed` so the
                 // `tabular_files` catalog can distinguish that from an empty-but-
@@ -2095,98 +2006,17 @@ impl BidsParser {
         Ok(())
     }
 
-    /// Whether staging is worth doing, decided once per run by a single probe.
-    ///
-    /// Staging is not free even when the copy is: it creates and later removes one
-    /// directory entry per file, which on an already-local dataset is pure overhead
-    /// against reads that were fast to begin with. The question is really "is the data
-    /// on a different filesystem from the scratch directory", and rather than sniff
-    /// filesystem types the probe just asks the kernel: a hard link across filesystems
-    /// fails with `EXDEV`. Succeeding therefore means the two are the same filesystem
-    /// and staging has nothing to offer; failing means they differ, which is the case
-    /// staging exists for.
-    fn staging_helps(&self, sample: &str) -> bool {
-        *self.staging_helps.get_or_init(|| {
-            let Ok(dir) = tempfile::Builder::new()
-                .prefix("bidslake-probe-")
-                .tempdir_in(&self.staging_dir)
-            else {
-                return false; // no usable scratch directory; read in place
-            };
-            std::fs::hard_link(sample, dir.path().join("probe")).is_err()
-        })
-    }
-
-    /// Copy a window's source files onto local disk, so DuckDB's per-file opens land
-    /// on a local filesystem instead of a network one.
-    ///
-    /// `read_csv` opens each file in turn, and on a shared filesystem that per-file
-    /// cost swamps the content: a measured raw dataset spent 75 s reading 1,367
-    /// `events.tsv` totalling 57 KB — 55 ms per file against bytes that take no time
-    /// at all. Copying them first turns N serialized remote opens into N/16 concurrent
-    /// ones plus N local opens.
-    ///
-    /// Bounded by [`STAGE_BUDGET_BYTES`] per window: a window of large files (a
-    /// derivative's confounds tables run to megabytes each) stages what fits and reads
-    /// the rest in place. That is the right shape rather than a limitation — the files
-    /// this helps most are the ones where the open dominates the read.
-    ///
-    /// Best-effort throughout: any file that cannot be copied is simply read from its
-    /// original location. Skipped entirely for a single-file window (nothing to
-    /// overlap) and for non-local sources, which the S3 backend serves over httpfs.
-    async fn stage_batch(&self, members: &[&PendingTabular]) -> Option<StagedBatch> {
-        use futures::stream::StreamExt;
-
-        if members.len() < 2
-            || members.iter().any(|m| m.source.starts_with("s3://"))
-            || !self.staging_helps(&members[0].source)
-        {
-            return None;
-        }
-        let dir = tempfile::Builder::new()
-            .prefix("bidslake-batch-")
-            .tempdir_in(&self.staging_dir)
-            .ok()?;
-
-        // Copy concurrently — the whole point is to overlap the per-file latency that
-        // the serial read cannot.
-        let base = dir.path();
-        let copied: Vec<Option<(String, u64)>> = futures::stream::iter(
-            members
-                .iter()
-                .enumerate()
-                .map(|(i, m)| (i, m.source.clone())),
-        )
-        .map(|(i, source)| async move {
-            let dest = base.join(format!("{i}-{}", Path::new(&source).file_name()?.to_str()?));
-            let bytes = tokio::fs::copy(&source, &dest).await.ok()?;
-            Some((dest.to_string_lossy().into_owned(), bytes))
-        })
-        .buffer_unordered(STAGE_CONCURRENCY)
-        .collect()
-        .await;
-
-        // Keep copies until the budget is spent; anything past it reads in place. The
-        // staged files are already written, so the budget caps what a *later* window
-        // adds rather than unwinding this one — windows are bounded by file count too.
-        let mut spent = 0u64;
-        let mut local = Vec::with_capacity(members.len());
-        for entry in copied {
-            match entry {
-                Some((path, bytes)) if spent + bytes <= STAGE_BUDGET_BYTES => {
-                    spent += bytes;
-                    timing::count(Counter::StagedFiles, 1);
-                    local.push(Some(path));
-                }
-                _ => local.push(None),
-            }
-        }
-        Some(StagedBatch { _dir: dir, local })
-    }
-
     /// Per-file row counts for a just-inserted batch, read back from the table (a
     /// cheap local query — not a re-read of the source files). Keyed by
     /// dataset-relative path; a file that landed no rows is absent (recorded as 0).
+    ///
+    /// Which column identifies the source file depends on the table's identity, and
+    /// only `PerRow` tables store the source path itself. A `scans.tsv` contributes
+    /// rows whose `file_path` names the *data* file, so its rows are the ones under
+    /// its own directory; a sessions file contributes rows carrying the subject it
+    /// belongs to. Both of those are exactly the value already carried as
+    /// [`PendingTabular::aux`], which is what makes the read-back a single grouped
+    /// query per window rather than one per file.
     fn table_row_counts(
         &self,
         db: &BidsDb,
@@ -2194,21 +2024,54 @@ impl BidsParser {
         dataset_id: &str,
         members: &[&PendingTabular],
     ) -> HashMap<String, i64> {
-        let rel_list = sql_in_list(members.iter().map(|m| m.rel_path.as_str()));
-        let sql = format!(
-            "SELECT file_path, count(*) FROM {} WHERE dataset_id = {} AND file_path IN ({rel_list}) \
-             GROUP BY file_path",
-            spec.table,
-            sql_lit(dataset_id),
-        );
-        let mut counts = HashMap::new();
+        // `(grouping expression, the member field the group key matches)`.
+        let (key_expr, member_key): (&str, fn(&PendingTabular) -> &str) = match spec.identity {
+            RowIdentity::PerRow => ("file_path", |m| m.rel_path.as_str()),
+            // A `scans.tsv`'s rows are the data files beneath its own directory. Not a
+            // fixed-depth match: its `filename` column carries a sub-path of its own
+            // (`anat/sub-01_T1w.nii.gz`), so the rows sit an unknown number of levels
+            // down. Matched by prefix below instead of grouped by an expression.
+            RowIdentity::PerFile => ("", |m| m.aux.as_str()),
+            RowIdentity::PerEntity if spec.table == "participants" => ("''", |m| m.aux.as_str()),
+            RowIdentity::PerEntity => ("COALESCE(participant_id, '')", |m| m.aux.as_str()),
+        };
+
+        let sql = if key_expr.is_empty() {
+            // Prefix match, joined against the members so it stays one query.
+            let pairs = members
+                .iter()
+                .map(|m| format!("({}, {})", sql_lit(&m.aux), sql_lit(&m.rel_path)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "SELECT m.rel AS k, count(*) FROM {} AS t \
+                 JOIN (VALUES {pairs}) AS m(aux, rel) ON t.file_path LIKE m.aux || '/%' \
+                 WHERE t.dataset_id = {} GROUP BY 1",
+                spec.table,
+                sql_lit(dataset_id),
+            )
+        } else {
+            format!(
+                "SELECT {key_expr} AS k, count(*) FROM {} WHERE dataset_id = {} GROUP BY 1",
+                spec.table,
+                sql_lit(dataset_id),
+            )
+        };
+        let mut by_key: HashMap<String, i64> = HashMap::new();
         if let Ok(mut stmt) = db.conn.prepare(&sql)
             && let Ok(rows) =
                 stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
         {
-            counts.extend(rows.flatten());
+            by_key.extend(rows.flatten());
         }
-        counts
+
+        if key_expr.is_empty() {
+            return by_key;
+        }
+        members
+            .iter()
+            .filter_map(|m| by_key.get(member_key(m)).map(|n| (m.rel_path.clone(), *n)))
+            .collect()
     }
 
     /// The BIDS datatype for a file, taken from *any* datatype directory in its
@@ -2623,21 +2486,6 @@ impl BidsParser {
 /// Files per batched-tabular window (see the loop in [`BidsParser::flush_tabular`]).
 const BATCH_WINDOW_FILES: usize = 512;
 
-/// How much of a window may be copied to local disk before the rest is read in place.
-const STAGE_BUDGET_BYTES: u64 = 512 * 1024 * 1024;
-
-/// Concurrent copies while staging a window. Matches the prefetch's fan-out — the same
-/// filesystem, the same reason for a bound.
-const STAGE_CONCURRENCY: usize = 16;
-
-/// A window's files copied to local disk. `local[i]` is the copy of member `i`, or
-/// `None` where staging did not apply. Dropping it removes the directory, so the copies
-/// live exactly as long as the statements that read them.
-struct StagedBatch {
-    _dir: tempfile::TempDir,
-    local: Vec<Option<String>>,
-}
-
 /// How one headerless continuous-recording suffix maps to a table and how its
 /// columns are built. Single source of truth for the recording suffix set, the
 /// suffix→table map (note `physioevents` → `physio_events`), and each table's
@@ -2892,32 +2740,80 @@ fn build_tabular_insert_sql(
 ///   folds into `other_data`. Because the group shares one header, `other_data`
 ///   carries exactly each file's real columns — no `union_by_name` NULL fillers.
 ///
-/// Callers must exclude files whose header contains a literal `filename` column
-/// (it would clash with `filename=true`); such files take the per-file path.
+/// `files` is `(read_csv source, dataset-relative path, aux)`, where `aux` is the
+/// per-file value the identity needs — see [`PendingTabular::aux`].
+///
+/// The source column is named `__src` rather than taking `filename=true`'s default,
+/// because `scans.tsv` has a column called `filename` of its own. Naming it out of the
+/// way is what lets a per-file table batch at all; the collision previously sent those
+/// files down a statement-per-file path.
 fn build_tabular_batch_select(
     spec: &TableSpec,
     dataset_id: &str,
-    files: &[(&str, &str)],
+    files: &[(&str, &str, &str)],
     columns: &[String],
     preserve_order: bool,
     store_undeclared: bool,
 ) -> (String, Vec<String>) {
     let present: HashSet<&str> = columns.iter().map(|s| s.as_str()).collect();
 
-    let row_idx = if preserve_order {
-        "(raw.__grn - MIN(raw.__grn) OVER (PARTITION BY raw.filename))::BIGINT AS row_idx"
-    } else {
-        "(row_number() OVER (PARTITION BY raw.filename) - 1)::BIGINT AS row_idx"
-    };
-    let mut selects: Vec<String> = vec![
-        format!("{} AS dataset_id", sql_lit(dataset_id)),
-        "m.rel AS file_path".to_string(),
-        row_idx.to_string(),
-    ];
+    let mut selects: Vec<String> = vec![format!("{} AS dataset_id", sql_lit(dataset_id))];
+    // Which of the file's own columns the identity consumes structurally rather than
+    // storing as data.
+    let mut structural: HashSet<&str> = HashSet::new();
 
-    // Schema-declared data columns present in the file, TRY_CAST to their type.
+    match spec.identity {
+        // One row per data file, named by the table's own `filename` column, relative
+        // to the directory the `scans.tsv` sits in — which is `m.aux`.
+        RowIdentity::PerFile => {
+            structural.insert("filename");
+            if present.contains("filename") {
+                selects.push(
+                    "CASE WHEN m.aux = '' THEN raw.filename                      ELSE m.aux || '/' || raw.filename END AS file_path"
+                        .to_string(),
+                );
+            }
+        }
+        RowIdentity::PerEntity if spec.table == "participants" => {
+            structural.insert("participant_id");
+            if present.contains("participant_id") {
+                selects.push(
+                    "CASE WHEN raw.participant_id LIKE 'sub-%' THEN raw.participant_id                      ELSE 'sub-' || raw.participant_id END AS participant_id"
+                        .to_string(),
+                );
+            }
+        }
+        RowIdentity::PerEntity => {
+            structural.insert("session_id");
+            if present.contains("session_id") {
+                selects.push(
+                    "CASE WHEN raw.session_id LIKE 'ses-%' THEN raw.session_id                      ELSE 'ses-' || raw.session_id END AS session_id"
+                        .to_string(),
+                );
+            }
+            // The subject the sessions file belongs to, from its filename.
+            selects.push("NULLIF(m.aux, '') AS participant_id".to_string());
+        }
+        RowIdentity::PerRow => {
+            let row_idx = if preserve_order {
+                "(raw.__grn - MIN(raw.__grn) OVER (PARTITION BY raw.__src))::BIGINT AS row_idx"
+            } else {
+                "(row_number() OVER (PARTITION BY raw.__src) - 1)::BIGINT AS row_idx"
+            };
+            selects.push("m.rel AS file_path".to_string());
+            selects.push(row_idx.to_string());
+        }
+    }
+
+    // Schema-declared data columns present in the file, TRY_CAST to their type. A
+    // column the identity already consumed above is skipped: emitting it again would
+    // give the SELECT two outputs of the same name, which `INSERT ... BY NAME` sees as
+    // a column the table does not have.
     let mut known: HashSet<&str> = HashSet::new();
     for c in &spec.columns {
+        if structural.contains(c.name.as_str()) {
+            continue;
+        }
         known.insert(c.name.as_str());
         if !present.contains(c.name.as_str()) {
             continue; // omitted → BY NAME leaves it NULL
@@ -2939,7 +2835,7 @@ fn build_tabular_batch_select(
     let extras: Vec<&str> = columns
         .iter()
         .map(|s| s.as_str())
-        .filter(|c| !c.is_empty() && !known.contains(c) && *c != "filename")
+        .filter(|c| !c.is_empty() && !known.contains(c) && !structural.contains(c))
         .collect();
     if store_undeclared && !extras.is_empty() {
         let pairs: Vec<String> = extras
@@ -2951,12 +2847,12 @@ fn build_tabular_batch_select(
 
     let locals = files
         .iter()
-        .map(|(l, _)| sql_lit(l))
+        .map(|(l, _, _)| sql_lit(l))
         .collect::<Vec<_>>()
         .join(", ");
     let map_values = files
         .iter()
-        .map(|(l, r)| format!("({}, {})", sql_lit(l), sql_lit(r)))
+        .map(|(l, r, aux)| format!("({}, {}, {})", sql_lit(l), sql_lit(r), sql_lit(aux)))
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -2966,15 +2862,15 @@ fn build_tabular_batch_select(
     let from = if preserve_order {
         format!(
             "(SELECT *, row_number() OVER () AS __grn \
-             FROM read_csv([{locals}], {HEADER_READ_OPTS}, filename=true, parallel=false)) AS raw"
+             FROM read_csv([{locals}], {HEADER_READ_OPTS}, filename='__src', parallel=false)) AS raw"
         )
     } else {
-        format!("read_csv([{locals}], {HEADER_READ_OPTS}, filename=true) AS raw")
+        format!("read_csv([{locals}], {HEADER_READ_OPTS}, filename='__src') AS raw")
     };
 
     let sql = format!(
         "SELECT {selects} FROM {from} \
-         JOIN (VALUES {map_values}) AS m(abs, rel) ON raw.filename = m.abs",
+         JOIN (VALUES {map_values}) AS m(abs, rel, aux) ON raw.__src = m.abs",
         selects = selects.join(", "),
     );
     (sql, extras.into_iter().map(str::to_string).collect())
@@ -3237,7 +3133,7 @@ mod tests {
             let (batched, dropped_batched) = build_tabular_batch_select(
                 &spec,
                 "ds",
-                &[("/t/f.tsv", "sub-01/func/f.tsv")],
+                &[("/t/f.tsv", "sub-01/func/f.tsv", "")],
                 &header,
                 true,
                 store,
