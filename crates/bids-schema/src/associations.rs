@@ -131,7 +131,6 @@ mod tests {
             name,
             path: path.to_string(),
             absolute_path: PathBuf::new(),
-            size: 0,
         }
     }
 

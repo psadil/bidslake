@@ -27,8 +27,6 @@ pub struct BidsFile {
     pub path: String,
     /// Absolute path on disk.
     pub absolute_path: PathBuf,
-    /// File size in bytes.
-    pub size: u64,
 }
 
 /// Directories that should always be ignored during BIDS validation.
@@ -94,7 +92,15 @@ pub fn read_file_tree(
     let mut builder = ignore::WalkBuilder::new(root);
     builder
         .standard_filters(false)
-        .hidden(false)
+        // Prune dot-directories at the walker instead of dropping their entries
+        // after the fact (below). Same outcome — a file under a hidden directory
+        // never reached the tree anyway, because no directory node was created for
+        // its parent — but the walker stops *descending*, so a `.snakemake` or
+        // `.heudiconv` subtree costs one `readdir` rather than thousands. The test
+        // is a plain filename check made before any filesystem call, and it does
+        // not affect `.bidsignore`, which the walker collects from directory
+        // listings rather than from the entries it yields.
+        .hidden(true)
         .git_global(false)
         .git_ignore(false)
         .git_exclude(false)
@@ -136,21 +142,29 @@ pub fn read_file_tree(
             }
         };
 
-        if entry.path().is_file()
-            || entry.path().is_symlink()
-            || (entry.path().is_dir() && is_pseudo_file(&entry_name, pseudo_exts))
+        // Classify from the type `readdir` already reported — walkdir caches it on
+        // the entry — rather than re-`stat`ing the path. Each of `Path::is_file`,
+        // `is_symlink`, and `is_dir` is a fresh syscall, so the previous chain cost
+        // 2 per file and 4 per directory: on a network filesystem, hundreds of
+        // thousands of serialized round trips for information already in hand.
+        //
+        // The buckets are unchanged. The walker runs with `follow_links(false)`, so
+        // `file_type()` reports a symlink as a symlink — which the old chain also
+        // routed to `files`, since it tested `is_symlink()` before `is_dir()`.
+        let Some(file_type) = entry.file_type() else {
+            // Only `None` for stdin, which a directory walk never yields.
+            continue;
+        };
+        if file_type.is_file()
+            || file_type.is_symlink()
+            || (file_type.is_dir() && is_pseudo_file(&entry_name, pseudo_exts))
         {
-            let size = match std::fs::metadata(entry.path()) {
-                Ok(metadata) => metadata.len(),
-                Err(_) => 0, // Default to 0 for broken symlinks
-            };
             parent_tree.files.push(BidsFile {
                 name: entry_name,
                 path: rel_path,
                 absolute_path: entry.path().to_path_buf(),
-                size,
             });
-        } else if entry.path().is_dir() {
+        } else if file_type.is_dir() {
             parent_tree.directories.push(FileTree {
                 name: entry_name,
                 path: rel_path,
@@ -296,6 +310,22 @@ impl<'a> Iterator for WalkDirectories<'a> {
 }
 
 impl BidsFile {
+    /// The file's size in bytes, `stat`-ed on demand.
+    ///
+    /// Deliberately not a field: filling one would mean a `stat` on every entry of
+    /// the walk, and only the validator ever asks — once per file, while building a
+    /// `BidsContext`. Ingestion never reads it, so paying for it during the walk
+    /// charged every consumer for one consumer's need.
+    ///
+    /// Follows symlinks (a symlink reports its target's size) and yields 0 for
+    /// anything that cannot be stat-ed, matching what the field held for a broken
+    /// symlink.
+    pub fn size_bytes(&self) -> u64 {
+        std::fs::metadata(&self.absolute_path)
+            .map(|m| m.len())
+            .unwrap_or(0)
+    }
+
     /// Read the full contents of this file as bytes.
     pub async fn read_bytes(&self) -> Result<Vec<u8>, std::io::Error> {
         return tokio::fs::read(&self.absolute_path).await;
@@ -338,7 +368,6 @@ mod tests {
             name: "sub-01_T1w.nii.gz".into(),
             path: "/sub-01/anat/sub-01_T1w.nii.gz".into(),
             absolute_path: PathBuf::from("/data/mybids/sub-01/anat/sub-01_T1w.nii.gz"),
-            size: 1000,
         };
         assert_eq!(f.parent_path(), "/sub-01/anat");
     }

@@ -32,6 +32,7 @@ use crate::schema::Schema;
 use crate::schema::dynamic::{quote_ident, sql_in_list, sql_lit};
 use crate::schema::ingestion::{Disposition, Undeclared};
 use crate::schema::tabular::{ColumnSpec, FileContext, RowIdentity, TableSpec};
+use crate::timing::{self, Counter, Phase};
 use anyhow::{Context, Result};
 use bids_core::entities::read_entities;
 use bids_schema::term_map::{FileFacts, TermMap};
@@ -40,7 +41,6 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::time::{Duration, Instant};
 
 /// The `read_csv` relaxations that make a tabular read non-poisoning: a malformed
 /// row is padded or dropped rather than aborting the ingest transaction (so
@@ -52,39 +52,6 @@ macro_rules! non_poisoning_read_flags {
     () => {
         "delim='\\t', all_varchar=true, nullstr='n/a', strict_mode=false, null_padding=true, ignore_errors=true"
     };
-}
-
-/// Wall-time accountant for [`BidsParser::parse`], active only when
-/// `BIDSLAKE_TIMING` is set. It isolates the per-file tabular `read_csv` cost
-/// (Lever 1b's target) from the rest of the process pass — a split sampling
-/// can't cleanly recover — and reports a phase breakdown at the end of the run.
-struct PhaseTimer {
-    /// True when `BIDSLAKE_TIMING` is set; skips all clock reads otherwise.
-    enabled: bool,
-    /// Accumulated time inside the tabular `read_csv` ingest, summed across files.
-    tabular: Duration,
-}
-
-impl PhaseTimer {
-    fn new() -> Self {
-        Self {
-            enabled: std::env::var_os("BIDSLAKE_TIMING").is_some(),
-            tabular: Duration::ZERO,
-        }
-    }
-
-    /// Start a phase clock (or `None` when timing is off, so the caller pays
-    /// nothing).
-    fn mark(&self) -> Option<Instant> {
-        self.enabled.then(Instant::now)
-    }
-
-    /// Add the elapsed time since `start` to the tabular accumulator.
-    fn add_tabular(&mut self, start: Option<Instant>) {
-        if let Some(start) = start {
-            self.tabular += start.elapsed();
-        }
-    }
 }
 
 /// S3/httpfs configuration for reading `s3://` tabular data via DuckDB. Passed to
@@ -146,8 +113,6 @@ pub struct BidsParser {
     // per-file loop doesn't re-issue an insert for every file of a subject.
     seen_participants: HashSet<(String, String)>, // (dataset_id, participant_id)
     seen_sessions: HashSet<(String, String, String)>, // (dataset_id, participant_id, session_id)
-    /// Opt-in wall-time accountant (`BIDSLAKE_TIMING`); zero-overhead otherwise.
-    phase_timer: PhaseTimer,
     /// Prefetched file bodies read in Rust (rel path → content): JSON sidecars,
     /// `.bval`/`.bvec`, and adapter `read`-disposition files. Filled concurrently
     /// before the serial passes so each read isn't a separate round-trip on a
@@ -228,34 +193,127 @@ struct SidecarInfo {
     content: Value,
 }
 
-/// What matching a sidecar to a data file needs to know about that file: where it sits,
-/// and what its filename names. Precomputed so the orphan check parses each data file's
-/// entities once rather than once per sidecar.
+/// Collected sidecars indexed by `(dataset_id, suffix, directory)`, for BIDS inheritance.
+///
+/// Inheritance asks, of a given file, which sidecars apply: same dataset and suffix,
+/// directory an ancestor of the file's, entities a subset of the file's. Keying on all
+/// three of those makes the answer a handful of lookups — one per ancestor directory —
+/// where indexing on dataset and suffix alone left the directory test as a scan over
+/// every same-suffix sidecar. In ordinary raw BIDS each run ships its own `_bold.json`,
+/// so that bucket holds one sidecar per data file and the scan was quadratic in dataset
+/// size.
+struct SidecarIndex<'a> {
+    sidecars: &'a [SidecarInfo],
+    by_dir: HashMap<(&'a str, &'a str, &'a Path), Vec<usize>>,
+}
+
+impl<'a> SidecarIndex<'a> {
+    fn new(sidecars: &'a [SidecarInfo]) -> Self {
+        let mut by_dir: HashMap<(&'a str, &'a str, &'a Path), Vec<usize>> = HashMap::new();
+        for (i, s) in sidecars.iter().enumerate() {
+            let dir = Path::new(&s.file_path)
+                .parent()
+                .unwrap_or_else(|| Path::new(""));
+            by_dir
+                .entry((s.dataset_id.as_str(), s.suffix.as_str(), dir))
+                .or_default()
+                .push(i);
+        }
+        Self { sidecars, by_dir }
+    }
+
+    /// The metadata applying to `rel_path`, merged under BIDS inheritance.
+    ///
+    /// The *nearer* sidecar wins. Visiting the file's ancestor directories
+    /// shallowest-first and merging in that order lets a deeper sidecar overwrite a
+    /// shallower one, matching the tree-based reference resolver — and it replaces a
+    /// sort by directory depth, since the visit order *is* depth order. Two sidecars at
+    /// equal depth necessarily share a directory, so that tie is broken within a bucket,
+    /// by entity count (the invalid-BIDS case of two sidecars side by side).
+    fn merged(
+        &self,
+        dataset_id: &str,
+        rel_path: &str,
+        suffix: &str,
+        entities: &HashMap<String, String>,
+        scratch: &mut Vec<usize>,
+    ) -> serde_json::Map<String, Value> {
+        let dir = Path::new(rel_path)
+            .parent()
+            .unwrap_or_else(|| Path::new(""));
+        // `ancestors()` runs deepest-first; collect and reverse.
+        let mut ancestors: Vec<&Path> = dir.ancestors().collect();
+        ancestors.reverse();
+
+        scratch.clear();
+        for ancestor in ancestors {
+            let Some(candidates) = self.by_dir.get(&(dataset_id, suffix, ancestor)) else {
+                continue;
+            };
+            let start = scratch.len();
+            // Dataset, suffix, and directory are all answered by the key; all that is
+            // left is the entity-subset test.
+            scratch.extend(candidates.iter().copied().filter(|&i| {
+                self.sidecars[i]
+                    .entities
+                    .iter()
+                    .all(|(key, value)| entities.get(key) == Some(value))
+            }));
+            scratch[start..].sort_by_key(|&i| self.sidecars[i].entities.len());
+        }
+
+        let mut merged = serde_json::Map::new();
+        for &i in scratch.iter() {
+            if let Value::Object(map) = &self.sidecars[i].content {
+                for (k, v) in map {
+                    merged.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        merged
+    }
+}
+
+/// What matching a sidecar to a data file needs to know about that file: which dataset
+/// and suffix it belongs to, and what its filename names. Precomputed so the orphan
+/// check parses each data file's entities once rather than once per sidecar.
 struct DataFileFacts<'a> {
-    dir: &'a Path,
+    dataset_id: &'a str,
+    suffix: String,
     entities: HashMap<String, String>,
 }
 
+/// Data files indexed by `(dataset_id, suffix, ancestor directory)` — each file
+/// registered under *every* directory it sits at or below.
+///
+/// The orphan check asks "is there a data file at or below this sidecar's directory?",
+/// which the reverse index (file → its own directory) could only answer by scanning
+/// every same-suffix file and testing the prefix — quadratic once a dataset has one
+/// sidecar per run. Registering each file under its ancestors instead costs one entry
+/// per path component and turns the question into a single lookup.
+type DataFilesByDir<'a> = HashMap<(&'a str, &'a str, &'a Path), Vec<usize>>;
+
 /// Whether `sidecar` describes any indexed data file, by the same rule inheritance uses:
-/// same dataset and suffix (already keyed), the data file at or below the sidecar's
-/// directory, and the sidecar's entities a subset of the data file's.
+/// same dataset and suffix, the data file at or below the sidecar's directory (both
+/// already answered by the index key), and the sidecar's entities a subset of the data
+/// file's.
 fn describes_a_data_file(
     sidecar: &SidecarInfo,
-    by_suffix: &HashMap<(&str, String), Vec<DataFileFacts>>,
+    by_dir: &DataFilesByDir,
+    facts: &[DataFileFacts],
 ) -> bool {
-    let Some(candidates) = by_suffix.get(&(sidecar.dataset_id.as_str(), sidecar.suffix.clone()))
-    else {
-        return false;
-    };
     let dir = Path::new(&sidecar.file_path)
         .parent()
         .unwrap_or_else(|| Path::new(""));
-    candidates.iter().any(|f| {
-        f.dir.starts_with(dir)
-            && sidecar
-                .entities
-                .iter()
-                .all(|(key, value)| f.entities.get(key) == Some(value))
+    let key = (sidecar.dataset_id.as_str(), sidecar.suffix.as_str(), dir);
+    let Some(candidates) = by_dir.get(&key) else {
+        return false;
+    };
+    candidates.iter().any(|&i| {
+        sidecar
+            .entities
+            .iter()
+            .all(|(key, value)| facts[i].entities.get(key) == Some(value))
     })
 }
 
@@ -324,7 +382,6 @@ impl BidsParser {
             validator: Connection::open_in_memory().expect("open in-memory validator connection"),
             seen_participants: HashSet::new(),
             seen_sessions: HashSet::new(),
-            phase_timer: PhaseTimer::new(),
             content_cache: HashMap::new(),
             tabular_header: HashMap::new(),
             term_maps: Vec::new(),
@@ -436,9 +493,8 @@ impl BidsParser {
         // ingest) before any `read_csv` sniff runs. No-op for local datasets.
         self.configure_s3_httpfs()?;
 
-        // Opt-in phase timing (`BIDSLAKE_TIMING`). `t_walk` brackets the walk;
-        // later phases are timed against a rolling `phase_start`.
-        let t_walk = self.phase_timer.mark();
+        // Opt-in phase accounting (`BIDSLAKE_TIMING`); see `crate::timing`.
+        let walk_phase = timing::scope(Phase::Walk);
 
         // Load .bidsignore patterns before parsing (unless `--no-bidsignore`, which
         // leaves `ignore_set` empty so nothing is filtered on the parser side either).
@@ -457,6 +513,10 @@ impl BidsParser {
         let pseudo_exts = bids_schema::pseudo_file_extensions(self.schema.raw());
         let files: Vec<std::path::PathBuf> =
             self.fs.walk(&pseudo_exts, self.apply_bidsignore).await?;
+        timing::count(Counter::Files, files.len() as u64);
+        if let Some(tree) = self.fs.file_tree() {
+            timing::count(Counter::Dirs, tree.walk_directories().count() as u64);
+        }
 
         for path in files {
             let file_name = path.file_name().unwrap().to_str().unwrap();
@@ -501,16 +561,21 @@ impl BidsParser {
             }
         }
 
-        let d_walk = t_walk.map(|t| t.elapsed());
-        let t_process = self.phase_timer.mark();
+        drop(walk_phase);
 
         // Concurrently prefetch the file contents the serial passes will read —
         // JSON sidecars (full) and TSV headers (first 64 KiB). On a network
         // filesystem these are per-file round-trips; reading them with bounded
         // concurrency overlaps the latency instead of paying it one file at a time.
         // Warm local disk sees a negligible change.
-        self.prefetch_contents(&dataset_description, &other_files)
-            .await;
+        {
+            let _t = timing::scope(Phase::Prefetch);
+            self.prefetch_contents(&dataset_description, &other_files)
+                .await;
+        }
+
+        // Starts after the prefetch, so `process` is the serial passes alone.
+        let process_phase = timing::scope(Phase::Process);
 
         // Datasets can carry nested dataset_description.json files (e.g. under
         // derivatives/). Sort shallowest-first so the dataset root wins when we
@@ -587,12 +652,13 @@ impl BidsParser {
 
         // Lever 1b: ingest the deferred per-row tabular files in header-grouped
         // batches now that all of them are collected.
-        let t = self.phase_timer.mark();
-        self.flush_tabular(db).await?;
-        self.phase_timer.add_tabular(t);
+        {
+            let _t = timing::scope(Phase::TabularReadCsv);
+            self.flush_tabular(db).await?;
+        }
 
-        let d_process = t_process.map(|t| t.elapsed());
-        let t_finalize = self.phase_timer.mark();
+        drop(process_phase);
+        let finalize_phase = timing::scope(Phase::Finalize);
 
         // Every ingested dataset must record a `root_uri`: it is what turns a stored
         // dataset-relative `file_path` back into an openable `file://`/`s3://` URI, and it
@@ -626,21 +692,29 @@ impl BidsParser {
         // shared `bids_schema` resolver. Deduped on the `file_associations` primary key (cheaper
         // than a DB `ON CONFLICT`; the table is tiny), then inserted.
         let mut associations = self.pending_associations.clone();
-        associations.extend(self.resolve_structural_associations(&dataset_id));
+        {
+            let _t = timing::scope(Phase::Associations);
+            associations.extend(self.resolve_structural_associations(&dataset_id));
+        }
+        timing::count(Counter::Associations, associations.len() as u64);
 
-        let mut seen: HashSet<(String, String, String, String)> = HashSet::new();
-        for assoc in associations {
-            let key = (
-                assoc.dataset_id.clone(),
-                assoc.source_file.clone(),
-                assoc.target_file.clone(),
-                assoc.assoc_type.clone(),
-            );
-            if seen.insert(key)
-                && let Err(e) = db.insert_file_association(&assoc)
-            {
-                eprintln!("Failed to insert file association {:?}: {}", assoc, e);
-            }
+        // Dedup on borrowed keys — the primary key is four strings, and cloning all
+        // four per candidate allocated far more than the table itself holds.
+        let mut seen: HashSet<(&str, &str, &str, &str)> = HashSet::new();
+        let deduped: Vec<FileAssociation> = associations
+            .iter()
+            .filter(|a| {
+                seen.insert((
+                    a.dataset_id.as_str(),
+                    a.source_file.as_str(),
+                    a.target_file.as_str(),
+                    a.assoc_type.as_str(),
+                ))
+            })
+            .cloned()
+            .collect();
+        if let Err(e) = db.append_file_associations(&deduped) {
+            eprintln!("Failed to insert file associations: {e}");
         }
 
         // Insert pending diffusion data — only when we have both bval and bvec.
@@ -692,17 +766,24 @@ impl BidsParser {
             // insert-if-not-exists guard, but the bulk Appender doesn't dedup, so
             // seed the seen-set from what's there and skip those (and any duplicate
             // imaging file) before appending.
-            let mut seen: HashSet<(String, String)> = HashSet::new();
-            if let Ok(mut stmt) = db.conn.prepare("SELECT dataset_id, file_path FROM scans")
-                && let Ok(rows) =
-                    stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            // Scoped to this dataset: `dataset_id` is resolved once per run and every
+            // `ImagingFile` carries it, so an unscoped scan pulled every scans row of
+            // every dataset ever indexed into memory to answer a question only about
+            // this one.
+            let mut seen: HashSet<String> = HashSet::new();
+            let scans_scan = timing::scope(Phase::ScansScan);
+            if let Ok(mut stmt) = db
+                .conn
+                .prepare("SELECT file_path FROM scans WHERE dataset_id = ?")
+                && let Ok(rows) = stmt.query_map([dataset_id.as_str()], |r| r.get::<_, String>(0))
             {
                 seen.extend(rows.flatten());
             }
+            drop(scans_scan);
 
             let mut scan_rows: Vec<Value> = Vec::with_capacity(self.imaging_files.len());
             for img_file in &self.imaging_files {
-                if !seen.insert((img_file.dataset_id.clone(), img_file.file_path.clone())) {
+                if !seen.insert(img_file.file_path.clone()) {
                     continue;
                 }
                 let mut scan_data = serde_json::Map::new();
@@ -739,8 +820,8 @@ impl BidsParser {
             }
         }
 
-        let d_finalize = t_finalize.map(|t| t.elapsed());
-        let t_inherit = self.phase_timer.mark();
+        drop(finalize_phase);
+        let inherit_phase = timing::scope(Phase::Inherit);
 
         // Apply BIDS inheritance to populate the `sidecars` table. On local disk we
         // reuse bids-core's tree-based resolver (nearest-wins, matching the BIDS spec
@@ -758,47 +839,16 @@ impl BidsParser {
         // files inherit it.
         self.apply_inheritance_collected(db);
 
-        let d_inherit = t_inherit.map(|t| t.elapsed());
-        let t_flush = self.phase_timer.mark();
+        drop(inherit_phase);
+        let flush_phase = timing::scope(Phase::Flush);
 
         // Ingest the deferred headerless recordings now that every sidecar and
         // channels file is available (their columns come from those).
         self.flush_recordings(db).await?;
 
-        let d_flush = t_flush.map(|t| t.elapsed());
-        self.report_phase_timing(d_walk, d_process, d_finalize, d_inherit, d_flush);
+        drop(flush_phase);
 
         Ok(())
-    }
-
-    /// Print the phase breakdown to stderr when `BIDSLAKE_TIMING` is set. `tabular`
-    /// is the slice of `process` spent in `read_csv` INSERTs — the Lever 1b target.
-    fn report_phase_timing(
-        &self,
-        walk: Option<Duration>,
-        process: Option<Duration>,
-        finalize: Option<Duration>,
-        inherit: Option<Duration>,
-        flush: Option<Duration>,
-    ) {
-        let (Some(walk), Some(process), Some(finalize), Some(inherit), Some(flush)) =
-            (walk, process, finalize, inherit, flush)
-        else {
-            return;
-        };
-        let total = walk + process + finalize + inherit + flush;
-        let ms = |d: Duration| d.as_secs_f64() * 1e3;
-        eprintln!(
-            "[timing] walk+categorize={:.0}ms  process={:.0}ms (tabular read_csv={:.0}ms)  \
-             finalize={:.0}ms  inherit={:.0}ms  flush={:.0}ms  total={:.0}ms",
-            ms(walk),
-            ms(process),
-            ms(self.phase_timer.tabular),
-            ms(finalize),
-            ms(inherit),
-            ms(flush),
-            ms(total),
-        );
     }
 
     /// Build one merged-sidecar row: the merged metadata as `other_data`, plus each
@@ -898,25 +948,37 @@ impl BidsParser {
         }
 
         let promoted: Vec<ImagingFile> = {
-            // A sidecar can only describe a data file of the same dataset and suffix, so
-            // index by that pair — the same cost class as inheritance itself.
-            let mut by_suffix: HashMap<(&str, String), Vec<DataFileFacts>> = HashMap::new();
-            for f in &self.imaging_files {
-                let name = f.file_path.split('/').next_back().unwrap_or_default();
-                let parts = read_entities(name);
-                by_suffix
-                    .entry((f.dataset_id.as_str(), parts.suffix))
-                    .or_default()
-                    .push(DataFileFacts {
-                        dir: Path::new(&f.file_path)
-                            .parent()
-                            .unwrap_or_else(|| Path::new("")),
+            // Parse each data file's name once…
+            let facts: Vec<DataFileFacts> = self
+                .imaging_files
+                .iter()
+                .map(|f| {
+                    let name = f.file_path.split('/').next_back().unwrap_or_default();
+                    let parts = read_entities(name);
+                    DataFileFacts {
+                        dataset_id: f.dataset_id.as_str(),
+                        suffix: parts.suffix,
                         entities: parts.entities,
-                    });
+                    }
+                })
+                .collect();
+            // …then register it under every directory it sits at or below, so the
+            // orphan check is a lookup rather than a scan (see `DataFilesByDir`).
+            let mut by_dir: DataFilesByDir = HashMap::new();
+            for (i, f) in facts.iter().enumerate() {
+                let dir = Path::new(&self.imaging_files[i].file_path)
+                    .parent()
+                    .unwrap_or_else(|| Path::new(""));
+                for ancestor in dir.ancestors() {
+                    by_dir
+                        .entry((f.dataset_id, f.suffix.as_str(), ancestor))
+                        .or_default()
+                        .push(i);
+                }
             }
             candidates
                 .into_iter()
-                .filter(|&i| !describes_a_data_file(&self.sidecars[i], &by_suffix))
+                .filter(|&i| !describes_a_data_file(&self.sidecars[i], &by_dir, &facts))
                 .map(|i| ImagingFile {
                     dataset_id: self.sidecars[i].dataset_id.clone(),
                     file_path: self.sidecars[i].file_path.clone(),
@@ -936,87 +998,29 @@ impl BidsParser {
 
     /// BIDS inheritance for the `sidecars` table, merging the JSON sidecars already
     /// collected in memory during the walk — no disk re-read. Sidecars are keyed by
-    /// `(dataset_id, suffix)` with a directory-prefix + entity-subset match, and
-    /// merged shallowest-first so a nearer (deeper) sidecar overrides. This is the
+    /// `(dataset_id, suffix, directory)` with an entity-subset match, and visited
+    /// ancestor-directory order so a nearer (deeper) sidecar overrides. This is the
     /// sole inheritance path (local and S3); it reproduces the tree-based reference
     /// resolver row-for-row across the corpus.
     fn apply_inheritance_collected(&self, db: &BidsDb) {
-        // A sidecar can only apply to an imaging file of the same dataset and
-        // suffix, so index sidecars by (dataset_id, suffix) and precompute each
-        // one's parent directory. This turns inheritance matching from
-        // O(imaging_files x all_sidecars) into O(imaging_files x same-suffix
-        // sidecars) — the dominant ingestion cost for sidecar-heavy datasets.
-        let sidecar_dirs: Vec<&Path> = self
-            .sidecars
-            .iter()
-            .map(|s| {
-                Path::new(&s.file_path)
-                    .parent()
-                    .unwrap_or_else(|| Path::new(""))
-            })
-            .collect();
-        let mut sidecar_index: HashMap<(&str, &str), Vec<usize>> = HashMap::new();
-        for (i, s) in self.sidecars.iter().enumerate() {
-            sidecar_index
-                .entry((s.dataset_id.as_str(), s.suffix.as_str()))
-                .or_default()
-                .push(i);
-        }
-
+        timing::count(Counter::ImagingFiles, self.imaging_files.len() as u64);
+        timing::count(Counter::Sidecars, self.sidecars.len() as u64);
+        let index = SidecarIndex::new(&self.sidecars);
         let mut rows: Vec<Value> = Vec::new();
+        // Reused across files rather than reallocated per file.
+        let mut scratch: Vec<usize> = Vec::new();
         for img_file in &self.imaging_files {
-            let mut merged_metadata = serde_json::Map::new();
-
             // Extract entities and suffix from imaging file
             let file_name = img_file.file_path.split('/').next_back().unwrap();
             let img_parts = read_entities(file_name);
-            let img_entities = img_parts.entities;
-            let img_suffix = img_parts.suffix;
 
-            // Candidates already share dataset_id + suffix; keep those whose
-            // directory is a prefix of the image's and whose entities are a
-            // subset of the image's.
-            let img_dir = Path::new(&img_file.file_path)
-                .parent()
-                .unwrap_or_else(|| Path::new(""));
-            let mut applicable: Vec<usize> = Vec::new();
-            if let Some(candidates) =
-                sidecar_index.get(&(img_file.dataset_id.as_str(), img_suffix.as_str()))
-            {
-                for &i in candidates {
-                    if !img_dir.starts_with(sidecar_dirs[i]) {
-                        continue;
-                    }
-                    let entities = &self.sidecars[i].entities;
-                    if entities
-                        .iter()
-                        .all(|(key, value)| img_entities.get(key) == Some(value))
-                    {
-                        applicable.push(i);
-                    }
-                }
-            }
-
-            // BIDS inheritance: the *nearer* sidecar wins, where nearness is
-            // directory depth (a sidecar deeper in the tree overrides a shallower
-            // one), matching the tree-based reference. Merge shallowest-first so
-            // deeper values overwrite; entity count breaks the (invalid-BIDS) tie of
-            // two sidecars at the same depth.
-            applicable.sort_by_key(|&i| {
-                (
-                    sidecar_dirs[i].components().count(),
-                    self.sidecars[i].entities.len(),
-                )
-            });
-
-            // Merge metadata
-            for &i in &applicable {
-                if let Value::Object(map) = &self.sidecars[i].content {
-                    for (k, v) in map {
-                        merged_metadata.insert(k.clone(), v.clone());
-                    }
-                }
-            }
+            let merged_metadata = index.merged(
+                &img_file.dataset_id,
+                &img_file.file_path,
+                &img_parts.suffix,
+                &img_parts.entities,
+                &mut scratch,
+            );
 
             if let Some(row) =
                 self.build_sidecar_row(&img_file.dataset_id, &img_file.file_path, merged_metadata)
@@ -1095,10 +1099,12 @@ impl BidsParser {
 
         for (p, c) in body_res {
             if let Some(c) = c {
+                timing::count(Counter::BodiesRead, 1);
                 self.content_cache.insert(p, c);
             }
         }
         for (p, h) in hdr_res {
+            timing::count(Counter::HeadsRead, 1);
             self.tabular_header.insert(p, h);
         }
     }
@@ -1723,22 +1729,26 @@ impl BidsParser {
                 // dry-run rebinds these names authoritatively before any write, so
                 // a Rust/DuckDB header mismatch can only trigger a per-file
                 // fallback, never wrong data.
-                let t = self.phase_timer.mark();
-                // A ready-to-use `read_csv` source (canonical local path or `s3://`
-                // URL); the backend has already resolved the scheme.
-                let source = self.fs.read_csv_source(Path::new(rel_path)).await?;
-                // Header from the concurrent prefetch; fall back to a direct read
-                // if it wasn't prefetched (shouldn't happen for a per-row `.tsv`).
-                let header = match self.tabular_header.get(rel_path) {
-                    Some(h) => h.clone(),
-                    None => self
-                        .fs
-                        .read_head(Path::new(rel_path), 64 * 1024)
-                        .await
-                        .ok()
-                        .and_then(|c| tsv_header_from_line(c.split('\n').next().unwrap_or(""))),
+                // Scoped so the timer closes before the match below, whose arms time
+                // themselves — otherwise the per-file fallback would be counted twice.
+                let (source, header) = {
+                    let _t = timing::scope(Phase::TabularReadCsv);
+                    // A ready-to-use `read_csv` source (absolute local path or `s3://`
+                    // URL); the backend has already resolved the scheme.
+                    let source = self.fs.read_csv_source(Path::new(rel_path)).await?;
+                    // Header from the concurrent prefetch; fall back to a direct read
+                    // if it wasn't prefetched (shouldn't happen for a per-row `.tsv`).
+                    let header = match self.tabular_header.get(rel_path) {
+                        Some(h) => h.clone(),
+                        None => self
+                            .fs
+                            .read_head(Path::new(rel_path), 64 * 1024)
+                            .await
+                            .ok()
+                            .and_then(|c| tsv_header_from_line(c.split('\n').next().unwrap_or(""))),
+                    };
+                    (source, header)
                 };
-                self.phase_timer.add_tabular(t);
 
                 match header {
                     None => {
@@ -1755,11 +1765,10 @@ impl BidsParser {
                     Some((_, columns)) if columns.iter().any(|c| c == "filename") => {
                         // A real `filename` column would collide with `read_csv`'s
                         // `filename=true`; such files fall back to the per-file path.
-                        let t = self.phase_timer.mark();
+                        let _t = timing::scope(Phase::TabularReadCsv);
                         let n = self
                             .ingest_tabular(db, &spec, rel_path, dataset_id, entities)
                             .await?;
-                        self.phase_timer.add_tabular(t);
                         db.record_tabular_file(
                             dataset_id,
                             rel_path,
@@ -1780,11 +1789,10 @@ impl BidsParser {
                 }
             }
             Some(spec) => {
-                let t = self.phase_timer.mark();
+                let _t = timing::scope(Phase::TabularReadCsv);
                 let n = self
                     .ingest_tabular(db, &spec, rel_path, dataset_id, entities)
                     .await?;
-                self.phase_timer.add_tabular(t);
                 db.record_tabular_file(
                     dataset_id,
                     rel_path,
@@ -1904,6 +1912,13 @@ impl BidsParser {
                 .or_default()
                 .push(i);
         }
+
+        timing::count(Counter::PendingTabular, pending.len() as u64);
+        timing::count(Counter::TabularGroups, groups.len() as u64);
+        timing::count_max(
+            Counter::TabularGroupMax,
+            groups.values().map(Vec::len).max().unwrap_or(0) as u64,
+        );
 
         for idxs in groups.values() {
             let members: Vec<&PendingTabular> = idxs.iter().map(|&i| &pending[i]).collect();
@@ -2078,14 +2093,20 @@ impl BidsParser {
             "Ingesting {} continuous recordings (physio/stim/motion)...",
             self.pending_recordings.len()
         );
+        // Built once for the whole flush: every recording asks the same index which
+        // sidecars apply to it.
+        let index = SidecarIndex::new(&self.sidecars);
         for rec in &self.pending_recordings {
-            let (table, n) = self.ingest_recording(db, rec).await.unwrap_or_else(|e| {
-                eprintln!(
-                    "Warning: failed to ingest recording {}: {}",
-                    rec.rel_path, e
-                );
-                (None, 0)
-            });
+            let (table, n) = self
+                .ingest_recording(db, rec, &index)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!(
+                        "Warning: failed to ingest recording {}: {}",
+                        rec.rel_path, e
+                    );
+                    (None, 0)
+                });
             let status = if table.is_some() {
                 TabularStatus::Ingested
             } else {
@@ -2102,6 +2123,7 @@ impl BidsParser {
         &self,
         db: &BidsDb,
         rec: &PendingRecording,
+        index: &SidecarIndex<'_>,
     ) -> Result<(Option<String>, i64)> {
         // Map suffix → target table + column strategy via the single descriptor table.
         let Some(kind) = recording_kind(rec.suffix.as_str()) else {
@@ -2119,7 +2141,7 @@ impl BidsParser {
         let colnames = if kind.colnames_from_channels {
             self.motion_columns(db, rec)?
         } else {
-            self.sidecar_columns(rec)
+            self.sidecar_columns(rec, index)
         };
         if colnames.is_empty() {
             return Ok((None, 0)); // headerless file with no column names → skip
@@ -2215,9 +2237,14 @@ impl BidsParser {
     /// Column names for a physio/stim/physioevents recording, from the merged sidecar's
     /// `Columns` array (BIDS requires it for these files). Merged from the sidecars
     /// collected in memory during the walk — no disk re-read.
-    fn sidecar_columns(&self, rec: &PendingRecording) -> Vec<String> {
-        let merged =
-            self.merged_sidecar_map(&rec.dataset_id, &rec.rel_path, &rec.suffix, &rec.entities);
+    fn sidecar_columns(&self, rec: &PendingRecording, index: &SidecarIndex) -> Vec<String> {
+        let merged = index.merged(
+            &rec.dataset_id,
+            &rec.rel_path,
+            &rec.suffix,
+            &rec.entities,
+            &mut Vec::new(),
+        );
         merged
             .get("Columns")
             .and_then(|v| v.as_array())
@@ -2248,52 +2275,6 @@ impl BidsParser {
             .filter_map(|r| r.ok().flatten())
             .collect();
         Ok(names)
-    }
-
-    /// The merged sidecar for a file via BIDS inheritance: every collected `*.json`
-    /// sidecar of the same dataset and suffix whose directory is a prefix of the
-    /// file's and whose entities are a subset, merged least-specific-first.
-    fn merged_sidecar_map(
-        &self,
-        dataset_id: &str,
-        rel_path: &str,
-        suffix: &str,
-        entities: &HashMap<String, String>,
-    ) -> serde_json::Map<String, Value> {
-        let file_dir = Path::new(rel_path)
-            .parent()
-            .unwrap_or_else(|| Path::new(""));
-        let mut applicable: Vec<&SidecarInfo> = self
-            .sidecars
-            .iter()
-            .filter(|s| s.dataset_id == dataset_id && s.suffix == suffix)
-            .filter(|s| {
-                let sdir = Path::new(&s.file_path)
-                    .parent()
-                    .unwrap_or_else(|| Path::new(""));
-                file_dir.starts_with(sdir)
-                    && s.entities.iter().all(|(k, v)| entities.get(k) == Some(v))
-            })
-            .collect();
-        // Depth-first (shallowest merged first, deeper overrides), matching the
-        // tree-based reference; entity count breaks same-depth ties.
-        applicable.sort_by_key(|s| {
-            (
-                Path::new(&s.file_path)
-                    .parent()
-                    .map_or(0, |p| p.components().count()),
-                s.entities.len(),
-            )
-        });
-        let mut merged = serde_json::Map::new();
-        for s in applicable {
-            if let Value::Object(m) = &s.content {
-                for (k, v) in m {
-                    merged.insert(k.clone(), v.clone());
-                }
-            }
-        }
-        merged
     }
 
     /// Load the dataset-root `.bidsignore` and compile it with full gitignore

@@ -12,6 +12,7 @@ use bidslake::bids::BidsParser;
 use bidslake::db::BidsDb;
 use bidslake::fs::{BidsFileSystem, LocalFileSystem};
 use bidslake::schema::Schema;
+use bidslake::timing;
 
 #[derive(Parser)]
 #[command(name = "bidslake")]
@@ -83,6 +84,13 @@ enum Commands {
         /// on. Repeatable (docs/adr/0003).
         #[arg(long = "source-dataset")]
         source_dataset: Vec<String>,
+
+        /// Where DuckDB spills to disk when a query exceeds its memory limit.
+        /// Defaults to the platform temp directory — deliberately *not* alongside
+        /// `--output`, which is where DuckDB would otherwise put it, because a
+        /// catalog on a network filesystem would then spill over the network.
+        #[arg(long)]
+        temp_dir: Option<PathBuf>,
     },
 
     /// Print the DuckDB schema bidslake would build from the BIDS schema (plus any
@@ -201,6 +209,7 @@ async fn main() -> Result<()> {
             dry_run,
             no_bidsignore,
             source_dataset,
+            temp_dir,
         } => {
             let schema_path_str = schema_path
                 .as_deref()
@@ -221,12 +230,15 @@ async fn main() -> Result<()> {
             let embedded_ingestion = discover_embedded(&input, "ingestion.json");
             let bundle = resolve_adapters(&adapter, embedded_ingestion.as_deref())?;
             overlays.extend(bundle.overlays);
-            let schema = Schema::load_full(
-                schema_path_str,
-                &overlays,
-                bundle.ingestion,
-                &bundle.term_maps,
-            )?;
+            let schema = {
+                let _t = timing::scope(timing::Phase::SchemaLoad);
+                Schema::load_full(
+                    schema_path_str,
+                    &overlays,
+                    bundle.ingestion,
+                    &bundle.term_maps,
+                )?
+            };
             run_indexer(
                 input,
                 output,
@@ -239,6 +251,7 @@ async fn main() -> Result<()> {
                 dry_run,
                 !no_bidsignore,
                 source_dataset,
+                temp_dir,
             )
             .await
         }
@@ -729,6 +742,7 @@ async fn run_indexer(
     dry_run: bool,
     apply_bidsignore: bool,
     declared_sources: Vec<String>,
+    temp_dir: Option<PathBuf>,
 ) -> Result<()> {
     println!("Input BIDS location: {}", input);
     // A dry run parses into a throwaway in-memory database and reports routing rather
@@ -740,10 +754,23 @@ async fn run_indexer(
         println!("Output DuckDB file: {}", output);
     }
 
-    let db = BidsDb::new(db_path)?;
-    db.create_tables(&schema)?;
-    db.stamp_term_maps(&term_map_provenance)?;
-    db.stamp_ingestion(&ingestion_provenance)?;
+    let db = BidsDb::open_with_temp_dir(db_path, temp_dir.as_deref())?;
+
+    // Wrap the whole run — DDL included — in one transaction. DuckDB otherwise
+    // autocommits every statement, fsyncing per statement on a file-backed
+    // database: the single biggest cost for real (file) ingests, and the reason
+    // `create_tables` + the two `stamp_*` calls (one of which writes the whole
+    // effective schema) are inside the transaction rather than ahead of it.
+    // Dropping `txn` without committing (i.e. on an error `?` below) rolls the
+    // whole run back, so a failed ingest no longer leaves a half-created catalog.
+    let txn = db.conn.unchecked_transaction()?;
+
+    {
+        let _t = timing::scope(timing::Phase::Ddl);
+        db.create_tables(&schema)?;
+        db.stamp_term_maps(&term_map_provenance)?;
+        db.stamp_ingestion(&ingestion_provenance)?;
+    }
 
     // Region/anonymous settings for httpfs, when the input is S3.
     let mut s3_httpfs: Option<(String, bool)> = None;
@@ -786,13 +813,15 @@ async fn run_indexer(
             .with_term_maps(term_maps)
             .with_declared_sources(declared_sources);
 
-    // Wrap the whole ingest in one transaction. DuckDB otherwise autocommits
-    // every statement, fsyncing per row on a file-backed database — the single
-    // biggest cost for real (file) ingests. Dropping `txn` without committing
-    // (i.e. on an error `?` below) rolls the whole ingest back.
-    let txn = db.conn.unchecked_transaction()?;
     parser.parse(&db).await?;
-    txn.commit()?;
+    {
+        // The commit is where a file-backed catalog is actually written and fsynced,
+        // and on a network-hosted database that is not a rounding error — so it is
+        // timed rather than left in the gap between the last phase and process exit.
+        let _t = timing::scope(timing::Phase::Commit);
+        txn.commit()?;
+    }
+    timing::report();
 
     if dry_run {
         print_routing_summary(&db)?;

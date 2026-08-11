@@ -72,7 +72,30 @@ impl BidsDb {
     /// Open (or create) the database at `path`. Use `":memory:"` for a transient
     /// in-memory database.
     pub fn new(path: &str) -> Result<Self> {
+        Self::open_with_temp_dir(path, None)
+    }
+
+    /// Open the database and point DuckDB's spill directory at `temp_dir` (or the
+    /// platform temp directory when `None`).
+    ///
+    /// Worth being explicit about: DuckDB spills to a `.tmp` directory *beside the
+    /// database file* by default, and a large ingest does spill — wide `sidecars`
+    /// rows and multi-file `read_csv` batches both exceed the memory limit. When the
+    /// catalog lives on a network filesystem, that turns a spill into random remote
+    /// I/O. The default here keeps it on local disk regardless of where `--output`
+    /// points.
+    pub fn open_with_temp_dir(path: &str, temp_dir: Option<&std::path::Path>) -> Result<Self> {
         let conn = Connection::open(path)?;
+        let temp_dir = temp_dir
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(std::env::temp_dir);
+        conn.execute(
+            &format!(
+                "SET temp_directory = '{}'",
+                temp_dir.display().to_string().replace('\'', "''")
+            ),
+            [],
+        )?;
         Ok(Self { conn })
     }
 
@@ -410,18 +433,29 @@ impl BidsDb {
         Ok(())
     }
 
-    /// Insert one derived file association into `file_associations`.
-    pub fn insert_file_association(&self, assoc: &FileAssociation) -> Result<()> {
-        // Static SQL — prepare_cached reuses the plan across all associations.
-        let mut stmt = self.conn.prepare_cached(
-            "INSERT INTO file_associations (dataset_id, source_file_path, target_file_path, association_type) VALUES (?, ?, ?, ?)",
-        )?;
-        stmt.execute(params![
-            &assoc.dataset_id,
-            &assoc.source_file,
-            &assoc.target_file,
-            &assoc.assoc_type
-        ])?;
+    /// Bulk-insert derived file associations into `file_associations`.
+    ///
+    /// Via the Appender, like `scans` and `sidecars`, rather than a statement per row.
+    /// The schema resolves two associations for nearly every data file (`events` and
+    /// `physio` both select on `extension != '.json'`), so a per-row `execute` meant
+    /// roughly two statements per file in the dataset — the one bulk-writable table
+    /// still going through the planner one row at a time.
+    ///
+    /// The caller owns primary-key dedup; the Appender does not enforce it.
+    pub fn append_file_associations(&self, assocs: &[FileAssociation]) -> Result<()> {
+        if assocs.is_empty() {
+            return Ok(());
+        }
+        let mut appender = self.conn.appender("file_associations")?;
+        for assoc in assocs {
+            appender.append_row(params![
+                &assoc.dataset_id,
+                &assoc.source_file,
+                &assoc.target_file,
+                &assoc.assoc_type
+            ])?;
+        }
+        appender.flush()?;
         Ok(())
     }
 

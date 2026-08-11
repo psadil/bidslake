@@ -62,6 +62,10 @@ pub struct LocalFileSystem {
     /// The tree produced by the last [`walk`](BidsFileSystem::walk), cached so
     /// [`file_tree`](BidsFileSystem::file_tree) can hand it to bids-core inheritance.
     tree: OnceLock<Arc<FileTree>>,
+    /// `root` with symlinks resolved, computed at most once. Every absolute path
+    /// this backend hands out is this joined with a dataset-relative path, which is
+    /// also exactly what the walk stores in `BidsFile::absolute_path`.
+    canonical_root: OnceLock<PathBuf>,
 }
 
 impl LocalFileSystem {
@@ -69,7 +73,25 @@ impl LocalFileSystem {
         Self {
             root: root.into(),
             tree: OnceLock::new(),
+            canonical_root: OnceLock::new(),
         }
+    }
+
+    /// The canonical dataset root, resolved once and reused.
+    ///
+    /// Resolving it per file was the alternative, and on a network filesystem that
+    /// is not free: `realpath` walks the path one component at a time, so every
+    /// tabular file cost a round trip per directory in its path, serially. The root
+    /// is the only part that can need resolving — the rest is a relative path the
+    /// walk already produced — so resolving it once is equivalent and O(1).
+    ///
+    /// Falls back to the path as given when it cannot be resolved, as before.
+    fn canonical_root(&self) -> &Path {
+        self.canonical_root.get_or_init(|| {
+            self.root
+                .canonicalize()
+                .unwrap_or_else(|_| self.root.clone())
+        })
     }
 }
 
@@ -129,25 +151,18 @@ impl BidsFileSystem for LocalFileSystem {
     }
 
     fn read_csv_source(&self, path: &Path) -> BoxFuture<'_, Result<String>> {
-        // Already local: hand back the canonical absolute path for DuckDB to read
-        // directly. Canonicalize best-effort (fall back to the joined path) so the
-        // source is stable regardless of the process's working directory.
-        let full_path = self.root.join(path);
-        Box::pin(async move {
-            let canonical = tokio::fs::canonicalize(&full_path)
-                .await
-                .unwrap_or(full_path);
-            Ok(canonical.to_string_lossy().into_owned())
-        })
+        // Already local: hand back an absolute path for DuckDB to read directly.
+        // Anchored on the canonical root so the source is stable regardless of the
+        // process's working directory — the same path the walk recorded in
+        // `BidsFile::absolute_path`, and the path every other consumer already reads
+        // through.
+        let full_path = self.canonical_root().join(path);
+        Box::pin(async move { Ok(full_path.to_string_lossy().into_owned()) })
     }
 
     fn root(&self) -> String {
         // Return as file:// URI for consistency with S3 URIs
-        let canonical = self
-            .root
-            .canonicalize()
-            .unwrap_or_else(|_| self.root.clone());
-        format!("file://{}", canonical.display())
+        format!("file://{}", self.canonical_root().display())
     }
 
     fn file_tree(&self) -> Option<Arc<FileTree>> {
