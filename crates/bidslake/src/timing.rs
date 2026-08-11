@@ -256,7 +256,7 @@ pub fn report() {
         .map(|(i, _)| ms(i))
         .sum();
 
-    eprintln!("[timing] phase breakdown (ms)");
+    eprintln!("[timing] bidslake {} — phase breakdown (ms)", crate::BUILD);
     for (i, phase) in PHASES.iter().enumerate() {
         let v = ms(i);
         if v > 0.0 {

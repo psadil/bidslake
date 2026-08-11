@@ -150,6 +150,12 @@
 //! # }).unwrap();
 //! ```
 
+/// This build: the package version, plus the commit it was built from and whether
+/// the tree was dirty (see `build.rs`). Reported by `--version`, by the
+/// `BIDSLAKE_TIMING` breakdown, and stamped into every catalog's `bidslake_meta`, so
+/// a measurement can always be tied back to the code that produced it.
+pub const BUILD: &str = env!("BIDSLAKE_BUILD");
+
 pub mod bids;
 pub mod compact;
 pub mod db;

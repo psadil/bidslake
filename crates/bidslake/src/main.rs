@@ -19,6 +19,9 @@ use bidslake::timing;
 #[derive(Parser)]
 #[command(name = "bidslake")]
 #[command(about = "Convert BIDS datasets to DuckDB lakehouse format")]
+// The commit, not just the package version: a binary is usually copied to wherever it
+// runs, and `--version` is the only way to tell which source that copy came from.
+#[command(version = bidslake::BUILD)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

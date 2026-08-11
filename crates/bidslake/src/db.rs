@@ -204,7 +204,7 @@ impl BidsDb {
         self.conn.execute(
             "INSERT INTO bidslake_meta (schema_version, bids_version, bidslake_version) \
              SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM bidslake_meta)",
-            params![schema_version, bids_version, env!("CARGO_PKG_VERSION")],
+            params![schema_version, bids_version, crate::BUILD],
         )?;
         Ok(())
     }
