@@ -136,6 +136,8 @@ pub enum Counter {
     TabularGroupMax,
     /// File-association rows resolved.
     Associations,
+    /// Tabular files copied to local disk before the batched read.
+    StagedFiles,
     /// Metadata keys across every merged sidecar row — the size of the work
     /// inheritance does, as distinct from the number of rows it does it for.
     MergedKeys,
@@ -153,6 +155,7 @@ const COUNTERS: &[Counter] = &[
     Counter::TabularGroupMax,
     Counter::Associations,
     Counter::MergedKeys,
+    Counter::StagedFiles,
 ];
 
 impl Counter {
@@ -169,6 +172,7 @@ impl Counter {
             Counter::TabularGroupMax => "tabular_group_max",
             Counter::Associations => "associations",
             Counter::MergedKeys => "merged_keys",
+            Counter::StagedFiles => "staged_files",
         }
     }
 }

@@ -40,7 +40,8 @@ use duckdb::Connection;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 /// The `read_csv` relaxations that make a tabular read non-poisoning: a malformed
 /// row is padded or dropped rather than aborting the ingest transaction (so
@@ -138,6 +139,12 @@ pub struct BidsParser {
     root_description_json: Option<Value>,
     /// `--source-dataset` references declared on the CLI; recorded as `declared` links.
     declared_sources: Vec<String>,
+    /// Local directory the batched tabular ingest stages files into (see
+    /// [`Self::stage_batch`]). Defaults to the platform temp directory.
+    staging_dir: PathBuf,
+    /// Whether staging can help at all, probed once per run — see
+    /// [`Self::staging_helps`].
+    staging_helps: OnceLock<bool>,
 }
 
 #[derive(Clone)]
@@ -393,6 +400,8 @@ impl BidsParser {
             readers: readers::default_readers(),
             root_description_json: None,
             declared_sources: Vec::new(),
+            staging_dir: std::env::temp_dir(),
+            staging_helps: OnceLock::new(),
         }
     }
 
@@ -406,6 +415,16 @@ impl BidsParser {
     /// Attach term maps that recognize standardized non-BIDS files (FreeSurfer, …).
     /// Ordinary BIDS ingestion configures none, so the classify hot path in
     /// `process_file` short-circuits on an empty term-map list.
+    /// Stage batched tabular reads into `dir` instead of the platform temp directory.
+    /// Wired to `--temp-dir`, alongside DuckDB's own spill location, so one flag says
+    /// where a run is allowed to put scratch data.
+    pub fn with_staging_dir(mut self, dir: Option<PathBuf>) -> Self {
+        if let Some(dir) = dir {
+            self.staging_dir = dir;
+        }
+        self
+    }
+
     pub fn with_term_maps(mut self, term_maps: Vec<TermMap>) -> Self {
         self.term_maps = term_maps;
         self
@@ -1979,80 +1998,190 @@ impl BidsParser {
             groups.values().map(Vec::len).max().unwrap_or(0) as u64,
         );
 
+        // Each group is ingested in windows rather than one statement. Two reasons,
+        // and they pull the same way: a window bounds how much a staged copy can put
+        // on local disk (below), and it bounds the SQL text, which embeds every
+        // member's path four times across the DELETE, the read_csv list, the filename
+        // join, and the count-back. A group of tens of thousands of files is otherwise
+        // tens of megabytes of statement.
+        //
+        // Safe to split because nothing in the body is group-wide: `row_idx` is
+        // `row_number() … PARTITION BY filename`, so it is already per file; the
+        // DELETE and the count-back are scoped by `file_path IN (…)`.
         for idxs in groups.values() {
-            let members: Vec<&PendingTabular> = idxs.iter().map(|&i| &pending[i]).collect();
-            let spec = &members[0].spec;
-            let columns = &members[0].columns;
-            let files: Vec<(&str, &str)> = members
-                .iter()
-                .map(|m| (m.source.as_str(), m.rel_path.as_str()))
-                .collect();
+            for window in idxs.chunks(BATCH_WINDOW_FILES) {
+                let members: Vec<&PendingTabular> = window.iter().map(|&i| &pending[i]).collect();
+                let spec = &members[0].spec;
+                let columns = &members[0].columns;
+                // Local copies where staging applied; the originals otherwise.
+                let staged = self.stage_batch(&members).await;
+                let files: Vec<(&str, &str)> = members
+                    .iter()
+                    .enumerate()
+                    .map(|(i, m)| {
+                        let source = staged
+                            .as_ref()
+                            .and_then(|s| s.local[i].as_deref())
+                            .unwrap_or(m.source.as_str());
+                        (source, m.rel_path.as_str())
+                    })
+                    .collect();
 
-            // Re-index idempotency (per-row tables have no PK): clear these files'
-            // prior rows in one DELETE before re-inserting.
-            let rel_list = sql_in_list(members.iter().map(|m| m.rel_path.as_str()));
-            let del = format!(
-                "DELETE FROM {} WHERE dataset_id = {} AND file_path IN ({rel_list})",
-                spec.table,
-                sql_lit(&dataset_id),
-            );
-            db.conn.execute(&del, [])?;
+                // Re-index idempotency (per-row tables have no PK): clear these files'
+                // prior rows in one DELETE before re-inserting.
+                let rel_list = sql_in_list(members.iter().map(|m| m.rel_path.as_str()));
+                let del = format!(
+                    "DELETE FROM {} WHERE dataset_id = {} AND file_path IN ({rel_list})",
+                    spec.table,
+                    sql_lit(&dataset_id),
+                );
+                db.conn.execute(&del, [])?;
 
-            // Write the batch directly — no dry-run. `read_csv`'s non-erroring
-            // relaxations (see `HEADER_READ_OPTS`) mean a malformed row is
-            // padded/dropped rather than aborting, so it can't poison the ingest
-            // transaction; dropping the old dry-run halves the reads (the dominant
-            // cost on a network filesystem).
-            //
-            // Row order matters for positional tabular files — notably derivative
-            // `*timeseries.tsv` (e.g. fMRIPrep confounds), where row N aligns with
-            // volume N of the associated 4D image — so their line order is preserved
-            // and `row_idx` records the row number. The ordering policy lives in the
-            // ingestion schema (`Ingestion::ordered`);
-            // see https://github.com/bids-standard/bids-2-devel/issues/98.
-            let preserve_order = self.schema.ingestion().ordered(&spec.table);
-            let store_undeclared =
-                self.schema.ingestion().undeclared(&spec.table) == Undeclared::Store;
-            let (select, undeclared) = build_tabular_batch_select(
-                spec,
-                &dataset_id,
-                &files,
-                columns,
-                preserve_order,
-                store_undeclared,
-            );
-            if !store_undeclared
-                && let Err(e) = db.record_undeclared_columns(&spec.table, &undeclared)
-            {
-                eprintln!(
-                    "Warning: recording undeclared columns for {}: {e}",
-                    spec.table
+                // Write the batch directly — no dry-run. `read_csv`'s non-erroring
+                // relaxations (see `HEADER_READ_OPTS`) mean a malformed row is
+                // padded/dropped rather than aborting, so it can't poison the ingest
+                // transaction; dropping the old dry-run halves the reads (the dominant
+                // cost on a network filesystem).
+                //
+                // Row order matters for positional tabular files — notably derivative
+                // `*timeseries.tsv` (e.g. fMRIPrep confounds), where row N aligns with
+                // volume N of the associated 4D image — so their line order is preserved
+                // and `row_idx` records the row number. The ordering policy lives in the
+                // ingestion schema (`Ingestion::ordered`);
+                // see https://github.com/bids-standard/bids-2-devel/issues/98.
+                let preserve_order = self.schema.ingestion().ordered(&spec.table);
+                let store_undeclared =
+                    self.schema.ingestion().undeclared(&spec.table) == Undeclared::Store;
+                let (select, undeclared) = build_tabular_batch_select(
+                    spec,
+                    &dataset_id,
+                    &files,
+                    columns,
+                    preserve_order,
+                    store_undeclared,
                 );
-            }
-            let sql = format!("INSERT INTO {} BY NAME {select}", spec.table);
-            // A batch-INSERT execution failure (e.g. an IO/read error) drops this
-            // group's rows for the run — record its members as `failed` so the
-            // `tabular_files` catalog can distinguish that from an empty-but-
-            // successful ingest, rather than claiming `ingested` with 0 rows.
-            let status = if let Err(e) = db.conn.execute(&sql, []) {
-                eprintln!(
-                    "Warning: batched tabular insert into {} failed: {e}",
-                    spec.table
-                );
-                TabularStatus::Failed
-            } else {
-                TabularStatus::Ingested
-            };
-            // Counts come from the table itself (a cheap local query, not a re-read
-            // of the source files), so `tabular_files` reflects exactly what landed
-            // — including any rows `ignore_errors` dropped.
-            let counts = self.table_row_counts(db, spec, &dataset_id, &members);
-            for m in &members {
-                let n = counts.get(&m.rel_path).copied().unwrap_or(0);
-                db.record_tabular_file(&dataset_id, &m.rel_path, Some(&spec.table), n, status)?;
+                if !store_undeclared
+                    && let Err(e) = db.record_undeclared_columns(&spec.table, &undeclared)
+                {
+                    eprintln!(
+                        "Warning: recording undeclared columns for {}: {e}",
+                        spec.table
+                    );
+                }
+                let sql = format!("INSERT INTO {} BY NAME {select}", spec.table);
+                // A batch-INSERT execution failure (e.g. an IO/read error) drops this
+                // group's rows for the run — record its members as `failed` so the
+                // `tabular_files` catalog can distinguish that from an empty-but-
+                // successful ingest, rather than claiming `ingested` with 0 rows.
+                let status = if let Err(e) = db.conn.execute(&sql, []) {
+                    eprintln!(
+                        "Warning: batched tabular insert into {} failed: {e}",
+                        spec.table
+                    );
+                    TabularStatus::Failed
+                } else {
+                    TabularStatus::Ingested
+                };
+                // Counts come from the table itself (a cheap local query, not a re-read
+                // of the source files), so `tabular_files` reflects exactly what landed
+                // — including any rows `ignore_errors` dropped.
+                let counts = self.table_row_counts(db, spec, &dataset_id, &members);
+                for m in &members {
+                    let n = counts.get(&m.rel_path).copied().unwrap_or(0);
+                    db.record_tabular_file(&dataset_id, &m.rel_path, Some(&spec.table), n, status)?;
+                }
             }
         }
         Ok(())
+    }
+
+    /// Whether staging is worth doing, decided once per run by a single probe.
+    ///
+    /// Staging is not free even when the copy is: it creates and later removes one
+    /// directory entry per file, which on an already-local dataset is pure overhead
+    /// against reads that were fast to begin with. The question is really "is the data
+    /// on a different filesystem from the scratch directory", and rather than sniff
+    /// filesystem types the probe just asks the kernel: a hard link across filesystems
+    /// fails with `EXDEV`. Succeeding therefore means the two are the same filesystem
+    /// and staging has nothing to offer; failing means they differ, which is the case
+    /// staging exists for.
+    fn staging_helps(&self, sample: &str) -> bool {
+        *self.staging_helps.get_or_init(|| {
+            let Ok(dir) = tempfile::Builder::new()
+                .prefix("bidslake-probe-")
+                .tempdir_in(&self.staging_dir)
+            else {
+                return false; // no usable scratch directory; read in place
+            };
+            std::fs::hard_link(sample, dir.path().join("probe")).is_err()
+        })
+    }
+
+    /// Copy a window's source files onto local disk, so DuckDB's per-file opens land
+    /// on a local filesystem instead of a network one.
+    ///
+    /// `read_csv` opens each file in turn, and on a shared filesystem that per-file
+    /// cost swamps the content: a measured raw dataset spent 75 s reading 1,367
+    /// `events.tsv` totalling 57 KB — 55 ms per file against bytes that take no time
+    /// at all. Copying them first turns N serialized remote opens into N/16 concurrent
+    /// ones plus N local opens.
+    ///
+    /// Bounded by [`STAGE_BUDGET_BYTES`] per window: a window of large files (a
+    /// derivative's confounds tables run to megabytes each) stages what fits and reads
+    /// the rest in place. That is the right shape rather than a limitation — the files
+    /// this helps most are the ones where the open dominates the read.
+    ///
+    /// Best-effort throughout: any file that cannot be copied is simply read from its
+    /// original location. Skipped entirely for a single-file window (nothing to
+    /// overlap) and for non-local sources, which the S3 backend serves over httpfs.
+    async fn stage_batch(&self, members: &[&PendingTabular]) -> Option<StagedBatch> {
+        use futures::stream::StreamExt;
+
+        if members.len() < 2
+            || members.iter().any(|m| m.source.starts_with("s3://"))
+            || !self.staging_helps(&members[0].source)
+        {
+            return None;
+        }
+        let dir = tempfile::Builder::new()
+            .prefix("bidslake-batch-")
+            .tempdir_in(&self.staging_dir)
+            .ok()?;
+
+        // Copy concurrently — the whole point is to overlap the per-file latency that
+        // the serial read cannot.
+        let base = dir.path();
+        let copied: Vec<Option<(String, u64)>> = futures::stream::iter(
+            members
+                .iter()
+                .enumerate()
+                .map(|(i, m)| (i, m.source.clone())),
+        )
+        .map(|(i, source)| async move {
+            let dest = base.join(format!("{i}-{}", Path::new(&source).file_name()?.to_str()?));
+            let bytes = tokio::fs::copy(&source, &dest).await.ok()?;
+            Some((dest.to_string_lossy().into_owned(), bytes))
+        })
+        .buffer_unordered(STAGE_CONCURRENCY)
+        .collect()
+        .await;
+
+        // Keep copies until the budget is spent; anything past it reads in place. The
+        // staged files are already written, so the budget caps what a *later* window
+        // adds rather than unwinding this one — windows are bounded by file count too.
+        let mut spent = 0u64;
+        let mut local = Vec::with_capacity(members.len());
+        for entry in copied {
+            match entry {
+                Some((path, bytes)) if spent + bytes <= STAGE_BUDGET_BYTES => {
+                    spent += bytes;
+                    timing::count(Counter::StagedFiles, 1);
+                    local.push(Some(path));
+                }
+                _ => local.push(None),
+            }
+        }
+        Some(StagedBatch { _dir: dir, local })
     }
 
     /// Per-file row counts for a just-inserted batch, read back from the table (a
@@ -2489,6 +2618,24 @@ impl BidsParser {
         }
         out
     }
+}
+
+/// Files per batched-tabular window (see the loop in [`BidsParser::flush_tabular`]).
+const BATCH_WINDOW_FILES: usize = 512;
+
+/// How much of a window may be copied to local disk before the rest is read in place.
+const STAGE_BUDGET_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Concurrent copies while staging a window. Matches the prefetch's fan-out — the same
+/// filesystem, the same reason for a bound.
+const STAGE_CONCURRENCY: usize = 16;
+
+/// A window's files copied to local disk. `local[i]` is the copy of member `i`, or
+/// `None` where staging did not apply. Dropping it removes the directory, so the copies
+/// live exactly as long as the statements that read them.
+struct StagedBatch {
+    _dir: tempfile::TempDir,
+    local: Vec<Option<String>>,
 }
 
 /// How one headerless continuous-recording suffix maps to a table and how its
