@@ -650,6 +650,16 @@ impl BidsParser {
             self.process_file(&path, db, &dataset_id).await?;
         }
 
+        // The prefetch caches are dead once the passes are done: every `read_cached`
+        // call site and the only `tabular_header` reader are inside the passes above.
+        // Releasing them here matters at scale rather than being tidiness — a
+        // derivative dataset's per-run column dictionaries are hundreds of kilobytes
+        // each, so tens of thousands of them is gigabytes, and they would otherwise
+        // stay resident through inheritance, which is itself the peak (it builds one
+        // merged row per data file before appending any).
+        self.content_cache = HashMap::new();
+        self.tabular_header = HashMap::new();
+
         // Lever 1b: ingest the deferred per-row tabular files in header-grouped
         // batches now that all of them are collected.
         {
