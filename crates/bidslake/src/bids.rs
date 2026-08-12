@@ -54,6 +54,14 @@ macro_rules! non_poisoning_read_flags {
     };
 }
 
+/// The same relaxations without `all_varchar`, for a read that states its `columns`
+/// outright — the types are in that struct, and asking for both is a conflict.
+macro_rules! non_poisoning_read_flags_typed {
+    () => {
+        "delim='\\t', nullstr='n/a', strict_mode=false, null_padding=true, ignore_errors=true"
+    };
+}
+
 /// S3/httpfs configuration for reading `s3://` tabular data via DuckDB. Passed to
 /// [`BidsParser::new`] so the read-preflight connection is configured as part of
 /// construction — there is no separate must-call-before-`parse` step to forget.
@@ -2869,6 +2877,29 @@ fn build_tabular_batch_select(
         referenced.extend(extras.iter().copied());
     }
 
+    // Hand DuckDB the schema instead of letting it sniff one. The header is already
+    // known here — it is what the group was formed by, and every member shares it
+    // byte-for-byte — so the sniffer would be re-deriving something we can simply
+    // state. That is not a small saving on a wide file: profiling ~1,850 columns took
+    // 0.67 s per fMRIPrep confounds file against 0.03 s once the columns are declared,
+    // and it is per file, not per group.
+    //
+    // Every physical column must be listed, so a file whose header carries an empty
+    // name (a trailing tab) falls back to sniffing rather than being described wrongly.
+    let read_opts = if columns.iter().any(|c| c.is_empty()) {
+        HEADER_READ_OPTS.to_string()
+    } else {
+        let spec = columns
+            .iter()
+            .map(|c| format!("{}: 'VARCHAR'", sql_lit(c)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "header=true, auto_detect=false, columns={{{spec}}}, {}",
+            non_poisoning_read_flags_typed!()
+        )
+    };
+
     let locals = files
         .iter()
         .map(|(l, _, _)| sql_lit(l))
@@ -2897,10 +2928,10 @@ fn build_tabular_batch_select(
         let projected = projected.join(", ");
         format!(
             "(SELECT {projected}, row_number() OVER () AS __grn \
-             FROM read_csv([{locals}], {HEADER_READ_OPTS}, filename='__src', parallel=false)) AS raw"
+             FROM read_csv([{locals}], {read_opts}, filename='__src', parallel=false)) AS raw"
         )
     } else {
-        format!("read_csv([{locals}], {HEADER_READ_OPTS}, filename='__src') AS raw")
+        format!("read_csv([{locals}], {read_opts}, filename='__src') AS raw")
     };
 
     let sql = format!(
@@ -3184,11 +3215,23 @@ mod tests {
                     store,
                     "{which} builder with store_undeclared={store}: {sql}"
                 );
+                // Checked against the projection rather than the whole statement: the
+                // batched builder now declares the file's full schema to `read_csv`
+                // (which is what lets it skip the sniffer), so an undeclared column is
+                // *named* either way. What the policy governs is whether its value is
+                // carried into `other_data`.
                 assert_eq!(
-                    sql.contains("a_comp_cor_00"),
+                    sql.contains("json_object("),
                     store,
-                    "{which}: the undeclared column itself must only appear when stored"
+                    "{which}: the undeclared column is only projected when stored"
                 );
+                if store {
+                    let payload = &sql[sql.find("json_object(").unwrap()..];
+                    assert!(
+                        payload.contains("a_comp_cor_00"),
+                        "{which}: a stored undeclared column belongs in the overflow"
+                    );
+                }
                 assert!(
                     sql.contains("trans_x"),
                     "{which}: declared columns are unaffected by the policy"
