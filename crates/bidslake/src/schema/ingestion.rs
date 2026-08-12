@@ -195,6 +195,12 @@ impl Ingestion {
     /// Whether a table's source row order is load-bearing (default `true` — order matters and
     /// rows are read sequentially). `events` is the one BIDS table declared order-insensitive
     /// (rows carry `onset`); see bids-standard/bids-2-devel#98.
+    ///
+    /// This is what decides whether `row_idx` is a line number. Declaring a table unordered buys
+    /// a concurrent read of its files, and the price is that its `row_idx` becomes a unique key
+    /// in an arbitrary order — arbitrary per run, so two ingests of one dataset can disagree
+    /// about which row is which index. Only declare a table unordered when its rows are
+    /// addressed by their own content rather than by position.
     pub fn ordered(&self, table: &str) -> bool {
         self.tables
             .get(table)
