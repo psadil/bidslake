@@ -409,34 +409,18 @@ impl BidsDb {
         Ok(())
     }
 
-    /// Drop every row `dataset_id` owns in `table`, so a re-index rebuilds it instead of
-    /// colliding with what the previous run wrote.
-    ///
-    /// For the tables a run recomputes wholly from the dataset on disk. The bulk
-    /// [`Self::append_rows`] path runs no primary-key check, so re-appending an identical row
-    /// is a constraint violation rather than a no-op — and one violation aborts the whole
-    /// ingest transaction, which silently costs every table written after it. Clearing first
-    /// also handles rows whose source file has since been deleted, which no upsert would.
-    ///
-    /// Not for the tables that resolve collisions themselves: `scans` skips what a read-back
-    /// says is already there, the keyed tabular tables `INSERT OR REPLACE`, and
-    /// `tabular_files` / `dataset_links` / `tabular_undeclared_columns` carry their own
-    /// `OR REPLACE` / `OR IGNORE`.
-    pub fn clear_dataset(&self, table: &str, dataset_id: &str) -> Result<()> {
-        // `table` is always an internal literal, never user input.
-        self.conn.execute(
-            &format!("DELETE FROM {table} WHERE dataset_id = ?"),
-            params![dataset_id],
-        )?;
-        Ok(())
-    }
-
     /// Drop the rows one file contributed to `table`, so re-reading that file replaces them.
     ///
-    /// The per-file counterpart of [`Self::clear_dataset`], for the tables a content reader
-    /// fills during the walk — where the unit of work is one file, not the whole dataset.
-    /// These tables are per-row and carry no primary key, so without this a re-index does not
-    /// fail; it doubles them.
+    /// For the per-row tables a content reader fills during the walk. These carry **no primary
+    /// key** — that is what a per-row table is — so there is nothing for an upsert to conflict
+    /// on, and without this a re-index does not fail: it doubles the table, and doubles it again
+    /// next run. Scoped per file because the reader is invoked once per file, and because that
+    /// is how the batched tabular path already clears the same class of table (see
+    /// `bids::BidsParser::flush_tabular`'s pre-`DELETE`), so all per-row tables behave alike.
+    ///
+    /// Note the scope: rows belonging to a file that has since been *deleted* are not reached,
+    /// because this only runs for files the walk still finds. Pruning those is an integrity
+    /// question, deliberately not one the write path answers.
     pub fn clear_file_rows(&self, table: &str, dataset_id: &str, file_path: &str) -> Result<()> {
         // `table` is always an internal literal, never user input.
         self.conn.execute(
@@ -473,6 +457,53 @@ impl BidsDb {
         Ok(())
     }
 
+    /// Bulk-**upsert** many rows into a schema-generated table: the [`Self::append_rows`] path
+    /// for a table a re-index rewrites, where a row already present must be replaced rather
+    /// than collided with.
+    ///
+    /// Staged through a temporary table, because the two halves of that cannot be had directly.
+    /// The Appender has no conflict handling at all, so it cannot upsert; and a row-at-a-time
+    /// `INSERT OR REPLACE` is far more expensive than the bulk path — measured on `sidecars`
+    /// over ds000117 (1,492 imaging files, 2026-08), the append went 21 ms → 759 ms and the
+    /// whole run 1.8 s → 2.6 s. So the Appender still does the writing, into a staging table,
+    /// and one `INSERT OR REPLACE … SELECT` moves the rows across and resolves conflicts there.
+    ///
+    /// Upsert rather than clear-then-append so the write is self-contained: nothing has to keep
+    /// a deletion's scope in step with what the run produces, and re-indexing one dataset can
+    /// never reach another's rows. It does leave behind rows whose source file has since been
+    /// deleted — as `scans` already does — which is a question for an integrity pass, not for
+    /// the write path.
+    ///
+    /// Requires `table_name` to have a primary key (nothing to upsert on otherwise) and no
+    /// generated columns (`SELECT *` would materialize them, and inserting into a generated
+    /// column is an error). `sidecars` satisfies both; `scans` has generated columns and uses
+    /// [`Self::append_rows`] behind its own read-back guard.
+    pub fn upsert_rows(&self, schema: &Schema, table_name: &str, rows: &[Value]) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        // `table_name` is always an internal literal, never user input.
+        let stage = format!("{table_name}_upsert_stage");
+        // `OR REPLACE` so a previous run that died mid-flight leaves nothing to trip over.
+        self.conn.execute_batch(&format!(
+            "CREATE OR REPLACE TEMP TABLE {stage} AS SELECT * FROM {table_name} LIMIT 0"
+        ))?;
+        {
+            let mut appender = self.conn.appender(&stage)?;
+            for row in rows {
+                let values = schema.row_values(table_name, row)?;
+                let refs: Vec<&dyn duckdb::ToSql> =
+                    values.iter().map(|v| v as &dyn duckdb::ToSql).collect();
+                appender.append_row(refs.as_slice())?;
+            }
+            appender.flush()?;
+        }
+        self.conn.execute_batch(&format!(
+            "INSERT OR REPLACE INTO {table_name} SELECT * FROM {stage}; DROP TABLE {stage};"
+        ))?;
+        Ok(())
+    }
+
     /// Bulk-insert derived file associations into `file_associations`.
     ///
     /// Via the Appender, like `scans` and `sidecars`, rather than a statement per row.
@@ -486,16 +517,27 @@ impl BidsDb {
         if assocs.is_empty() {
             return Ok(());
         }
-        let mut appender = self.conn.appender("file_associations")?;
+        // `INSERT OR IGNORE`, not the bulk Appender: a re-index recomputes these rows, and the
+        // Appender has no conflict handling, so an identical row would be a primary-key
+        // violation — which aborts the ingest transaction and takes every later write with it.
+        //
+        // `OR IGNORE` rather than `OR REPLACE` because every column of this table *is* its
+        // primary key: an existing row and a recomputed one are byte-identical, so there is
+        // nothing an update could change. Static SQL, so `prepare_cached` reuses one plan; the
+        // table is small (a few associations per data file).
+        let mut stmt = self.conn.prepare_cached(
+            "INSERT OR IGNORE INTO file_associations \
+             (dataset_id, source_file_path, target_file_path, association_type) \
+             VALUES (?, ?, ?, ?)",
+        )?;
         for assoc in assocs {
-            appender.append_row(params![
+            stmt.execute(params![
                 &assoc.dataset_id,
                 &assoc.source_file,
                 &assoc.target_file,
                 &assoc.assoc_type
             ])?;
         }
-        appender.flush()?;
         Ok(())
     }
 
@@ -515,19 +557,27 @@ impl BidsDb {
         use duckdb::types::Value;
         let component = |v: &[f64], i: usize| v.get(i).copied().map_or(Value::Null, Value::Double);
 
-        let mut appender = self.conn.appender("diffusion")?;
+        // `INSERT OR REPLACE`, not the bulk Appender: a re-index recomputes these rows, and the
+        // Appender has no conflict handling, so an identical row would be a primary-key
+        // violation. Upserting keeps the write self-contained — no clearing step whose scope has
+        // to be kept in step with what the run produces. Static SQL, so `prepare_cached` reuses
+        // one plan across every volume.
+        let mut stmt = self.conn.prepare_cached(
+            "INSERT OR REPLACE INTO diffusion \
+             (dataset_id, file_path, volume_idx, bval, bvec_x, bvec_y, bvec_z) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )?;
         for (i, &b) in bval.iter().enumerate() {
-            appender.append_row([
-                Value::Text(dataset_id.to_string()),
-                Value::Text(file_path.to_string()),
-                Value::BigInt(i as i64),
-                Value::Double(b),
+            stmt.execute(params![
+                dataset_id,
+                file_path,
+                i as i64,
+                b,
                 component(bvec_x, i),
                 component(bvec_y, i),
                 component(bvec_z, i),
             ])?;
         }
-        appender.flush()?;
         Ok(())
     }
 }
