@@ -147,8 +147,12 @@ class TableInputOf[E: str]:
     """A slice of an ingested table, resolved per unit.
 
     For the inputs that are not files at all — a few columns of a confounds table,
-    the events for a run. ``order_by`` matters whenever row order is load-bearing
-    (``row_idx`` preserves the original TSV order).
+    the events for a run. ``order_by`` matters whenever row order is load-bearing.
+
+    Order by ``row_idx`` for a table that has it: the column exists exactly on the tables
+    whose source line order is meaningful (recordings, positional ``*timeseries.tsv``), and
+    there it reproduces that order. Tables declared order-insensitive have no ``row_idx`` —
+    ``events`` is the one BIDS table in that group, and its rows are addressed by ``onset``.
     """
 
     join: tuple[E, ...]

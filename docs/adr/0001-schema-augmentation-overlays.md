@@ -90,11 +90,11 @@ headaches. Instead the ordering policy lives outside the BIDS schema, as a per-t
 `ordered` flag in bidslake's own ingestion schema (ADR 0002; `Ingestion::ordered`,
 which this ADR's original hardcoded predecessor became). Only `events` is declared
 reorderable; everything else, including positional derivative time series and
-recordings, preserves TSV line order so `row_idx` is a faithful row number. The
-converse holds too, and is worth knowing: on `events` the rows are read concurrently,
-so `row_idx` is a unique key in an arbitrary order rather than a line number, and the
-order can differ between two ingests of the same dataset. A `row_order` schema field
-is proposed upstream at
+recordings, preserves TSV line order so `row_idx` is a faithful row number. The flag also
+decides whether the column exists: a table declared reorderable is read concurrently, which
+fixes no row order, so it carries no `row_idx` at all rather than a column of arbitrary
+labels inviting `ORDER BY row_idx`. `events` therefore has none, and its rows are addressed
+by `onset`. A `row_order` schema field is proposed upstream at
 [bids-standard/bids-2-devel#98](https://github.com/bids-standard/bids-2-devel/issues/98);
 if adopted, the hardcode can be driven from the schema.
 

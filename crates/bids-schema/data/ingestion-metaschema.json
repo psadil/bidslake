@@ -84,7 +84,7 @@
         },
         "ordered": {
           "type": "boolean",
-          "description": "Whether the source row order is load-bearing and must be preserved (rows read sequentially). When false, rows carry no meaningful order and may be read in parallel. Follows the BIDS row-order proposal (bids-standard/bids-2-devel#98); consumers sort by a canonical column (e.g. `onset`) when needed, so no sort column is specified."
+          "description": "Whether the source row order is load-bearing and must be preserved (rows read sequentially, and the table gets a `row_idx` column recording each row's line index). When false, rows carry no meaningful order, may be read in parallel, and the table has **no** `row_idx` — a concurrent read fixes no order, so there is nothing to record, and an arbitrary label would only invite ordering by it. Follows the BIDS row-order proposal (bids-standard/bids-2-devel#98); consumers of an unordered table sort by a canonical column (e.g. `onset`), so no sort column is specified."
         },
         "undeclared": {
           "description": "What this table does with source columns the schema does not declare. Table-wide, so it decides the table's shape: a `catalog` table has no `other_data` column at all. For a table holding more than one class of file, scope the policy with `undeclaredWhen` instead.",

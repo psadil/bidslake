@@ -446,12 +446,18 @@ impl Schema {
             RowIdentity::PerRow => {
                 base(&mut columns, &mut fields, "dataset_id");
                 base(&mut columns, &mut fields, "file_path");
-                columns.push("row_idx BIGINT".to_string());
-                fields.push((
-                    "row_idx".to_string(),
-                    "BIGINT".to_string(),
-                    "row_idx".to_string(),
-                ));
+                // `row_idx` exists only where it means something. It carries the one thing a
+                // SQL table cannot hold implicitly — the source file's line order — so a table
+                // whose order is declared not load-bearing has nothing to put in it, and a
+                // column of arbitrary labels would only invite `ORDER BY row_idx`.
+                if self.ingestion.ordered(&spec.table) {
+                    columns.push("row_idx BIGINT".to_string());
+                    fields.push((
+                        "row_idx".to_string(),
+                        "BIGINT".to_string(),
+                        "row_idx".to_string(),
+                    ));
+                }
             }
         }
 

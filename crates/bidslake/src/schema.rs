@@ -72,30 +72,31 @@
 //!   BIDS metadata field, verbatim-named (`RepetitionTime`, `EchoTime`, …), plus
 //!   `other_data`.
 //! - **`events`** — task-event rows from `*_events.tsv` (`onset`, `duration`,
-//!   `trial_type`, …, `other_data`); one row per line, no primary key. **Order by
-//!   `onset`, not by `row_idx`** — see the note on `row_idx` below.
+//!   `trial_type`, …, `other_data`); one row per line, no primary key, and — alone among
+//!   the per-row tables — **no `row_idx`**: order events by `onset` (see below).
 //! - **Per-modality tabular tables** — one per `rules.tabular_data` rule, named
 //!   for it: `eeg_channels`/`meg_channels`/…, `eeg_electrodes`/…, `nirs_optodes`,
 //!   `blood`, `asl_context`, `behavioral`, `samples`, `phenotype`, `descriptions`,
 //!   `segmentation_lookup`. Each has `(dataset_id, file_path, row_idx)`, the rule's
 //!   typed columns, `other_data`, and the generated virtual columns.
 //!
-//!   **`row_idx` exists because a SQL table is unordered and a TSV is not.** Several
-//!   BIDS tables carry meaning in their line order and nowhere else: a
-//!   `*_channels.tsv`'s order maps onto the columns of the binary recording beside it,
-//!   a recording's rows *are* its time axis, and a derivative `*timeseries.tsv` aligns
-//!   row N with volume N of its 4D image. `row_idx` is what preserves that through
-//!   ingestion, so a consumer does not have to re-read the file to recover it. It is a
-//!   plain ordinal, not a key — these tables have no primary key.
+//!   **`row_idx` exists because a SQL table is unordered and a TSV is not**, and it is
+//!   present exactly on the tables where that matters. Several BIDS tables carry meaning
+//!   in their line order and nowhere else: a `*_channels.tsv`'s order maps onto the
+//!   columns of the binary recording beside it, a recording's rows *are* its time axis,
+//!   and a derivative `*timeseries.tsv` aligns row N with volume N of its 4D image.
+//!   `row_idx` preserves that through ingestion, so a consumer need not re-read the file
+//!   to recover it. It is a plain ordinal, not a key — these tables have no primary key.
 //!
-//!   Whether it reproduces line order is declared per table by the ingestion schema
-//!   (`Ingestion::ordered`, default true). For the positional tables it does, and the
-//!   read is forced sequential to guarantee it. `events` is the one BIDS table
-//!   declared *un*ordered — its rows are addressed by `onset`, and it is the
-//!   highest-row-count table, so it is worth reading its files concurrently. There
-//!   `row_idx` is only a unique `0..n-1` label in an arbitrary order, and the order
-//!   can differ between two ingests of the same dataset. Order events by `onset`;
-//!   events sharing an `onset` have no stable tiebreak.
+//!   Which tables have it is declared by the ingestion schema (`Ingestion::ordered`,
+//!   default true): those tables are read sequentially and their `row_idx` reproduces
+//!   line order. A table declared *un*ordered has **no `row_idx` column at all** —
+//!   its files are read concurrently, so no row order exists to record, and a column of
+//!   arbitrary labels would only invite `ORDER BY row_idx`. `events` is the one BIDS
+//!   table in that group: its rows are addressed by `onset`, and it has the highest row
+//!   count, so reading its files concurrently is worth having. Order events by `onset`
+//!   (events sharing an `onset` have no tiebreak — that information is not in the file
+//!   either, beyond its line order).
 //! - **Continuous recordings** — `physio`, `stim`, `physio_events`, `motion`: one
 //!   row per sample, column names from the sidecar `Columns` or the associated
 //!   `_channels.tsv`. Only *uncompressed* recordings (chiefly `motion`) are

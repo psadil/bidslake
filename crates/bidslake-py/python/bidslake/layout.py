@@ -424,12 +424,15 @@ class BidsLake:
         return meta
 
     def _events_for(self, dataset_id: str, file_path: str) -> DataFrame:
+        # Ordered by `onset`, which is what addresses an event. `events` is declared
+        # order-insensitive so its files are read concurrently and it has no `row_idx`;
+        # `onset` is the canonical order, and BIDS asks for events.tsv to be written in it.
         return self._query(
             "SELECT e.* FROM file_associations fa "
             "JOIN events e ON e.dataset_id = fa.dataset_id "
             "AND e.file_path = fa.target_file_path "
             "WHERE fa.dataset_id = ? AND fa.source_file_path = ? "
-            "AND fa.association_type = 'events' ORDER BY e.row_idx",
+            "AND fa.association_type = 'events' ORDER BY e.onset",
             [dataset_id, file_path],
         )
 

@@ -553,7 +553,6 @@ COLUMNS: dict[str, dict[str, str]] = {
     "events": {
         "dataset_id": "VARCHAR",
         "file_path": "VARCHAR",
-        "row_idx": "BIGINT",
         "onset": "DOUBLE",
         "duration": "DOUBLE",
         "HED": "VARCHAR",
@@ -2329,7 +2328,6 @@ class C:
     class events:
         dataset_id: pl.Expr = pl.col("dataset_id")
         file_path: pl.Expr = pl.col("file_path")
-        row_idx: pl.Expr = pl.col("row_idx")
         onset: pl.Expr = pl.col("onset")
         duration: pl.Expr = pl.col("duration")
         HED: pl.Expr = pl.col("HED")

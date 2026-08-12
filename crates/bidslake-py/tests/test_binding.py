@@ -325,7 +325,9 @@ def test_table_input_returns_an_ordered_slice(lake) -> None:
                 join=("sub", "task", "run"),
                 table="events",
                 columns=("onset", "duration"),
-                order_by="row_idx",
+                # `onset`, not `row_idx`: `events` is declared order-insensitive, so it
+                # carries no `row_idx` — its rows are addressed by onset.
+                order_by="onset",
             )
         },
     )
@@ -334,7 +336,7 @@ def test_table_input_returns_an_ordered_slice(lake) -> None:
     assert events.columns == ["onset", "duration"]
     assert events.height == 158
     onsets = events["onset"].to_list()
-    assert onsets == sorted(onsets), "row_idx order preserved"
+    assert onsets == sorted(onsets), "order_by applied"
 
 
 def test_join_outside_the_key_is_rejected(lake) -> None:

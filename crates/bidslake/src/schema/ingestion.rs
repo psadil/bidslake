@@ -196,11 +196,11 @@ impl Ingestion {
     /// rows are read sequentially). `events` is the one BIDS table declared order-insensitive
     /// (rows carry `onset`); see bids-standard/bids-2-devel#98.
     ///
-    /// This is what decides whether `row_idx` is a line number. Declaring a table unordered buys
-    /// a concurrent read of its files, and the price is that its `row_idx` becomes a unique key
-    /// in an arbitrary order — arbitrary per run, so two ingests of one dataset can disagree
-    /// about which row is which index. Only declare a table unordered when its rows are
-    /// addressed by their own content rather than by position.
+    /// This is what decides whether the table **has** a `row_idx` column at all
+    /// (`schema::dynamic`'s `PerRow` arm). Declaring a table unordered buys a concurrent read
+    /// of its files, which fixes no row order — so there is nothing to record, and recording an
+    /// arbitrary label anyway would only invite `ORDER BY row_idx`. Only declare a table
+    /// unordered when its rows are addressed by their own content rather than by position.
     pub fn ordered(&self, table: &str) -> bool {
         self.tables
             .get(table)

@@ -49,9 +49,11 @@ async fn compact_preserves_everything_and_reclaims_space() -> anyhow::Result<()>
         txn.commit()?;
 
         // Churn: delete a dataset's event rows and re-insert them, which is what a
-        // re-index does and what leaves free blocks behind.
+        // re-index does and what leaves free blocks behind. Deleted by file, the same shape
+        // the re-index `DELETE` uses (and `events` has no `row_idx` to slice by — it is
+        // declared order-insensitive).
         db.conn
-            .execute("DELETE FROM events WHERE row_idx % 2 = 0", [])?;
+            .execute("DELETE FROM events WHERE hash(file_path) % 2 = 0", [])?;
         db.conn.execute("CHECKPOINT", [])?;
     }
 

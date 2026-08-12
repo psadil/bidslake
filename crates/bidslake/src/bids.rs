@@ -2695,9 +2695,12 @@ fn build_tabular_insert_sql(
 
     selects.push(format!("{} AS file_path", sql_lit(rel_path)));
     // `row_number() OVER ()` numbers rows in physical read order; under the `parallel=false`
-    // read forced below for order-sensitive tables, that is file line order — which for a
-    // recording is sample order, so it is load-bearing rather than cosmetic.
-    selects.push("(row_number() OVER () - 1)::BIGINT AS row_idx".to_string());
+    // read forced below, that is file line order — which for a recording is sample order, so it
+    // is load-bearing rather than cosmetic. Gated on the same flag as the column's existence in
+    // the DDL: a table whose order is not load-bearing has no `row_idx` to write to.
+    if preserve_order {
+        selects.push("(row_number() OVER () - 1)::BIGINT AS row_idx".to_string());
+    }
 
     // Schema-declared data columns present in the file, TRY_CAST to their type.
     let mut known: HashSet<&str> = HashSet::new();
@@ -2842,13 +2845,17 @@ fn build_tabular_batch_select(
             selects.push("NULLIF(m.aux, '') AS participant_id".to_string());
         }
         RowIdentity::PerRow => {
-            let row_idx = if preserve_order {
-                "(raw.__grn - MIN(raw.__grn) OVER (PARTITION BY raw.__src))::BIGINT AS row_idx"
-            } else {
-                "(row_number() OVER (PARTITION BY raw.__src) - 1)::BIGINT AS row_idx"
-            };
             selects.push("m.rel AS file_path".to_string());
-            selects.push(row_idx.to_string());
+            // `row_idx` only when the table has the column, which is only when its order is
+            // load-bearing — the same condition, so the two cannot disagree. The global
+            // `__grn` minus each file's first gives the per-file line index; the sequential
+            // read below is what makes it line order rather than arrival order.
+            if preserve_order {
+                selects.push(
+                    "(raw.__grn - MIN(raw.__grn) OVER (PARTITION BY raw.__src))::BIGINT AS row_idx"
+                        .to_string(),
+                );
+            }
         }
     }
 
