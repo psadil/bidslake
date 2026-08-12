@@ -1892,6 +1892,14 @@ impl BidsParser {
                 .push(i);
         }
 
+        // Undeclared column names already recorded this run. They repeat verbatim for
+        // every file of a table — an fMRIPrep confounds table carries ~1,850 of them —
+        // and each was its own `INSERT OR IGNORE`, so 387 confounds files meant some
+        // 700,000 statements to record a couple of thousand distinct names. The names
+        // are a property of the table, not of the file, so recording each one once is
+        // the same catalog for a fraction of the work.
+        let mut recorded_undeclared: HashSet<(String, String)> = HashSet::new();
+
         timing::count(Counter::PendingTabular, pending.len() as u64);
         timing::count(Counter::TabularGroups, groups.len() as u64);
         timing::count_max(
@@ -1957,8 +1965,16 @@ impl BidsParser {
                     preserve_order,
                     store_undeclared,
                 );
-                if !store_undeclared
-                    && let Err(e) = db.record_undeclared_columns(&spec.table, &undeclared)
+                let fresh: Vec<String> = if store_undeclared {
+                    Vec::new()
+                } else {
+                    undeclared
+                        .into_iter()
+                        .filter(|n| recorded_undeclared.insert((spec.table.clone(), n.clone())))
+                        .collect()
+                };
+                if !fresh.is_empty()
+                    && let Err(e) = db.record_undeclared_columns(&spec.table, &fresh)
                 {
                     eprintln!(
                         "Warning: recording undeclared columns for {}: {e}",
@@ -2761,6 +2777,9 @@ fn build_tabular_batch_select(
     // Which of the file's own columns the identity consumes structurally rather than
     // storing as data.
     let mut structural: HashSet<&str> = HashSet::new();
+    // The file's own columns this select reads. Collected so the order-preserving
+    // subquery below can project just these — see the comment there.
+    let mut referenced: Vec<&str> = Vec::new();
 
     match spec.identity {
         // One row per data file, named by the table's own `filename` column, relative
@@ -2768,6 +2787,7 @@ fn build_tabular_batch_select(
         RowIdentity::PerFile => {
             structural.insert("filename");
             if present.contains("filename") {
+                referenced.push("filename");
                 selects.push(
                     "CASE WHEN m.aux = '' THEN raw.filename                      ELSE m.aux || '/' || raw.filename END AS file_path"
                         .to_string(),
@@ -2777,6 +2797,7 @@ fn build_tabular_batch_select(
         RowIdentity::PerEntity if spec.table == "participants" => {
             structural.insert("participant_id");
             if present.contains("participant_id") {
+                referenced.push("participant_id");
                 selects.push(
                     "CASE WHEN raw.participant_id LIKE 'sub-%' THEN raw.participant_id                      ELSE 'sub-' || raw.participant_id END AS participant_id"
                         .to_string(),
@@ -2786,6 +2807,7 @@ fn build_tabular_batch_select(
         RowIdentity::PerEntity => {
             structural.insert("session_id");
             if present.contains("session_id") {
+                referenced.push("session_id");
                 selects.push(
                     "CASE WHEN raw.session_id LIKE 'ses-%' THEN raw.session_id                      ELSE 'ses-' || raw.session_id END AS session_id"
                         .to_string(),
@@ -2818,6 +2840,7 @@ fn build_tabular_batch_select(
         if !present.contains(c.name.as_str()) {
             continue; // omitted → BY NAME leaves it NULL
         }
+        referenced.push(c.name.as_str());
         let q = quote_ident(&c.name);
         if needs_try_cast(&c.sql_type) {
             selects.push(format!("TRY_CAST(raw.{q} AS {}) AS {q}", c.sql_type));
@@ -2843,6 +2866,7 @@ fn build_tabular_batch_select(
             .map(|c| format!("{}, raw.{}", sql_lit(c), quote_ident(c)))
             .collect();
         selects.push(format!("json_object({}) AS other_data", pairs.join(", ")));
+        referenced.extend(extras.iter().copied());
     }
 
     let locals = files
@@ -2860,8 +2884,19 @@ fn build_tabular_batch_select(
     // global row number; the order-insensitive read drops both so DuckDB can read
     // files concurrently.
     let from = if preserve_order {
+        // Project inside the subquery rather than `SELECT *`. The window has no
+        // `PARTITION BY` — a global row number is the whole point — so the operator
+        // buffers its entire input, and `*` makes that every column of every row. For
+        // an fMRIPrep confounds table that is ~1,850 columns where the select reads
+        // about fifteen, and the difference is between a batch that streams and one
+        // that materializes gigabytes. The unordered branch needs no such care: with
+        // no subquery, DuckDB pushes the outer projection into `read_csv`.
+        let mut projected: Vec<String> = vec!["__src".to_string()];
+        projected.extend(referenced.iter().map(|c| quote_ident(c)));
+        projected.dedup();
+        let projected = projected.join(", ");
         format!(
-            "(SELECT *, row_number() OVER () AS __grn \
+            "(SELECT {projected}, row_number() OVER () AS __grn \
              FROM read_csv([{locals}], {HEADER_READ_OPTS}, filename='__src', parallel=false)) AS raw"
         )
     } else {
