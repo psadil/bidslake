@@ -68,6 +68,11 @@ fn write_fs_tree(root: &Path) {
     write(root, "sub-01_ses-2/stats/aseg.stats", ASEG_STATS.as_bytes());
     write(root, "sub-02/stats/aseg.stats", ASEG_STATS.as_bytes());
     write(root, "03/stats/aseg.stats", ASEG_STATS.as_bytes());
+    // Bookkeeping subtrees a real `recon-all` writes: recognized by the term map (so the
+    // validator does not call them unknown) but projecting no `datatype`, so no ingestion
+    // rule claims them and they earn no `scans` row.
+    write(root, "sub-02/scripts/recon-all.log", b"cmdline ...\n");
+    write(root, "sub-02/touch/wmsegment.touch", b"");
 }
 
 #[tokio::test]
@@ -418,5 +423,84 @@ async fn without_adapter_freesurfer_tables_absent() -> anyhow::Result<()> {
         |r| r.get(0),
     )?;
     assert_eq!(has, 0, "no freesurfer tables without an adapter");
+    Ok(())
+}
+
+/// A `recon-all` filename carries no BIDS entities — the subject is the *directory*. The
+/// implicit-participant insert used to be gated on filename entities, so `participants` came
+/// back empty for every adapter dataset even though `scans.sub` was populated, and any
+/// `participants` ⋈ `scans` join silently dropped the whole dataset. The subject a term map
+/// projects now registers the entity, exactly as a BIDS `sub-` prefix does.
+#[tokio::test]
+async fn projected_subjects_register_as_participants() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_fs_tree(dir.path());
+    let db = ingest_with_adapters(dir.path(), &["freesurfer"]).await?;
+
+    // All three subject-dir forms, normalized to the `sub-` spelling `participants` uses.
+    let mut got: Vec<String> = db
+        .conn
+        .prepare("SELECT participant_id FROM participants ORDER BY 1")?
+        .query_map([], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+    got.sort();
+    assert_eq!(got, vec!["sub-01", "sub-02", "sub-03"], "participants");
+
+    // The session dir form registers its sessions against the right subject.
+    let sessions: Vec<(String, String)> = db
+        .conn
+        .prepare("SELECT participant_id, session_id FROM sessions ORDER BY 1, 2")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+    assert_eq!(
+        sessions,
+        vec![
+            ("sub-01".to_string(), "ses-1".to_string()),
+            ("sub-01".to_string(), "ses-2".to_string()),
+        ],
+        "sessions"
+    );
+
+    // The point of the fix: the join is total. Every cataloged file resolves to a participant.
+    let orphans: i64 = db.conn.query_row(
+        "SELECT COUNT(*) FROM scans s \
+         WHERE s.sub IS NOT NULL \
+           AND NOT EXISTS (SELECT 1 FROM participants p \
+                           WHERE p.dataset_id = s.dataset_id \
+                             AND p.participant_id = 'sub-' || s.sub)",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(orphans, 0, "every scans.sub resolves to a participants row");
+    Ok(())
+}
+
+/// The bookkeeping subtrees are recognized without being cataloged: `scripts/` and `touch/`
+/// project no `datatype`, so no ingestion rule claims them (`bids.rs`: "recognized but no
+/// ingestion rule -> leave it alone"). Recognition is what keeps `bids-validator-rs` from
+/// reporting them as unknown; it is not a licence to fill `scans` with logs.
+#[tokio::test]
+async fn recognized_bookkeeping_files_are_not_cataloged() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_fs_tree(dir.path());
+    let db = ingest_with_adapters(dir.path(), &["freesurfer"]).await?;
+
+    for pattern in ["%scripts/%", "%touch/%"] {
+        let n: i64 = db.conn.query_row(
+            "SELECT COUNT(*) FROM scans WHERE file_path LIKE ?",
+            [pattern],
+            |r| r.get(0),
+        )?;
+        assert_eq!(n, 0, "{pattern} must not reach scans");
+    }
+
+    // ...but the subject they belong to is still registered, so a subject whose only files are
+    // bookkeeping does not vanish from `participants`.
+    let n: i64 = db.conn.query_row(
+        "SELECT COUNT(*) FROM participants WHERE participant_id = 'sub-02'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(n, 1);
     Ok(())
 }

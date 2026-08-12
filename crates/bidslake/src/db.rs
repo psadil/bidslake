@@ -4,7 +4,7 @@
 //! ingestion pipeline uses. Row shaping and SQL generation for these methods live
 //! in [`crate::schema`]; this module just routes calls to it and holds the two
 //! hand-written insert paths ([`BidsDb::insert_diffusion`],
-//! [`BidsDb::insert_file_association`]) for the static tables.
+//! [`BidsDb::append_file_associations`]) for the static tables.
 //!
 //! Note that the tabular ingest in [`crate::bids`] (and the driver in `main`) also
 //! execute their own hand-built SQL directly against the public [`BidsDb::conn`] —
@@ -409,15 +409,18 @@ impl BidsDb {
         Ok(())
     }
 
-    /// Bulk-insert many rows into a schema-generated table via the DuckDB
-    /// **Appender**. This bypasses SQL planning entirely — crucial for the tables
-    /// that carry the generated (virtual) BIDS-concept columns (`scans`,
-    /// `sidecars`): a row-by-row `INSERT` re-parses all ~40 of those column regexes
-    /// per statement (~10 ms/row), whereas the Appender writes the physical columns
-    /// directly (measured ~300× faster). Each row's values are shaped exactly like
-    /// [`Schema::insert`] via [`Schema::row_values`], so the result is identical to
-    /// inserting them one at a time. The caller is responsible for primary-key
-    /// dedup (the Appender does not run the insert-if-not-exists guard).
+    /// Bulk-insert many rows into a schema-generated table via the DuckDB **Appender**,
+    /// used for the two widest tables (`scans`, `sidecars`).
+    ///
+    /// The Appender writes physical columns directly, skipping both SQL planning and — the
+    /// part that actually scales with the table — the `WHERE NOT EXISTS` primary-key probe
+    /// that [`Schema::insert`] wraps every row in. That probe costs more the more rows the
+    /// table already holds, so it is the row-at-a-time path's real per-row cost, and the
+    /// price of dropping it is that **the caller must dedup**: the Appender enforces no
+    /// insert-if-not-exists guard (see the `seen` set in `bids::BidsParser`).
+    ///
+    /// Each row's values are shaped exactly like [`Schema::insert`] via
+    /// [`Schema::row_values`], so the result is identical to inserting them one at a time.
     pub fn append_rows(&self, schema: &Schema, table_name: &str, rows: &[Value]) -> Result<()> {
         if rows.is_empty() {
             return Ok(());

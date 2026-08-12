@@ -14,14 +14,14 @@ as issues. Roughly ordered by value.
   rewriting the two manual `duckdb::Error::ToSqlConversionFailure` constructions in
   `crates/bidslake/src/schema/dynamic.rs`.
 
-- [ ] **First-writer-wins rows under the `WHERE NOT EXISTS` guard** (`eh-04` note). Whichever of
-  the implicit participant/session insert vs the `participants.tsv`/`sessions.tsv` ingest runs
-  first wins — so a bare implicit row can shadow the richer tabular row. `dataset_description` now
-  has the same shape: the synthesized `{dataset_id, root_uri}` row for adapter datasets is ordered
-  *after* the walk so it can never shadow a real `dataset_description.json` **within** a run, but
-  across runs into one database the table is still first-writer-wins on `dataset_id` (no upsert),
-  so re-ingesting a dataset whose description was added later will not refresh it. A real, distinct
-  correctness concern worth its own investigation (an upsert/`ON CONFLICT DO UPDATE` path).
+- [ ] **First-writer-wins `dataset_description` rows** (`eh-04` note). The synthesized
+  `{dataset_id, root_uri}` row for adapter datasets is ordered *after* the walk so it can never
+  shadow a real `dataset_description.json` **within** a run, but across runs into one database the
+  table is still first-writer-wins on `dataset_id` (no upsert), so re-ingesting a dataset whose
+  description was added later will not refresh it. Worth its own investigation (an
+  upsert/`ON CONFLICT DO UPDATE` path). The `participants`/`sessions`/`scans` half of this item is
+  resolved: those tables are written by the batched tabular flush, which runs after the walk's stub
+  inserts and uses `INSERT OR REPLACE`, so the file's row deterministically wins.
 
 - [ ] **Recording bare-table const consolidation** (`pat-02`). `crates/bidslake/src/schema/dynamic.rs`'s
   hardcoded `["motion", "stim"]` bare-table list could fold into the shared recording descriptor
@@ -32,10 +32,47 @@ as issues. Roughly ordered by value.
   and again via `build_file_context`. Fixing it re-introduces hand-assembly or needs a
   precomputed-inputs `build_file_context` variant, to save three cheap in-memory calls.
 
+- [ ] **`dataset_id` conflates the catalog partition with the ingest root.** The largest open
+  item here. A dataset has exactly one `root_uri`, stored on its `dataset_description` row, which
+  is why a second root under one `dataset_id` is refused. But subject-sharded pipeline output —
+  the normal way fMRIPrep and FreeSurfer are run at scale — *is* one logical dataset with one root
+  per subject, so it has to be split into one `dataset_id` per shard. Everything dataset-scoped
+  then repeats per shard: `dataset_description`, `dataset_links`, `dataset_identity`, and
+  `participants` (the same person once per shard, so `participants` stops being a list of
+  participants). `shares_source` also fires between shards of the same pipeline, burying the real
+  fMRIPrep↔FreeSurfer relation in ADR 0003's `dataset_relations`. It is not recoverable in the
+  query layer: nothing records that two shards belong to one dataset — that lives only in the
+  `dataset_id` strings the user chose — so a consumer cannot dedupe without out-of-band knowledge.
+  The refusal is not the bug; the per-dataset `root_uri` is. Likely fix: a
+  `dataset_roots(dataset_id, root_uri, root_id)` table plus a `root_id` on `scans`, with
+  resolution joining through it — which touches `resolve()`/`BidsFile.path` in `bidslake-py`
+  (`paths.py`) and the `root_uri` contract in `schema.rs`. Resolve alongside "Rebuild the file
+  registry" below; they share the root cause.
+
+- [ ] **Enforced referential integrity for the concept columns?** `scans.sub`/`ses` cannot be
+  foreign keys as built: DuckDB refuses a foreign key on a generated column, and these are
+  `GENERATED ALWAYS AS (…) VIRTUAL`. Making them keys would mean materializing the concepts —
+  forfeiting the property that a term-map fix changes existing answers with no re-index — plus
+  reconciling `scans.sub` (`01`) against `participants.participant_id` (`sub-01`), and accepting
+  that a file whose subject is absent becomes a hard ingest error rather than a queryable fact.
+  Currently the invariant is asserted by test instead (`test_adapter_freesurfer.rs`:
+  every `scans.sub` resolves to a `participants` row). Revisit with the `dataset_id` item above,
+  since both hinge on the same remodelling.
+
 - [ ] **CI enhancements**. The initial `.github/workflows/ci.yml` covers fmt/clippy/test, the
   Python suite, and the codegen drift guard on a single Linux runner. Later: an OS/Python/Rust
   matrix, benchmark-regression tracking (`cargo bench` in `bidslake` and `bids-validator-rs`), a
   scheduled run of the `#[ignore]` whole-corpus smoke test, and code coverage.
+
+- [ ] **The benchmarks cannot see the tabular wins.** `benches/ingest.rs` runs
+  `ds001`/`ds002`/`ds114`/`ds108`, none of which has a `scans.tsv`, a `sessions.tsv`, or a header
+  wider than ~11 columns — so nothing in the repo would notice the batched tabular path
+  regressing. Cheapest first steps: add the already-vendored `7t_trt` and `synthetic` (the only
+  corpus trees with `scans.tsv`, `sessions.tsv` and a ~95-column header); wire
+  `tools/gen-synthetic-bids.py` — a scale generator referenced nowhere outside its own docstring —
+  into a wide-confounds case; and expose a `timing::snapshot()` so counter assertions
+  (`tabular_groups == 1`, undeclared statements == distinct names) can fail in the existing
+  `cargo test` CI rather than needing criterion baselines.
 
 ## Schema augmentation (overlays)
 

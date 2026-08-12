@@ -158,10 +158,15 @@ pub async fn validate(
     // Reported locations for directory pseudo-files (e.g. `*.ds`, `*.ome.zarr`) carry a
     // trailing slash, matching the TS validator. Internal paths stay slash-free so path
     // matching (scans, associations) is unaffected.
+    //
+    // Decided from the name, not by `stat`ing the path: `is_pseudo_file` is the same rule the
+    // walk used to route the directory into `files` in the first place, so asking the
+    // filesystem again would be one uncached syscall per file in the dataset — serialized,
+    // since this is outside the concurrent stream above — to recover something already known.
     let pseudo_dir_paths: HashSet<String> = dataset_ctx
         .tree
         .walk_files()
-        .filter(|f| f.absolute_path.is_dir())
+        .filter(|f| bids_core::filetree::is_pseudo_file(&f.name, &pseudo_exts))
         .map(|f| f.path.clone())
         .collect();
     if !pseudo_dir_paths.is_empty() {

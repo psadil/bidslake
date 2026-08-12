@@ -24,7 +24,7 @@
 //! recordings (`*.tsv.gz`) are left on disk for now as a size policy, but are still
 //! recorded; a file the schema does not describe is skipped with a warning. The
 //! `tabular_files` table records every tabular file with a `status`
-//! (`ingested`/`on_disk`/`skipped`) so nothing is dropped unnoticed. See
+//! (`ingested`/`on_disk`/`skipped`/`failed`) so nothing is dropped unnoticed. See
 //! [`tabular`] for the routing model.
 //!
 //! # Conventions
@@ -86,8 +86,9 @@
 //! - **`tabular_files`** — provenance: one row per tabular file the walk saw,
 //!   `(dataset_id, file_path, table_name, n_rows, status)`. `status` is
 //!   `ingested` (rows in `table_name`), `on_disk` (a compressed recording left on
-//!   disk), or `skipped` (a suffix the schema does not describe). Backs the
-//!   tabular-data invariant above.
+//!   disk), `skipped` (a suffix the schema does not describe), or `failed` (the batch
+//!   insert errored, so this run stored no rows for it). Backs the tabular-data
+//!   invariant above.
 //! - **`diffusion`** — one row per diffusion volume, parsed from the sibling
 //!   `.bval`/`.bvec` files: scalar `bval`, `bvec_x/_y/_z`, keyed by
 //!   `(dataset_id, file_path, volume_idx)`.
@@ -201,12 +202,11 @@ CREATE TABLE IF NOT EXISTS tabular_files (
 // authoritative per-file column set remains the file's own header, reachable via
 // `tabular_files.file_path`.
 //
-// Deliberately keyed by name rather than by file or by header signature. Measured on
-// real fMRIPrep output, 48 confounds files produce 38 *distinct* headers (the aCompCor
-// component count varies per run) at ~27.7 KB each, so a per-header manifest projects
-// to ~8.3 GB at 100k participants. The names themselves are drawn from one shared
-// space: 1,864 distinct across that whole corpus, 27.3 KB total, and bounded by the
-// pipeline's vocabulary rather than by dataset size.
+// Deliberately keyed by name rather than by file or by header signature. Real fMRIPrep
+// output does not share headers between files — the aCompCor component count varies per
+// run — so a per-header manifest grows with the study, at about one header per file. The
+// names themselves are drawn from one shared space, bounded by the pipeline's vocabulary
+// rather than by dataset size (see docs/adr/0004).
 pub const CREATE_TABULAR_UNDECLARED_COLUMNS_TABLE: &str = "
 CREATE TABLE IF NOT EXISTS tabular_undeclared_columns (
     table_name TEXT,

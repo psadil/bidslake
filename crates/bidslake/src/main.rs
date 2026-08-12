@@ -768,13 +768,15 @@ async fn run_indexer(
 
     let db = BidsDb::open_with_temp_dir(db_path, temp_dir.as_deref())?;
 
-    // Wrap the whole run — DDL included — in one transaction. DuckDB otherwise
-    // autocommits every statement, fsyncing per statement on a file-backed
-    // database: the single biggest cost for real (file) ingests, and the reason
-    // `create_tables` + the two `stamp_*` calls (one of which writes the whole
-    // effective schema) are inside the transaction rather than ahead of it.
-    // Dropping `txn` without committing (i.e. on an error `?` below) rolls the
-    // whole run back, so a failed ingest no longer leaves a half-created catalog.
+    // Wrap the whole run — DDL included — in one transaction, for two reasons.
+    //
+    // Atomicity is the load-bearing one: dropping `txn` without committing (on any `?` below)
+    // rolls the whole run back, so a failed ingest leaves no half-created catalog behind.
+    // That is also why `create_tables` and the two `stamp_*` calls are inside it rather than
+    // ahead of it — the schema stamps describe this run, so they should not survive it.
+    //
+    // It also stops DuckDB autocommitting, and so fsyncing, once per statement on a
+    // file-backed database.
     let txn = db.conn.unchecked_transaction()?;
 
     {

@@ -114,8 +114,8 @@ fn eval_check_rule(
                     // An unevaluable check silently disables its rule. Surface it: a schema
                     // expression this evaluator cannot handle is a bug in the evaluator, not a
                     // property of the dataset. `every_schema_expression_evaluates`
-                    // (tests/expression_conformance.rs) asserts we never reach here for the
-                    // bundled schema.
+                    // (crates/bids-schema/tests/expression_conformance.rs) asserts we never
+                    // reach here for the bundled schema.
                     eprintln!("warning: {rule_path}: could not evaluate check `{check}`: {e}");
                     continue;
                 }

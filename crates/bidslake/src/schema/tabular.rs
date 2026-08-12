@@ -257,11 +257,6 @@ impl Tabular {
         }
     }
 
-    #[allow(dead_code)] // used by tests; ingest routes via `route`
-    pub fn rules(&self) -> &[TabularRule] {
-        &self.rules
-    }
-
     pub fn tables(&self) -> &[TableSpec] {
         &self.tables
     }

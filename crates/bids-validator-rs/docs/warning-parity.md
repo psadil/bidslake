@@ -213,10 +213,12 @@ schema's — is open upstream:
 
 ## The expression language
 
-The evaluator is tested against the schema's **77 normative `meta.expression_tests` cases** —
-`build.rs` generates one `#[test]` per case into `OUT_DIR/expression_tests.rs`, and
-`tests/expression_conformance.rs` includes them. Because they come from the vendored schema, they
-track whichever version the build pins. The same test also asserts that **every** `selectors`/`checks`
+The evaluator is tested against the schema's **77 normative `meta.expression_tests` cases**. These
+live with the evaluator in the shared schema crate: `crates/bids-schema/build.rs` generates one
+`#[test]` per case into `OUT_DIR/expression_tests.rs`, and
+`crates/bids-schema/tests/expression_conformance.rs` includes them. Because they come from the
+vendored schema, they track whichever version the build pins. The same test also asserts that
+**every** `selectors`/`checks`
 expression in the bundled schema evaluates without error (an unevaluable expression would otherwise
 silently disable its rule). All pass.
 

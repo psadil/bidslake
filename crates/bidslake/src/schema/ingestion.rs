@@ -234,6 +234,11 @@ impl Ingestion {
 
     /// The source keys `table` never stores (see [`TablePolicy::ignore_keys`]). Empty
     /// for every table by default, so the check is one `is_empty` on the hot path.
+    /// Source keys `table` never stores.
+    ///
+    /// Consulted on the JSON parse path only, which means `sidecars` in practice — the
+    /// metaschema description says so, `ignore_keys_is_honoured_on_sidecars_only` below pins the
+    /// two together, and `tests/test_ignore_keys.rs` asserts the inertness end to end.
     pub fn ignore_keys(&self, table: &str) -> &[String] {
         self.tables
             .get(table)
@@ -246,6 +251,18 @@ impl Ingestion {
     ///
     /// Returns early for a table with no policy at all — the overwhelmingly common
     /// case — so a plain BIDS ingest evaluates no selectors.
+    /// Whether [`Self::undeclared_for`] will actually consult its `FileContext` for `table`.
+    ///
+    /// It only does so when the table declares `undeclaredWhen`, which no bundled fragment but
+    /// fMRIPrep's does. Callers on a per-row path can check this first and skip building a
+    /// context — parsing the filename, locating the datatype directory and allocating the
+    /// path — that the answer does not depend on.
+    pub fn undeclared_needs_context(&self, table: &str) -> bool {
+        self.tables
+            .get(table)
+            .is_some_and(|p| !p.undeclared_when.is_empty())
+    }
+
     pub fn undeclared_for(&self, table: &str, ctx: &FileContext) -> Undeclared {
         let Some(policy) = self.tables.get(table) else {
             return Undeclared::Store;
@@ -445,5 +462,38 @@ mod tests {
             };
             assert_eq!(ing.undeclared_for("t", &ctx), want, "suffix {suffix}");
         }
+    }
+
+    /// `ignoreKeys` sits on the shared table policy, so a fragment may name it on any table —
+    /// but only the JSON parse path consults it, and `sidecars` is the table fed from parsed
+    /// JSON. That asymmetry is stated in the metaschema description; this pins the two together
+    /// so the description cannot quietly become false.
+    #[test]
+    fn ignore_keys_is_honoured_on_sidecars_only() {
+        let fragment = r#"{
+          "IngestionSchemaVersion": "0.1.0",
+          "tables": {
+            "sidecars": { "ignoreKeys": ["global", "time"] },
+            "events":   { "ignoreKeys": ["onset"] }
+          }
+        }"#;
+        let ing = Ingestion::from_sources(&[fragment]).expect("valid fragment");
+
+        // Both parse and are readable — the policy is generic, as the schema allows. That a
+        // fragment naming a tabular table is *inert* is asserted end to end in
+        // `tests/test_ignore_keys.rs`; here we only pin that the metaschema says so.
+        assert_eq!(ing.ignore_keys("sidecars"), ["global", "time"]);
+        assert_eq!(ing.ignore_keys("events"), ["onset"]);
+
+        // The metaschema must document the restriction.
+        let meta: serde_json::Value =
+            serde_json::from_str(bids_schema::INGESTION_METASCHEMA_JSON).unwrap();
+        let desc = meta["$defs"]["tablePolicy"]["properties"]["ignoreKeys"]["description"]
+            .as_str()
+            .expect("ignoreKeys description");
+        assert!(
+            desc.contains("`sidecars` table only"),
+            "metaschema must state where ignoreKeys applies: {desc}"
+        );
     }
 }

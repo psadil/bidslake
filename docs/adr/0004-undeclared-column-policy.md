@@ -29,8 +29,9 @@ re-serialized once per volume, where the source TSV writes its header once. Duck
 stores the column `Uncompressed`, because at 56 KB every value is an overflow string
 and dictionary/FSST encoding never applies.
 
-At ~24 MB of database per confounds file, a 100k-participant study projects to
-**~9.9 TB from confounds alone**.
+At ~24 MB of database per confounds file, the projection to a large study is the whole
+problem: it scales linearly in confounds files, which is participants × sessions × runs, so
+a real multi-session study reaches terabytes from confounds alone.
 
 ### Encoding is not the fix
 
@@ -43,7 +44,9 @@ Four alternatives were measured on the real table (21,332 rows):
 | long/EAV `(file, row, name, value)` | ~350 MB | 3.3× |
 | all ~1,800 as real `DOUBLE` columns | ~280 MB | 4.1× |
 
-They cluster because 38M doubles is ~300 MB of incompressible float data. **Encoding
+They cluster around what 38M float values cost to store — 7.0–7.4 bytes per value across
+the three alternatives, against 8 bytes raw, so DuckDB is compressing them a little but
+there is no encoding that makes the data small. **Encoding
 buys a constant factor; it does not change the asymptote.** Only declining to store the
 values does — and that is a policy question, not a representation question.
 
@@ -74,14 +77,14 @@ Rust producer follows with no code of its own.
 one line of I/O away. Declared-ness becomes the storage dial rather than a wall: a user
 who wants `a_comp_cor_00` declares it in the overlay and pays 8 B/row.
 
-**3. Discovery via a global name dictionary, not a per-file manifest.** This is the
-part that had to be measured rather than assumed. Keying a manifest by header signature
-looked free — until the data showed 48 confounds files producing **38 distinct
-headers** (the aCompCor component count varies per run) at ~27.7 KB each, which
-projects to ~8.3 GB at 100k participants. The *names*, by contrast, come from one shared
-space: 1,864 distinct across the entire corpus, 27.3 KB total, bounded by the pipeline's
-vocabulary rather than by dataset size. So `tabular_undeclared_columns` records
-`(table_name, name)` and nothing per-file.
+**3. Discovery via a global name dictionary, not a per-file manifest.** This is the part that
+had to be measured rather than assumed. Keying a manifest by header signature looked free —
+until the data showed that confounds headers are *not* shared between files: 48 files produced
+**38 distinct headers**, because the aCompCor component count varies per run. So a per-header
+manifest grows with the study, at roughly the size of one header per file. The *names*, by
+contrast, come from one shared space bounded by the pipeline's vocabulary rather than by
+dataset size — a few thousand distinct names, tens of kilobytes, however many files there are.
+So `tabular_undeclared_columns` records `(table_name, name)` and nothing per-file.
 
 **4. Two forms, because `sidecars` is one table for every file in the catalog.**
 `undeclared` is table-wide and static, so it can drive DDL. `undeclaredWhen` is
@@ -104,17 +107,18 @@ the wrong lever — a *validation* assertion. Setting it would make
 Measured end to end with the release binary, on a dataset reconstructed from the
 profiled catalog (8 confounds files, 1,798 columns × 450 rows, real 2,151-key sidecars):
 
-    overlay only          207.26 MB   829 blocks   10.86 s
-    --adapter fmriprep      8.76 MB    35 blocks   10.14 s
+    overlay only          207.26 MB   829 blocks
+    --adapter fmriprep      8.76 MB    35 blocks
 
-**23.7× smaller, and ~7% faster** — the per-row `json_object` over ~1,785 columns costs
-more than the CSV parse it replaces, so there is no speed/size trade to make. At 16
-subjects (64 files, 28,800 rows) the file is still 8.7 MB, i.e. dominated by DuckDB's
-256 KB per-segment minimum and the embedded schema blob rather than by data.
+**23.7× smaller.** There is no size/speed trade to make either: the policy only shrinks the
+SELECT list, so it does no more work than storing the columns would. At 16 subjects (64 files,
+28,800 rows) the file is still 8.7 MB, i.e. dominated by DuckDB's 256 KB per-segment minimum
+and the embedded schema blob rather than by data.
 
-Batching is untouched: the header group key, the single DELETE, and the single
-`INSERT … BY NAME` are unchanged — only the SELECT list shrinks, so ADR 0002 §5's
-"Lever 1b" risk is not engaged.
+Batching is unaffected in shape — the header group key, the pre-`DELETE` and the single
+`INSERT … BY NAME` all still apply, so ADR 0002 §5's "Lever 1b" risk is not engaged. (The
+batch has since gained per-group windowing, a `__src` source column and a declared column
+list; none of that interacts with which columns the SELECT projects.)
 
 A consequence worth naming: `BidsFile.metadata` for a file under `undeclared: catalog`
 now carries only declared fields. Reading the rest means reading the file, which

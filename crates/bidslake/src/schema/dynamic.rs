@@ -87,9 +87,9 @@ pub struct Schema {
     /// missing from its own column *and* counted as undeclared. The surviving column
     /// absorbs both, as DuckDB does with the identifier itself.
     ///
-    /// Derived, never set directly — see [`Schema::set_table_columns`]. Precomputed
-    /// because the alternative is rebuilding a 449-entry set per `sidecars` row on the
-    /// bulk-insert path.
+    /// Derived, never set directly — see [`Schema::set_table_columns`]. Precomputed because
+    /// the alternative is rebuilding the whole set — one entry per column, and `sidecars` has
+    /// a column per BIDS metadata field — for every row on the bulk-insert path.
     table_keys_lower: HashMap<String, std::collections::HashSet<String>>,
     /// The same lowercased `json_key`s, kept in column order rather than as a set, so
     /// the case-insensitive column lookup in [`Schema::row_values`] can fold the
@@ -610,11 +610,11 @@ impl Schema {
     /// almost none of them, so without this the projection a term map computed is
     /// discarded and the row reads as `seg`/`datatype`/`suffix` NULL.
     ///
-    /// Only the projectable set is wrapped: every wrapped column pays the COALESCE on
-    /// read, and wrapping all of them measured ~7.6% on the `SELECT *`-plus-filter
-    /// shape `lake.get()` issues, against ~1.8% for the handful a term map can supply.
-    /// With no term maps configured the set is empty and the DDL is byte-identical to
-    /// a plain BIDS catalog's — so BIDS-only ingests pay nothing at all.
+    /// Only the projectable set is wrapped, because every wrapped column pays its COALESCE on
+    /// every read — so the set is kept to the concepts some configured term map can actually
+    /// supply rather than every concept column. With no term maps configured the set is empty
+    /// and the DDL is byte-identical to a plain BIDS catalog's, so BIDS-only ingests pay
+    /// nothing at all.
     fn project_expr(&self, name: &str, expr: &str, project: bool) -> String {
         if !project || !self.projected_concepts.contains(name) {
             return expr.to_string();
@@ -975,16 +975,15 @@ impl Schema {
         let schema_keys = self.table_keys_lower.get(table_name);
         let json_keys_lower = self.table_json_keys_lower.get(table_name);
 
-        // The row's keys, folded to lowercase once.
+        // The row's keys, folded to lowercase once, so the last-resort column match below is
+        // a hash lookup. That match runs for every column the row does not carry — for a
+        // table as wide as `sidecars` that is nearly all of them — so folding on the spot
+        // meant rescanning and re-folding the whole row once per column, which made this the
+        // dominant cost of shaping a sidecar row.
         //
-        // Two case-insensitive tests below need this form: the `other_data` overflow
-        // check, and the last-resort column match. Both used to fold on the spot, and
-        // the second ran for every column the row does not carry — which for a wide
-        // table is nearly all of them, each time scanning and re-folding every key in
-        // the row. Against the 449-column `sidecars` table and a ~100-key sidecar that
-        // is some 45,000 fresh `String`s per row; profiling a raw-BIDS ingest put it at
-        // over half of the entire inheritance phase. Folding the row's side once turns
-        // that into one hash lookup per column.
+        // This index is lossy by construction: two keys differing only in case collapse to
+        // one entry. That is harmless for a lookup keyed on a column name, but it is why the
+        // `other_data` overflow below iterates the row itself instead.
         let obj = data.as_object();
         let mut lower_keys: HashMap<String, (&String, &Value)> = HashMap::new();
         if let Some(obj) = obj {
@@ -998,24 +997,28 @@ impl Schema {
         for (idx, (col_name, col_type, json_key)) in fields.iter().enumerate() {
             // Special handling for other_data column
             if col_name == "other_data" {
-                if obj.is_some() {
+                if let Some(obj) = obj {
                     // Only the keys with no dedicated column reach the overflow.
-                    // Iterated over the folded index rather than the row: order is
-                    // immaterial because `serde_json::Map` is a `BTreeMap` here, so the
-                    // serialized overflow is key-sorted either way.
-                    // Borrowed, not cloned: serializing a map of references produces
-                    // the same JSON without copying the values, and sidecar values are
-                    // not always small — a single real `_bold.json` can run to
-                    // megabytes. `BTreeMap<&str, _>` orders by key exactly as
-                    // `serde_json::Map` (a `BTreeMap<String, _>` here) does, so the
-                    // output is byte-identical.
-                    let overflow: std::collections::BTreeMap<&str, &Value> = lower_keys
-                        .iter()
-                        .filter(|(lower, _)| {
-                            !schema_keys.is_some_and(|keys| keys.contains(lower.as_str()))
-                        })
-                        .map(|(_, (key, value))| (key.as_str(), *value))
-                        .collect();
+                    //
+                    // Iterated over the row, not over `lower_keys`: that index is keyed on the
+                    // folded spelling, so a row carrying two undeclared keys that differ only
+                    // in case keeps one of them and drops the other's value on the floor —
+                    // silently, and against this module's promise that nothing is dropped. The
+                    // membership test folds with `to_lowercase`, the same rule `declares` and
+                    // `set_table_columns` use, and runs once per row over the row's own keys
+                    // rather than once per column — which is the cost `lower_keys` removed.
+                    //
+                    // Borrowed, not cloned: serializing a map of references produces the same
+                    // JSON without copying the values, and sidecar values are not always small.
+                    // `BTreeMap<&str, _>` orders by key exactly as `serde_json::Map` (a
+                    // `BTreeMap<String, _>` here) does, so the output is byte-identical.
+                    let mut overflow: std::collections::BTreeMap<&str, &Value> =
+                        std::collections::BTreeMap::new();
+                    for (key, value) in obj {
+                        if !schema_keys.is_some_and(|keys| keys.contains(&key.to_lowercase())) {
+                            overflow.insert(key.as_str(), value);
+                        }
+                    }
 
                     if !overflow.is_empty() {
                         let json_str = serde_json::to_string(&overflow).unwrap();

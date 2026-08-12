@@ -105,3 +105,47 @@ async fn the_same_keys_are_kept_without_the_policy() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+/// `ignoreKeys` lives on the shared table policy, so a fragment may name it on any table — but
+/// it acts as the JSON is parsed, and `sidecars` is the only table fed from parsed JSON. Naming
+/// it on a tabular table therefore validates, loads, and does nothing. That is documented in the
+/// metaschema; assert it, so the documented behaviour and the real behaviour cannot part company
+/// (and so that making it *work* there would fail here loudly rather than pass unnoticed).
+#[tokio::test]
+async fn ignore_keys_on_a_tabular_table_is_inert() -> anyhow::Result<()> {
+    const ON_EVENTS: &str = r#"{
+      "IngestionSchemaVersion": "0.1.0",
+      "tables": { "events": { "ignoreKeys": ["trial_type"] } }
+    }"#;
+
+    let dir = tempfile::tempdir()?;
+    let root = dir.path();
+    fs::create_dir_all(root.join("sub-01/func"))?;
+    fs::write(
+        root.join("dataset_description.json"),
+        r#"{"Name": "inert", "BIDSVersion": "1.8.0"}"#,
+    )?;
+    fs::write(
+        root.join("sub-01/func/sub-01_task-rest_bold.nii.gz"),
+        b"nii",
+    )?;
+    fs::write(
+        root.join("sub-01/func/sub-01_task-rest_events.tsv"),
+        "onset\tduration\ttrial_type\n0.0\t1.0\tgo\n2.0\t1.0\tstop\n",
+    )?;
+
+    let db = ingest_with(root, ON_EVENTS).await?;
+
+    // The named column is a *declared* events column, and it is stored regardless.
+    let kept: i64 = db.conn.query_row(
+        "SELECT count(*) FROM events WHERE trial_type IS NOT NULL",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(
+        kept, 2,
+        "ignoreKeys on a tabular table must not drop its columns — the column-level dial \
+         there is `undeclared`"
+    );
+    Ok(())
+}

@@ -111,7 +111,7 @@
           "items": {
             "type": "string"
           },
-          "description": "Source keys this table never stores, by name \u2014 the key-level counterpart of the `ignore` disposition. Dropped before anything reads the metadata, so an ignored key costs nothing to merge, store, or hold in memory, and it applies whether or not the key has a declared column. For a converter that attaches something large and non-BIDS to otherwise ordinary metadata (dcmstack's DcmMeta writes per-slice DICOM dumps under `global` and `time`, megabytes per sidecar), `undeclared: catalog` is the wrong shape: it would discard every other custom field along with it."
+          "description": "Source keys this table never stores, by name \u2014 the key-level counterpart of the `ignore` disposition. Dropped as the JSON is parsed, before anything reads the metadata, so an ignored key costs nothing to merge, store, or hold in memory, and it applies whether or not the key has a declared column. For a converter that attaches something large and non-BIDS to otherwise ordinary metadata (dcmstack's DcmMeta writes per-slice DICOM dumps under `global` and `time`, megabytes per sidecar), `undeclared: catalog` is the wrong shape: it would discard every other custom field along with it. Honoured on the `sidecars` table only: it acts at the JSON parse, and `sidecars` is the table fed from parsed JSON. Naming it on another table validates but does nothing \u2014 for a tabular table, the column-level dial is `undeclared`."
         }
       },
       "additionalProperties": false

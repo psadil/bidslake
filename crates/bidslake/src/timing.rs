@@ -7,10 +7,18 @@
 //! round-trip latency, [`Phase::Inherit`] and [`Phase::Associations`] by CPU, and
 //! [`Phase::Commit`] by how the database file is stored.
 //!
-//! The counters exist for the same reason. On a latency-bound filesystem wall time is
-//! roughly `operations × round-trip`, so a count of directories, files, and body reads
-//! turns a measured RTT into a prediction — and turns a regression that adds an
-//! operation per file into something visible rather than merely slow.
+//! The counters exist for the same reason: on a latency-bound filesystem, wall time tracks
+//! the number of round trips, so counting operations turns a measured RTT into a prediction —
+//! and turns a regression that adds an operation per file into something visible rather than
+//! merely slow. The walk is serial, so its directory reads cost about `dirs × RTT`; the body
+//! and header reads are issued with bounded concurrency, so they cost about
+//! `ceil((bodies + heads) / CONCURRENCY) × RTT` (see `CONCURRENCY` in [`crate::bids`]) —
+//! counting them as serial over-predicts by that factor.
+//!
+//! Two gaps worth knowing. [`Counter::Dirs`] is only emitted when the backend exposes a file
+//! tree, which the S3 client does not — so the directory term is missing on the one backend
+//! that is always latency-bound. And nothing counts `stat` calls, which is the other
+//! per-file round trip a regression could reintroduce.
 //!
 //! State is process-global. The alternative — threading a handle through `parse` and
 //! its callees — is what the previous five-`Option<Duration>`-parameter reporter did,
@@ -26,7 +34,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 /// A phase of an index run. Declaration order is reporting order: phases in the order
-/// they run, each followed by its own sub-slices (see [`Phase::is_nested`]).
+/// they run, each followed by its own sub-slices (see `Phase::is_nested`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
     /// Parsing the BIDS schema and merging overlays/adapters.
@@ -53,7 +61,10 @@ pub enum Phase {
     Inherit,
     /// The slice of `Inherit` spent merging sidecars and shaping rows in Rust.
     InheritMerge,
-    /// The slice of `Inherit` spent handing those rows to DuckDB.
+    /// The slice of `Inherit` spent in the `sidecars` append. Note this brackets
+    /// `BidsDb::append_rows`, which shapes each row's values in Rust before handing it to the
+    /// Appender — so it is not purely DuckDB's write time, and a change to row shaping shows
+    /// up here rather than in `InheritMerge`.
     InheritAppend,
     /// Ingesting the deferred headerless recordings.
     Flush,
@@ -306,5 +317,77 @@ pub fn report() {
             files as f64 / wall.as_secs_f64(),
             wall.as_secs_f64(),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `PHASES` and `COUNTERS` are hand-maintained lists parallel to the enums, and
+    /// `phase_slot`/`counter_slot` panic on a variant missing from them. Adding a variant and
+    /// forgetting the list would therefore either crash a timed run or silently drop the
+    /// measurement — so enumerate every variant here and look each one up.
+    ///
+    /// Uses the same exhaustive `match` trick as the `label` methods: adding a variant makes
+    /// this fail to *compile* until it is listed, which is a better failure than a panic.
+    #[test]
+    fn every_phase_and_counter_has_a_slot() {
+        let all_phases = [
+            Phase::SchemaLoad,
+            Phase::Ddl,
+            Phase::Walk,
+            Phase::Prefetch,
+            Phase::Process,
+            Phase::TabularReadCsv,
+            Phase::ScansScan,
+            Phase::Associations,
+            Phase::Finalize,
+            Phase::Inherit,
+            Phase::InheritMerge,
+            Phase::InheritAppend,
+            Phase::Flush,
+            Phase::Commit,
+        ];
+        // If this fails, a variant was added to `Phase` without being added above.
+        assert_eq!(all_phases.len(), PHASES.len(), "PHASES vs the enum");
+        for p in all_phases {
+            phase_slot(p); // panics if absent from PHASES
+            assert!(!p.label().is_empty());
+        }
+
+        let all_counters = [
+            Counter::Dirs,
+            Counter::Files,
+            Counter::BodiesRead,
+            Counter::HeadsRead,
+            Counter::ImagingFiles,
+            Counter::Sidecars,
+            Counter::PendingTabular,
+            Counter::TabularGroups,
+            Counter::TabularGroupMax,
+            Counter::Associations,
+            Counter::MergedKeys,
+        ];
+        assert_eq!(all_counters.len(), COUNTERS.len(), "COUNTERS vs the enum");
+        for c in all_counters {
+            counter_slot(c);
+            assert!(!c.label().is_empty());
+        }
+    }
+
+    /// A nested phase is a slice of another, so adding it into the total would make the
+    /// accounted sum exceed wall time. Every nested phase must be reported after the phase it
+    /// is a slice of, which is what `PHASES`' order encodes.
+    #[test]
+    fn nested_phases_are_a_subset_and_indented() {
+        let nested: Vec<Phase> = PHASES.iter().copied().filter(|p| p.is_nested()).collect();
+        assert!(!nested.is_empty());
+        for p in nested {
+            assert!(
+                p.label().starts_with("  "),
+                "{p:?} is nested but its label is not indented"
+            );
+        }
     }
 }

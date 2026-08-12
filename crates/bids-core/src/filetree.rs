@@ -142,15 +142,14 @@ pub fn read_file_tree(
             }
         };
 
-        // Classify from the type `readdir` already reported — walkdir caches it on
-        // the entry — rather than re-`stat`ing the path. Each of `Path::is_file`,
-        // `is_symlink`, and `is_dir` is a fresh syscall, so the previous chain cost
-        // 2 per file and 4 per directory: on a network filesystem, hundreds of
-        // thousands of serialized round trips for information already in hand.
+        // Classify from the type `readdir` already reported — walkdir caches it on the
+        // entry — rather than asking the path. Each of `Path::is_file`, `is_symlink` and
+        // `is_dir` is a fresh `stat`, and on a network filesystem every one is a serialized
+        // round trip for something already in hand.
         //
-        // The buckets are unchanged. The walker runs with `follow_links(false)`, so
-        // `file_type()` reports a symlink as a symlink — which the old chain also
-        // routed to `files`, since it tested `is_symlink()` before `is_dir()`.
+        // The walker runs with `follow_links(false)`, so `file_type()` reports a symlink as
+        // a symlink; symlinks are bucketed with files, which is why the test order below
+        // checks `is_symlink()` before `is_dir()`.
         let Some(file_type) = entry.file_type() else {
             // Only `None` for stdin, which a directory walk never yields.
             continue;
@@ -177,8 +176,13 @@ pub fn read_file_tree(
     Ok(root_tree)
 }
 
-// Check if directory matches a pseudo-file extension (e.g. ".ds/")
-fn is_pseudo_file(entry_name: &str, pseudo_exts: &[String]) -> bool {
+/// Whether an entry name matches a pseudo-file extension (e.g. `.ds/`, `.ome.zarr/`) — a
+/// *directory* the schema treats as one opaque data file.
+///
+/// Public because it is the rule by which the walk decides a directory belongs in `files`, so
+/// a consumer asking "is this walked entry a directory datafile?" should ask the same question
+/// of the name rather than `stat`ing the path again.
+pub fn is_pseudo_file(entry_name: &str, pseudo_exts: &[String]) -> bool {
     let mut pseudo_file = false;
     for ext in pseudo_exts {
         let ext_trimmed = ext.strip_suffix('/').unwrap_or(ext);
@@ -345,6 +349,46 @@ impl BidsFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pseudo-file rule is now public, because consumers decide "is this walked entry a
+    /// directory datafile?" from the name rather than by `stat`ing the path — so what it
+    /// accepts is a contract, not an implementation detail. Notably it keys on the *name*:
+    /// a symlink to an ordinary directory is not a pseudo-file, and a schema extension is
+    /// matched with or without its trailing slash.
+    #[test]
+    fn pseudo_file_is_decided_by_name() {
+        // Exactly what BIDS 1.11.1 yields for `pseudo_file_extensions`, bare `/` included:
+        // it strips to the empty string, which must not then match every name.
+        let exts: Vec<String> = [".ds/", ".mefd/", ".ome.zarr/", "/"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        for name in [
+            "sub-01_task-x_meg.ds",
+            "sub-01_sample-a_image.ome.zarr",
+            "sub-01_ieeg.mefd",
+        ] {
+            assert!(
+                is_pseudo_file(name, &exts),
+                "{name} should be a pseudo-file"
+            );
+        }
+        for name in [
+            "sub-01_T1w.nii.gz",
+            "anat",
+            "some_linked_directory",
+            "meg", // the datatype directory itself, not a `.ds` bundle
+            "",
+        ] {
+            assert!(!is_pseudo_file(name, &exts), "{name} should not be");
+        }
+        // An empty extension must never match everything.
+        assert!(!is_pseudo_file(
+            "anything",
+            &["".to_string(), "/".to_string()]
+        ));
+    }
 
     #[test]
     fn test_make_relative_path() {

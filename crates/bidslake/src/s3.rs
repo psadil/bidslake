@@ -1,9 +1,9 @@
-//! S3-backed [`BidsFileSystem`] for ingesting datasets straight from object
+//! S3-backed [`crate::fs::BidsFileSystem`] for ingesting datasets straight from object
 //! storage (e.g. OpenNeuro's public bucket). Supports anonymous access.
 //!
 //! Object *listing* and *reads* go through the `aws-sdk-s3` client here; tabular
 //! files are read by DuckDB directly over `s3://` via the **httpfs** extension
-//! ([`configure_httpfs`]), since `read_csv` needs to open the path itself.
+//! ([`crate::s3::configure_httpfs`]), since `read_csv` needs to open the path itself.
 
 use crate::fs::BidsFileSystem;
 use anyhow::{Context, Result};
