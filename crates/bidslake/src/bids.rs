@@ -755,11 +755,18 @@ impl BidsParser {
             })
             .cloned()
             .collect();
+        // That dedup is only against this run's own candidates. Clearing the dataset's rows is
+        // what makes a *re*-index work: the whole set is recomputed here every run, and the
+        // append is a raw Appender, so a row already in the table is a primary-key violation
+        // that aborts the ingest transaction — taking `scans` and `sidecars` down with it.
+        db.clear_dataset("file_associations", &dataset_id)?;
         if let Err(e) = db.append_file_associations(&deduped) {
             eprintln!("Failed to insert file associations: {e}");
         }
 
-        // Insert pending diffusion data — only when we have both bval and bvec.
+        // Insert pending diffusion data — only when we have both bval and bvec. Same reason as
+        // above: recomputed per run, appended without a key check.
+        db.clear_dataset("diffusion", &dataset_id)?;
         for (nifti_path, diff) in &self.pending_diffusion {
             if let (Some(bval), Some(bvec_x), Some(bvec_y), Some(bvec_z)) =
                 (&diff.bval, &diff.bvec_x, &diff.bvec_y, &diff.bvec_z)
@@ -1089,6 +1096,16 @@ impl BidsParser {
         }
         drop(merge_phase);
         let _append_phase = timing::scope(Phase::InheritAppend);
+        // Every merged row is rebuilt above from the sidecars on disk, and the append runs no
+        // key check — so a re-index must clear the dataset's rows first or collide with its own
+        // previous run. Unlike `scans`, this cannot lean on a read-back `seen` set: a file's
+        // metadata can change without its path changing, so a row already present still has to
+        // be rewritten.
+        if let Some(dataset_id) = self.dataset_id.as_deref()
+            && let Err(e) = db.clear_dataset("sidecars", dataset_id)
+        {
+            eprintln!("Failed to clear previous sidecars: {e}");
+        }
         if let Err(e) = db.append_rows(&self.schema, "sidecars", &rows) {
             eprintln!("Failed to bulk-insert sidecars: {e}");
         }
@@ -1499,6 +1516,18 @@ impl BidsParser {
                 let mut total = 0i64;
                 let mut primary: Option<String> = None;
                 for batch in &batches {
+                    // Clear this file's prior rows before re-inserting them, scoped exactly as
+                    // the batched tabular path scopes its own pre-`DELETE`. These tables are
+                    // per-row and so carry no primary key, which means a re-index does not
+                    // *fail* — it silently doubles the table, and doubles it again on the next
+                    // run. Scoped per file, not per dataset, because the reader is called once
+                    // per file during the walk.
+                    if let Err(e) = db.clear_file_rows(&batch.table, dataset_id, rel_path) {
+                        eprintln!(
+                            "Warning: clearing previous {} rows for {rel_path}: {e}",
+                            batch.table
+                        );
+                    }
                     match db.append_rows(&self.schema, &batch.table, &batch.rows) {
                         Ok(()) => {
                             total += batch.rows.len() as i64;

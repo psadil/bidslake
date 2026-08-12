@@ -168,39 +168,30 @@ async fn tabular_files_records_the_rows_each_file_contributed() -> Result<()> {
     Ok(())
 }
 
-/// Re-ingesting the same dataset into the same catalog must be a no-op.
+/// Re-ingesting a dataset must **rebuild** it: no duplicate rows, and no rows missing.
 ///
-/// This is the guard for the dedup the bulk `Appender` pushed onto its callers: it runs no
-/// primary-key check, so `scans`/`sidecars` rely on the parser's own `seen` set. No test
-/// ingested twice and compared — one only re-ran the DDL, another re-ingested but asserted
-/// nothing beyond "did not error".
+/// Comparing counts before and after is not enough on its own, and an earlier version of this
+/// test proved it — a re-ingest whose transaction aborts writes nothing at all, so the counts
+/// match and the test passes while the run has in fact failed. So this deletes rows first and
+/// requires the re-ingest to restore them, which a failed run cannot fake.
+///
+/// The tables here are the ones written through the bulk `Appender`, which runs no primary-key
+/// check: `scans`, `sidecars`, `events`, `file_associations`. Dedup is the caller's job, and
+/// each of them does it differently — a read-back `seen` set, a per-dataset clear, a per-file
+/// `DELETE`.
 #[tokio::test]
-async fn reingesting_the_same_dataset_changes_nothing() -> Result<()> {
-    let dir = TempDir::new()?;
-    let root = dir.path().join("ds");
-    std::fs::create_dir_all(root.join("sub-01/func"))?;
-    write_dataset(&root)?;
-    std::fs::write(
-        root.join("sub-01/func/sub-01_task-rest_bold.nii.gz"),
-        b"nii",
-    )?;
-    std::fs::write(
-        root.join("sub-01/func/sub-01_task-rest_events.tsv"),
-        "onset\tduration\n0.0\t1.0\n2.0\t1.0\n",
-    )?;
-    std::fs::write(
-        root.join("sub-01/func/sub-01_task-rest_bold.json"),
-        r#"{"RepetitionTime": 2.0, "EchoTime": 0.03}"#,
-    )?;
-
+async fn reingesting_the_same_dataset_rebuilds_it() -> Result<()> {
+    // A real dataset, because the point is to leave *survivors*: rows that stay behind and
+    // must not be collided with. A fixture small enough that deleting one row empties its
+    // table would pass no matter what the writers do.
+    let root = common::bids_example("ds001");
     let tables = [
         "scans",
         "sidecars",
         "events",
+        "file_associations",
         "participants",
-        "sessions",
         "tabular_files",
-        "dataset_description",
     ];
     let counts = |db: &bidslake::db::BidsDb| -> Result<Vec<(String, i64)>> {
         tables
@@ -214,25 +205,40 @@ async fn reingesting_the_same_dataset_changes_nothing() -> Result<()> {
             .collect()
     };
 
-    let db = common::ingest_as(&root, "study").await?;
+    let db = common::ingest_as(&root, "ds001").await?;
     let first = counts(&db)?;
     assert!(
-        first.iter().all(|(_, n)| *n > 0),
-        "every table should have rows to compare: {first:?}"
+        first.iter().all(|(_, n)| *n > 1),
+        "need more than one row per table so deletes leave survivors: {first:?}"
     );
 
-    common::ingest_into(&db, &root, "study").await?;
-    let second = counts(&db)?;
-    assert_eq!(first, second, "a second identical ingest must add no rows");
+    // Knock a hole in each Appender-written table, leaving the rest in place. A re-ingest that
+    // silently fails leaves these missing; one that rebuilds restores them without colliding
+    // with the survivors.
+    for sql in [
+        "DELETE FROM sidecars WHERE file_path LIKE '%run-01%'",
+        "DELETE FROM events WHERE file_path LIKE '%run-01%'",
+        "DELETE FROM file_associations WHERE source_file_path LIKE '%run-01%'",
+        "DELETE FROM scans WHERE file_path LIKE '%run-01%' AND file_path LIKE '%.nii.gz'",
+    ] {
+        db.conn.execute(sql, [])?;
+    }
+    let holed = counts(&db)?;
+    assert_ne!(first, holed, "the deletes must actually remove rows");
 
-    // And the values are unchanged, not merely the counts.
-    let (rt, age): (Option<f64>, Option<f64>) = db.conn.query_row(
-        "SELECT (SELECT RepetitionTime FROM sidecars LIMIT 1), \
-                (SELECT age FROM participants WHERE participant_id = 'sub-01')",
+    common::ingest_into(&db, &root, "ds001").await?;
+    let second = counts(&db)?;
+    assert_eq!(
+        first, second,
+        "a re-ingest must restore what was deleted and duplicate nothing"
+    );
+
+    // Values too, not just counts: a row restored empty would keep the count honest.
+    let n: i64 = db.conn.query_row(
+        "SELECT count(*) FROM sidecars WHERE RepetitionTime IS NOT NULL",
         [],
-        |r| Ok((r.get(0)?, r.get(1)?)),
+        |r| r.get(0),
     )?;
-    assert_eq!(rt, Some(2.0));
-    assert_eq!(age, Some(34.0));
+    assert!(n > 0, "restored sidecars must carry their metadata");
     Ok(())
 }

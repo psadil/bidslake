@@ -80,7 +80,29 @@ pub async fn ingest_with_adapters(
     adapter_names: &[&str],
 ) -> Result<BidsDb> {
     let db = BidsDb::new(":memory:")?;
+    ingest_with_adapters_into(&db, dataset_path, adapter_names, None).await?;
+    Ok(db)
+}
 
+/// A fresh adapter catalog holding one dataset under an explicit `dataset_id`.
+pub async fn ingest_with_adapters_as(
+    dataset_path: impl AsRef<Path>,
+    adapter_names: &[&str],
+    dataset_id: &str,
+) -> Result<BidsDb> {
+    let db = BidsDb::new(":memory:")?;
+    ingest_with_adapters_into(&db, dataset_path, adapter_names, Some(dataset_id)).await?;
+    Ok(db)
+}
+
+/// Ingest with adapters into an *existing* catalog — for tests about re-indexing, where the
+/// second run must rebuild what the first wrote rather than append to it.
+pub async fn ingest_with_adapters_into(
+    db: &BidsDb,
+    dataset_path: impl AsRef<Path>,
+    adapter_names: &[&str],
+    dataset_id: Option<&str>,
+) -> Result<()> {
     let mut overlays: Vec<AppliedOverlay> = Vec::new();
     let mut term_maps: Vec<TermMap> = Vec::new();
     let mut ingestion_sources: Vec<String> = vec![
@@ -117,11 +139,12 @@ pub async fn ingest_with_adapters(
     db.stamp_ingestion(&ingestion_prov)?;
 
     let fs = Box::new(LocalFileSystem::new(dataset_path.as_ref().to_path_buf()));
-    let mut parser = BidsParser::new(fs, None, schema, None, true).with_term_maps(term_maps);
+    let mut parser = BidsParser::new(fs, dataset_id.map(str::to_string), schema, None, true)
+        .with_term_maps(term_maps);
     let txn = db.conn.unchecked_transaction()?;
-    parser.parse(&db).await?;
+    parser.parse(db).await?;
     txn.commit()?;
-    Ok(db)
+    Ok(())
 }
 
 /// `COUNT(*)` for a table.

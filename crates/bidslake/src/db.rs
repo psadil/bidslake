@@ -409,6 +409,43 @@ impl BidsDb {
         Ok(())
     }
 
+    /// Drop every row `dataset_id` owns in `table`, so a re-index rebuilds it instead of
+    /// colliding with what the previous run wrote.
+    ///
+    /// For the tables a run recomputes wholly from the dataset on disk. The bulk
+    /// [`Self::append_rows`] path runs no primary-key check, so re-appending an identical row
+    /// is a constraint violation rather than a no-op — and one violation aborts the whole
+    /// ingest transaction, which silently costs every table written after it. Clearing first
+    /// also handles rows whose source file has since been deleted, which no upsert would.
+    ///
+    /// Not for the tables that resolve collisions themselves: `scans` skips what a read-back
+    /// says is already there, the keyed tabular tables `INSERT OR REPLACE`, and
+    /// `tabular_files` / `dataset_links` / `tabular_undeclared_columns` carry their own
+    /// `OR REPLACE` / `OR IGNORE`.
+    pub fn clear_dataset(&self, table: &str, dataset_id: &str) -> Result<()> {
+        // `table` is always an internal literal, never user input.
+        self.conn.execute(
+            &format!("DELETE FROM {table} WHERE dataset_id = ?"),
+            params![dataset_id],
+        )?;
+        Ok(())
+    }
+
+    /// Drop the rows one file contributed to `table`, so re-reading that file replaces them.
+    ///
+    /// The per-file counterpart of [`Self::clear_dataset`], for the tables a content reader
+    /// fills during the walk — where the unit of work is one file, not the whole dataset.
+    /// These tables are per-row and carry no primary key, so without this a re-index does not
+    /// fail; it doubles them.
+    pub fn clear_file_rows(&self, table: &str, dataset_id: &str, file_path: &str) -> Result<()> {
+        // `table` is always an internal literal, never user input.
+        self.conn.execute(
+            &format!("DELETE FROM {table} WHERE dataset_id = ? AND file_path = ?"),
+            params![dataset_id, file_path],
+        )?;
+        Ok(())
+    }
+
     /// Bulk-insert many rows into a schema-generated table via the DuckDB **Appender**,
     /// used for the two widest tables (`scans`, `sidecars`).
     ///

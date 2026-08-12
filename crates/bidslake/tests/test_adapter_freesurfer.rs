@@ -504,3 +504,49 @@ async fn recognized_bookkeeping_files_are_not_cataloged() -> anyhow::Result<()> 
     assert_eq!(n, 1);
     Ok(())
 }
+
+/// Re-indexing an adapter dataset must rebuild its reader tables, not append to them.
+///
+/// These tables are per-row and so carry no primary key, which makes this the quiet failure
+/// mode: a second ingest does not error, it doubles every table — and a third triples it. The
+/// erroring cases (`sidecars`, `file_associations`, `diffusion`) at least announce themselves.
+#[tokio::test]
+async fn reindexing_an_adapter_dataset_does_not_duplicate_reader_rows() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_fs_tree(dir.path());
+
+    let tables = [
+        "freesurfer_aseg",
+        "freesurfer_aparc",
+        "freesurfer_measures",
+        "freesurfer_labels",
+        "scans",
+        "participants",
+    ];
+    let snapshot = |db: &bidslake::db::BidsDb| -> anyhow::Result<Vec<(String, i64)>> {
+        tables
+            .iter()
+            .map(|t| Ok((t.to_string(), count(db, t)?)))
+            .collect()
+    };
+
+    let db = common::ingest_with_adapters_as(dir.path(), &["freesurfer"], "fs").await?;
+    let first = snapshot(&db)?;
+    assert!(
+        first.iter().all(|(_, n)| *n > 0),
+        "need rows in every table to compare: {first:?}"
+    );
+
+    // Delete some of one table's rows so this also catches a re-ingest that writes nothing.
+    db.conn
+        .execute("DELETE FROM freesurfer_aseg WHERE sub = '02'", [])?;
+    assert_ne!(snapshot(&db)?, first, "the delete must remove rows");
+
+    common::ingest_with_adapters_into(&db, dir.path(), &["freesurfer"], Some("fs")).await?;
+    assert_eq!(
+        snapshot(&db)?,
+        first,
+        "a re-index must restore the deleted rows and duplicate none"
+    );
+    Ok(())
+}
