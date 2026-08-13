@@ -147,7 +147,7 @@ point; only refusal is.
 
 ### 5. Three DuckDB constraints shaped the above
 
-None is documented anywhere we could find; all three were found the hard way:
+None is documented anywhere we could find; all were found the hard way:
 
 - **A foreign key against a VIEW is refused.** So the FK target is `file_registry`, the table,
   while the concepts are on `all_files`, the view. The split is not aesthetic.
@@ -157,6 +157,10 @@ None is documented anywhere we could find; all three were found the hard way:
 - **`INSERT OR REPLACE` fails on a table carrying more than one UNIQUE/PK constraint**, which
   is why `file_id` is the *sole* key and the identity triple is not re-asserted as a second
   UNIQUE — the hash already guarantees what that constraint would have.
+- **A table cannot be replaced by a same-named view.** The other half of the second point:
+  `CREATE OR REPLACE VIEW` over a table errors outright, and `IF NOT EXISTS` no-ops. So a
+  shipped table's *name* is effectively frozen — worth knowing before shipping a table you
+  may later want to compute. (Found while turning `diffusion` into a view, ADR 0007 §2.)
 
 ### 6. `scans` becomes what its name says: the `scans.tsv` satellite
 
@@ -195,11 +199,12 @@ report of what the database holds; the join is what the query layer does with it
   time, including the 19% that was previously in no table at all.
 - **Referential integrity became possible, and is enforced where it had already failed.** A
   foreign key needs a target that actually contains every file, which is new. `sidecars`,
-  `scans` and `diffusion` declare one, and it caught a live bug the day it went in: `ds114`'s
-  root-level inherited `dwi.bval`/`dwi.bvec` had been writing `diffusion` rows keyed to a
-  synthesized `dwi.nii.gz` that does not exist on disk. Those are now skipped, and the
-  underlying many-to-many gap is filed in `TODO.md`. The per-row tables are not yet covered
-  (§4).
+  `scans` and the gradient tables declare one, and it caught a live bug the day it went in:
+  `ds114`'s root-level inherited `dwi.bval`/`dwi.bvec` had been writing `diffusion` rows keyed
+  to a synthesized `dwi.nii.gz` that does not exist on disk. Those were skipped as a stopgap;
+  ADR 0007 resolved the underlying many-to-many, and the gradient payloads now key on the
+  gradient file itself, where the constraint is satisfiable by construction. The per-row
+  tables are still not covered (§4).
 - **ADR 0002 §7's third row is gone.** There is no "virtual falling back from a stored
   projection" *table*; the `COALESCE` over `projected` is a select item of `all_files`. The
   precedence rule and the derived projectable set are unchanged.

@@ -46,7 +46,7 @@
 //! 0002 §7; with no term map the wrapping is absent entirely and the DDL is
 //! unchanged.
 //!
-//! The static tables `diffusion` and `file_associations` live in the parent
+//! The static tables `bvals`/`bvecs` and `file_associations` live in the parent
 //! [`crate::schema`] module, not here.
 
 use super::ingestion::{Ingestion, Undeclared};
@@ -420,6 +420,83 @@ impl Schema {
         // static DDL because both depend on the schema: the view carries the BIDS-concept
         // columns, and the `projected` column exists only when a term map is configured.
         self.generate_file_registry_def();
+
+        // Views that re-key a table's rows onto the data files they describe (docs/adr/0007).
+        self.generate_described_views();
+    }
+
+    /// Emit one view per table whose ingestion policy declares [`describes`] with a `view`.
+    ///
+    /// The view answers "these rows, but keyed by the file they are *about*": a confounds
+    /// table's rows keyed by the BOLD image, a gradient file's rows keyed by the diffusion
+    /// image. The many-to-many lives in `file_associations` and is resolved here at query
+    /// time, rather than being flattened at ingest by storing the rows once per described
+    /// file — one inherited `dwi.bval` covers 20 images in `ds114`, and duplicating is both
+    /// wasteful and a second copy to keep true.
+    ///
+    /// One template covers every case, because a `describes` block names exactly one
+    /// association: the join is one-to-one, so there is nothing to aggregate. `t.* EXCLUDE`
+    /// carries the payload columns through without this generator needing to know them,
+    /// which is what lets it serve static tables (`bvals`) and schema-generated ones
+    /// (`fmriprep_confounds`) with the same code.
+    ///
+    /// [`describes`]: super::ingestion::Describes
+    fn generate_described_views(&mut self) {
+        let declarations: Vec<(String, String, Option<String>, String)> = self
+            .ingestion
+            .described_views()
+            .map(|(table, d)| {
+                (
+                    table.to_string(),
+                    d.association.clone(),
+                    d.axis.clone(),
+                    d.view.clone().expect("described_views filters to Some"),
+                )
+            })
+            .collect();
+
+        for (table, association, axis, view) in declarations {
+            // An adapter can declare a policy for a table its overlay does not create — a
+            // fragment applied without its overlay, or a rule the schema no longer carries.
+            // Emitting a view over a missing table would fail `create_tables` for everyone.
+            // Static tables are absent from `table_definitions` but always exist, hence the
+            // second arm.
+            if !self.table_definitions.contains_key(&table)
+                && !super::STATIC_TABLES.contains(&table.as_str())
+            {
+                continue;
+            }
+            // `row_idx` is absent on an unordered table; `validate_describes` already refuses
+            // an `axis` there, so this is the ordinal-less form rather than an error.
+            let ordinal = axis
+                .as_deref()
+                .map(|a| {
+                    format!(
+                        "       t.row_idx AS {},\n",
+                        quote_ident(&format!("{a}_idx"))
+                    )
+                })
+                .unwrap_or_default();
+            let excluded = if axis.is_some() {
+                "EXCLUDE (file_id, row_idx)"
+            } else {
+                "EXCLUDE (file_id)"
+            };
+            let sql = format!(
+                "CREATE OR REPLACE VIEW {view} AS\n\
+                 SELECT fa.source_file_id AS file_id,\n\
+                 {ordinal}\
+                 \x20      t.* {excluded},\n\
+                 \x20      t.file_id AS source_file_id\n\
+                 FROM {table} t\n\
+                 JOIN file_associations fa ON fa.target_file_id = t.file_id\n\
+                 WHERE fa.association_type = {association};",
+                view = quote_ident(&view),
+                table = quote_ident(&table),
+                association = sql_lit(&association),
+            );
+            self.view_definitions.insert(view, sql);
+        }
     }
 
     /// Generate `file_registry` — one row per file the walk saw — and the `all_files` view
@@ -990,6 +1067,13 @@ impl Schema {
             .insert(table_name.to_string(), vec!["dataset_id".to_string()]);
     }
 
+    /// The `CREATE TABLE` statements only, in foreign-key-safe order.
+    ///
+    /// Split from [`create_views_sql`](Self::create_views_sql) because the views now sit on
+    /// both sides of the static DDL: `all_files` selects from the generated `file_registry`,
+    /// while a `describes` view selects from `file_associations` and (for `bvals`/`bvecs`)
+    /// from tables `schema.rs` creates. So `BidsDb::create_tables` runs generated tables →
+    /// static tables → every view, which one combined list could not express.
     pub fn create_tables_sql(&self) -> Vec<String> {
         // Foreign keys constrain the order: `sessions` references `participants`, and both
         // `scans` and `sidecars` reference `file_registry`. Everything else is order-free, so
@@ -1019,21 +1103,23 @@ impl Schema {
             order.push("dataset_description".to_string());
         }
 
-        let mut sqls: Vec<String> = order
+        order
             .iter()
             .filter_map(|t| self.table_definitions.get(t).cloned())
-            .collect();
+            .collect()
+    }
 
-        // Views last: each selects from a table above, which must already exist. Sorted so
-        // the emitted DDL is deterministic.
+    /// The `CREATE OR REPLACE VIEW` statements, sorted so the emitted DDL is deterministic.
+    ///
+    /// Run after **all** tables, generated and static alike: every view selects from at least
+    /// one of them.
+    pub fn create_views_sql(&self) -> Vec<String> {
         let mut views: Vec<&String> = self.view_definitions.keys().collect();
         views.sort();
-        sqls.extend(
-            views
-                .into_iter()
-                .filter_map(|v| self.view_definitions.get(v).cloned()),
-        );
-        sqls
+        views
+            .into_iter()
+            .filter_map(|v| self.view_definitions.get(v).cloned())
+            .collect()
     }
 
     #[allow(dead_code)]

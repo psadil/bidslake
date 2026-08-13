@@ -134,8 +134,10 @@ fabricates) a target that names another dataset.
 ## Consequences
 
 - **Ingest order is irrelevant, and there is full S3 parity.** Everything is read from
-  `dataset_description.json` (read on S3) and resolved by a view over tables populated on S3 —
-  unlike `resolve_structural_associations`, which needs the in-memory `FileTree` and is local-only.
+  `dataset_description.json` (read on S3) and resolved by a view over tables populated on S3.
+  (`resolve_structural_associations` was local-only when this was written, needing the
+  in-memory `FileTree`; it now builds one from the registry path set and runs on every
+  backend — see ADR 0007 §6.)
 - **`dataset_id` is a free-text, mutable `Name`.** The `shares_source` path keys on the DOI, not
   `dataset_id`, so it survives a rename; only `--source-dataset <id>` is fragile (documented; prefer
   a DOI). `Name`-collision-merges-datasets is a pre-existing hazard this feature does not fix.

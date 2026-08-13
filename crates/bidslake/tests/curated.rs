@@ -109,6 +109,12 @@ async fn ds000117_diffusion_and_associations() -> anyhow::Result<()> {
     let db = ingest(common::bids_example("ds000117")).await?;
 
     // 11 dwi acquisitions, each 65 volumes -> one row per volume = 715 rows.
+    //
+    // Unchanged by docs/adr/0007, and that is the point of keeping the assertion: every
+    // ds000117 image has its *own* sibling gradient pair, so the re-keying view fans each
+    // one out to exactly one image and the image-facing answer is identical to what the
+    // old image-keyed table stored. The datasets where the shape differs — ds114's one
+    // inherited pair over 20 images — are in `test_diffusion_inherited.rs`.
     assert_eq!(count(&db, "diffusion")?, 11 * 65);
     let (files, min_vols, max_vols): (i64, i64, i64) = db.conn.query_row(
         "SELECT COUNT(*), MIN(v), MAX(v) FROM \
@@ -118,6 +124,18 @@ async fn ds000117_diffusion_and_associations() -> anyhow::Result<()> {
     )?;
     assert_eq!(files, 11, "11 distinct dwi files");
     assert_eq!((min_vols, max_vols), (65, 65), "each dwi has 65 volumes");
+
+    // Storage is per *gradient file*: 11 `.bval`s and 11 `.bvec`s, one row per volume each.
+    // Here that happens to equal the image count; ds114 is where the two diverge.
+    assert_eq!(count(&db, "bvals")?, 11 * 65);
+    assert_eq!(count(&db, "bvecs")?, 11 * 65);
+    let gradient_files: i64 = db.conn.query_row(
+        "SELECT (SELECT COUNT(DISTINCT file_id) FROM bvals) \
+              + (SELECT COUNT(DISTINCT file_id) FROM bvecs)",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(gradient_files, 22, "11 .bval + 11 .bvec files");
 
     // Every volume has a full gradient direction alongside its b-value.
     let missing_bvec: i64 = db.conn.query_row(

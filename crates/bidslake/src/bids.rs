@@ -12,9 +12,9 @@
 //!    entities are parsed here (`sub-01` → `sub`), participants/sessions are
 //!    implicitly created (deduped in-memory via `seen_participants`/
 //!    `seen_sessions`), and TSV/JSON/bval-bvec files are dispatched to handlers.
-//! 4. **Flush deferred work**: `IntendedFor` file associations, parsed
-//!    `.bval`/`.bvec` diffusion arrays, and the `scans` table (every imaging file
-//!    gets a row, whether or not a `*_scans.tsv` listed it).
+//! 4. **Flush deferred work**: file associations (`IntendedFor` plus the schema's
+//!    structural ones), parsed `.bval`/`.bvec` values, and the `scans` table (a row per
+//!    data file a `*_scans.tsv` describes).
 //! 5. **Apply BIDS inheritance** to build `sidecars`: for each imaging file, the
 //!    applicable dataset-/subject-level JSON sidecars are merged (more-specific wins).
 //!    Candidates are found through a `SidecarIndex` keyed by
@@ -37,6 +37,7 @@ use crate::schema::tabular::{ColumnSpec, FileContext, RowIdentity, TableSpec};
 use crate::timing::{self, Counter, Phase};
 use anyhow::{Context, Result};
 use bids_core::entities::read_entities;
+use bids_core::filetree::FileTree;
 use bids_schema::term_map::{FileFacts, TermMap};
 use duckdb::Connection;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
@@ -133,7 +134,8 @@ pub struct BidsParser {
     /// pipeline hides (e.g. fMRIPrep's `*_timeseries.tsv`, `*_xfm.*`) are indexed.
     apply_bidsignore: bool,
     pending_associations: Vec<PendingAssociation>,
-    pending_diffusion: HashMap<String, PendingDiffusion>,
+    /// Parsed gradient files, keyed by the gradient file's **own** dataset-relative path.
+    pending_gradients: Vec<(String, String, PendingGradient)>,
     schema: Schema,
     imaging_files: Vec<ImagingFile>,
     /// Every walked file that is **not** a primary data file, for the file registry
@@ -277,12 +279,17 @@ fn projected_json(facts: &FileFacts) -> Option<Value> {
     Some(Value::Object(map))
 }
 
-struct PendingDiffusion {
-    dataset_id: String,
-    bval: Option<Vec<f64>>,
-    bvec_x: Option<Vec<f64>>,
-    bvec_y: Option<Vec<f64>>,
-    bvec_z: Option<Vec<f64>>,
+/// One parsed gradient file, held until the file registry has been written (the `bvals`/
+/// `bvecs` foreign key needs its row to exist).
+///
+/// An enum rather than a struct of four `Option`s because a path is a `.bval` **or** a
+/// `.bvec`, never both. The old shape keyed a struct by the *image* path so the two files
+/// could meet in it — which is exactly the bug: a pair split across inheritance levels
+/// hashed to different keys and both halves were dropped. Nothing pairs them at write time
+/// any more; the `diffusion` view does it through the image they are associated with.
+enum PendingGradient {
+    Bvals(Vec<f64>),
+    Bvecs(Vec<f64>, Vec<f64>, Vec<f64>),
 }
 
 struct SidecarInfo {
@@ -478,7 +485,7 @@ impl BidsParser {
             ignore_set: Gitignore::empty(),
             apply_bidsignore,
             pending_associations: Vec::new(),
-            pending_diffusion: HashMap::new(),
+            pending_gradients: Vec::new(),
             schema,
             imaging_files: Vec::new(),
             registry_extra: Vec::new(),
@@ -1063,36 +1070,23 @@ impl BidsParser {
         db.append_file_associations(&deduped)
             .with_context(|| format!("writing {} file associations", deduped.len()))?;
 
-        // Insert pending diffusion data — only when we have both bval and bvec. Upserted for the
-        // same reason.
-        // A `.bval`/`.bvec` names its image by stem, and that image need not exist: BIDS
-        // inheritance lets a dataset ship one `dwi.bval` at its root to apply to every
-        // subject (ds114 does), whose synthesized `dwi.nii.gz` is nothing on disk. Those
-        // gradients belong to no single image, so there is no row to attach them to —
-        // skip rather than key `diffusion` to a file the dataset does not have. (The
-        // gradient files themselves are still in the registry, under their own paths.)
-        let registered = self.registered_paths();
-        for (nifti_path, diff) in &self.pending_diffusion {
-            if !registered.contains(nifti_path.as_str()) {
-                continue;
+        // Gradient payloads, keyed by the gradient file itself. No lookup and no pairing:
+        // the path is a registered file by construction, so nothing can be skipped for
+        // naming an image that does not exist, and a `.bval` shipped without its `.bvec`
+        // (or either half inherited from a different level) is stored rather than dropped.
+        // Which images they describe is `file_associations`' answer, and the `diffusion`
+        // view's (docs/adr/0007).
+        for (dataset, path, gradient) in &self.pending_gradients {
+            let file_id = self.file_key(dataset, path);
+            // Fatal, unlike the tabular flush's per-file tolerance: a failed tabular file is
+            // still recorded, with `status = "failed"`, so the catalog says the rows are
+            // missing. Gradients have no such bookkeeping — a swallowed error here is a file
+            // whose values are simply absent, indistinguishable from one that never had any.
+            match gradient {
+                PendingGradient::Bvals(b) => db.insert_bvals(&file_id, b),
+                PendingGradient::Bvecs(x, y, z) => db.insert_bvecs(&file_id, x, y, z),
             }
-            // Fatal too, unlike the tabular flush's per-file tolerance: a failed tabular
-            // file is still recorded, with `status = "failed"`, so the catalog says the
-            // rows are missing. Diffusion has no such bookkeeping — a swallowed error
-            // here is a file whose gradients are simply absent, indistinguishable from
-            // one that never had any.
-            if let (Some(bval), Some(bvec_x), Some(bvec_y), Some(bvec_z)) =
-                (&diff.bval, &diff.bvec_x, &diff.bvec_y, &diff.bvec_z)
-            {
-                db.insert_diffusion(
-                    &self.file_key(&diff.dataset_id, nifti_path),
-                    bval,
-                    bvec_x,
-                    bvec_y,
-                    bvec_z,
-                )
-                .with_context(|| format!("writing diffusion gradients for {nifti_path}"))?;
-            }
+            .with_context(|| format!("writing gradients for {path}"))?;
         }
 
         // An empty catalog is almost always a `.bidsignore` that hid the very files the
@@ -2043,48 +2037,19 @@ impl BidsParser {
         // Read the bval or bvec file (from the concurrent prefetch when available).
         let content = self.take_cached(path, rel_path).await?;
 
-        // Find the base name (both ".bval" and ".bvec" are 5 chars).
-        let base_name = &rel_path[..rel_path.len() - 5];
-
-        // The NIfTI file path
-        let nifti_path = format!("{}.nii.gz", base_name);
-
-        // Parse content first (before borrowing self mutably)
-        if file_name.ends_with(".bval") {
-            let bval_vec = self.parse_bval(&content)?;
-
-            // Get or create entry in HashMap
-            let entry =
-                self.pending_diffusion
-                    .entry(nifti_path.clone())
-                    .or_insert(PendingDiffusion {
-                        dataset_id: dataset_id.to_string(),
-                        bval: None,
-                        bvec_x: None,
-                        bvec_y: None,
-                        bvec_z: None,
-                    });
-
-            entry.bval = Some(bval_vec);
-        } else if file_name.ends_with(".bvec") {
+        // The row is keyed by *this* file, so there is nothing to derive from its name — no
+        // stem surgery, no synthesized `.nii.gz`, and therefore no dependence on the image
+        // being a sibling, being compressed, or existing at all. Which images these values
+        // describe is resolved from the schema's `meta.associations`, which already handles
+        // the inherited case, `.nii` as well as `.nii.gz`, and `epi` as well as `dwi`.
+        let gradient = if file_name.ends_with(".bval") {
+            PendingGradient::Bvals(self.parse_bval(&content)?)
+        } else {
             let (x, y, z) = self.parse_bvec(&content)?;
-
-            // Get or create entry in HashMap
-            let entry =
-                self.pending_diffusion
-                    .entry(nifti_path.clone())
-                    .or_insert(PendingDiffusion {
-                        dataset_id: dataset_id.to_string(),
-                        bval: None,
-                        bvec_x: None,
-                        bvec_y: None,
-                        bvec_z: None,
-                    });
-
-            entry.bvec_x = Some(x);
-            entry.bvec_y = Some(y);
-            entry.bvec_z = Some(z);
-        }
+            PendingGradient::Bvecs(x, y, z)
+        };
+        self.pending_gradients
+            .push((dataset_id.to_string(), rel_path.to_string(), gradient));
 
         Ok(())
     }
@@ -2781,12 +2746,18 @@ impl BidsParser {
     /// Schema-driven structural associations for the whole dataset: for each data file in the
     /// tree, resolve the schema's `meta.associations` (via the shared `bids_schema` resolver)
     /// into `(source data file → discovered associated file)` rows — events↔bold, bval/bvec↔dwi,
-    /// channels/electrodes/coordsystem↔electrophysiology, physio, … Local backend only (needs the
-    /// in-memory `FileTree`; the S3 path has none — the same limitation as sidecar inheritance).
+    /// channels/electrodes/coordsystem↔electrophysiology, physio, …
+    ///
+    /// The tree comes from the **registry path set**, not from the backend, so this runs on
+    /// every backend rather than only the ones that can produce a `read_file_tree`. The
+    /// resolver is pure path matching — it reads no file content — so a content-less
+    /// [`FileTree::from_paths`] is exactly enough, and `registered_paths` is the same set the
+    /// walk produced (`test_file_registry::every_walked_file_has_a_registry_row` asserts the
+    /// two are equal). It differs only where an ingestion `ignore` rule fired, which is the
+    /// reading we want: a file bidslake was told not to register is not an association target
+    /// either, so a structural association's `target_file_id` is never NULL.
     fn resolve_structural_associations(&self) -> Vec<PendingAssociation> {
-        let Some(tree) = self.fs.file_tree() else {
-            return Vec::new();
-        };
+        let tree = FileTree::from_paths("", self.registered_paths());
         let schema = self.schema.raw();
         let meta_assoc = self.schema.associations();
         // The entity abbreviation→key map depends only on the schema, so derive it once here

@@ -1,6 +1,6 @@
 //! A failed bulk write must fail the run.
 //!
-//! The bulk writes of the flush — `file_registry`, `file_associations`, `diffusion`,
+//! The bulk writes of the flush — `file_registry`, `file_associations`, `bvals`/`bvecs`,
 //! `sidecars` — used to print their error and carry on, so the run went on to report
 //! "Conversion complete!" and exit 0 over a catalog missing whatever that write held.
 //! Nothing downstream could tell: unlike a tabular file, which is recorded with

@@ -40,9 +40,18 @@
 //! - **`file_id`** — the surrogate key for a file: the first 128 bits of
 //!   `SHA-256(dataset_id ␟ root_uri ␟ file_path)`, as a `HUGEINT`. Content-derived, so it
 //!   is stable across runs and machines and a re-index upserts onto the same rows. Every
-//!   file-keyed table keys on it. Three of them — `scans`, `sidecars`, `diffusion` — declare
-//!   an actual `FOREIGN KEY`; the per-row tables and `file_associations` do not (see the
-//!   diagram below), so the reference is by convention there rather than enforced.
+//!   file-keyed table keys on it. Four of them — `scans`, `sidecars`, `bvals`, `bvecs` —
+//!   declare an actual `FOREIGN KEY`; the per-row tables and `file_associations` do not (see
+//!   the diagram below), so the reference is by convention there rather than enforced.
+//!
+//!   **Which file** a table keys on is one rule (docs/adr/0007): the file whose rows it
+//!   holds. A `*_events.tsv`'s rows key on the events file, a `.bval`'s on the `.bval`. The
+//!   data files those rows are *about* are reached through `file_associations`, because one
+//!   describing file can serve many — which is what BIDS inheritance means for a tabular
+//!   companion. `scans` and `sidecars` key on the described file instead, and neither is an
+//!   exception: a `scans.tsv` row names its target outright in a `filename` column (a 1:1
+//!   lookup, no inheritance), and a `sidecars` row is the *merge* of several JSON documents,
+//!   so it has no single source file to key on.
 //! - **`other_data JSON`** — an overflow column on most tables. Any source field
 //!   without a dedicated column is preserved here; fields that *do* have a column are
 //!   not duplicated into it.
@@ -133,16 +142,30 @@
 //!   count, so reading its files concurrently is worth having. Order events by `onset`
 //!   (events sharing an `onset` have no tiebreak — that information is not in the file
 //!   either, beyond its line order).
+//!
+//!   `row_idx` records line order; what that order *means* is the `describes.axis` a table
+//!   may declare (docs/adr/0007), and the generated view then exposes the same column as
+//!   `<axis>_idx` — `volume_idx` on `timeseries`, `bval_volumes`, `asl_volumes`.
 //! - **Continuous recordings** — `physio`, `stim`, `physio_events`, `motion`: one
 //!   row per sample, column names from the sidecar `Columns` or the associated
 //!   `_channels.tsv`. Only *uncompressed* recordings (chiefly `motion`) are
 //!   populated; the compressed `*.tsv.gz` physio/stim files are left on disk (see
 //!   the invariant above), so those tables may be empty.
-//! - **`diffusion`** — one row per diffusion volume, parsed from the sibling
-//!   `.bval`/`.bvec` files: scalar `bval`, `bvec_x/_y/_z`, PK `(file_id, volume_idx)`
-//!   where `file_id` is the *image* the gradients describe. (A gradient set inherited from
-//!   a higher directory level applies to many images and has no single referent to key on,
-//!   so it is skipped — see `TODO.md`.)
+//! - **`bvals` / `bvecs`** — the gradient payloads, one row per value in a `.bval` and per
+//!   column of a `.bvec`, PK `(file_id, row_idx)` where `file_id` is **the gradient file's
+//!   own**. One table each rather than one with nullable columns, so every row is fully
+//!   populated and a table's columns are exactly what its source file supplies.
+//! - **`diffusion`** (VIEW) — the image-facing gradient table: one row per (image,
+//!   `volume_idx`) with `bval`, `bvec_x/_y/_z`, plus `bval_file_id`/`bvec_file_id` naming
+//!   where each half came from. Composed from `bval_volumes` and `bvec_volumes`, the views
+//!   the `describes` declarations generate, so a gradient set inherited from a higher
+//!   directory level reaches every image below it from one stored copy — `ds114` ships one
+//!   `dwi.bval` covering 20 images (docs/adr/0007). The b-values define the volume axis.
+//! - **`<describes>` views** — `timeseries` (fMRIPrep confounds), `asl_volumes`,
+//!   `bval_volumes`, `bvec_volumes`: a per-row table re-keyed onto the data files its rows
+//!   describe, resolved through `file_associations` at query time. Declared by the ingestion
+//!   schema's `describes` block, never hand-written, and present only when the adapter that
+//!   declares the underlying table is in use.
 //! - **`file_associations`** — best-effort cross-references (chiefly an fmap's
 //!   `IntendedFor`): `source_file_id`, nullable `target_file_id`, `target_file_path`,
 //!   `association_type` (`fieldmap`/`sbref`/`mask`/`derivative`). PK
@@ -214,13 +237,28 @@
 //!   ├── file_registry (file_id)  ⇒ all_files (VIEW)   + the BIDS-concept columns
 //!   │     ├── scans             (file_id)              FOREIGN KEY → file_registry
 //!   │     ├── sidecars          (file_id)              FOREIGN KEY
-//!   │     ├── diffusion         (file_id, volume_idx)  FOREIGN KEY
+//!   │     ├── bvals             (file_id, row_idx)     FOREIGN KEY
+//!   │     ├── bvecs             (file_id, row_idx)     FOREIGN KEY
 //!   │     ├── events            (file_id)              by convention, unenforced
 //!   │     ├── <per-modality>    (file_id, row_idx)     by convention, unenforced
 //!   │     └── file_associations (source_file_id, target_file_id nullable)  unenforced
 //!   ├── dataset_links    (dataset_id, …)   what this dataset declares it came from
 //!   └── dataset_identity (dataset_id, …)   what this dataset *is*
 //!         ⇒ dataset_relations (VIEW)        resolved dataset↔dataset edges (query-time)
+//! ```
+//!
+//! A per-row table above keys on **the file its rows came from**; the data files those
+//! rows *describe* are one join away, through `file_associations` (docs/adr/0007):
+//!
+//! ```text
+//!   <per-row table> (file_id = the describing file)
+//!         ↑ target_file_id
+//!   file_associations (association_type = the schema's `meta.associations` key)
+//!         ↓ source_file_id
+//!   all_files (file_id = the data file)
+//!         ⇒ <describes> VIEW: the rows, keyed by the file they are about
+//!            bvals ⨝ bvecs ⇒ diffusion · fmriprep_confounds ⇒ timeseries
+//!            asl_context ⇒ asl_volumes
 //! ```
 //!
 //! The registry and `participants` aren't linked by an explicit column — a file
@@ -234,6 +272,24 @@ pub mod ingestion;
 pub mod tabular;
 pub use dynamic::{AppliedOverlay, Schema};
 pub use ingestion::Ingestion;
+
+/// The tables created from the static DDL in this module rather than generated from the
+/// schema — the ones whose columns are bidslake's own rather than derived from
+/// `rules.tabular_data`.
+///
+/// Named as a set because the view generator has to know a table exists before emitting a
+/// view over it, and a static table is absent from `Schema::table_definitions` (which holds
+/// only what was generated). Without this, a `describes` declaration on `bvals` would be
+/// silently skipped as if the table were missing.
+pub const STATIC_TABLES: &[&str] = &[
+    "bvals",
+    "bvecs",
+    "file_associations",
+    "tabular_undeclared_columns",
+    "dataset_roots",
+    "dataset_links",
+    "dataset_identity",
+];
 
 // The column names a table saw but does not declare — one row per distinct name,
 // per table, for the whole catalog.
@@ -257,21 +313,76 @@ CREATE TABLE IF NOT EXISTS tabular_undeclared_columns (
 );
 ";
 
-// One row per diffusion volume, matching the row-per-sample shape of every other
-// tabular table. `file_id` is the diffusion NIfTI's; `volume_idx` is the 0-based
-// position of the volume, and (bval, bvec_x/y/z) are that volume's scalar
-// b-value and gradient direction, parsed from the sibling `.bval`/`.bvec` files.
-pub const CREATE_DIFFUSION_TABLE: &str = "
-CREATE TABLE IF NOT EXISTS diffusion (
+// The gradient payloads: one row per value in a `.bval`, one per column of a `.bvec`,
+// keyed by **the gradient file's own** `file_id` — not by the image, which is the whole
+// point (docs/adr/0007).
+//
+// A gradient set inherited from a higher directory level applies to every image below it,
+// so there is no single image to key on: `ds114` ships one root `dwi.bval` covering 20
+// images. Keying on the file the values were read from is what every other per-row table
+// already does, and it makes the foreign key satisfiable — a `.bval` is always a registry
+// row under its own path, whereas the image the old code synthesized by swapping the
+// extension on the stem often was not. The image-facing shape is the `diffusion` view.
+//
+// Two tables rather than one with nullable columns, because a `.bval` and a `.bvec` are
+// two files: one table each means every row is fully populated and a table's columns are
+// exactly what its source file supplies. It also gives each a single association to name,
+// which is what keeps the generated re-keying views a plain one-to-one join.
+//
+// `row_idx`, like every other per-row table: what is stored is the ordinal along the
+// file's own axis. That it *means* a volume of the image is a property of the association,
+// declared in the ingestion schema and surfaced by the view as `volume_idx`.
+pub const CREATE_BVALS_TABLE: &str = "
+CREATE TABLE IF NOT EXISTS bvals (
     file_id HUGEINT,
-    volume_idx BIGINT,
-    bval DOUBLE,
-    bvec_x DOUBLE,
-    bvec_y DOUBLE,
-    bvec_z DOUBLE,
-    PRIMARY KEY (file_id, volume_idx),
+    row_idx BIGINT,
+    b DOUBLE,
+    PRIMARY KEY (file_id, row_idx),
     FOREIGN KEY (file_id) REFERENCES file_registry(file_id)
 );
+";
+
+pub const CREATE_BVECS_TABLE: &str = "
+CREATE TABLE IF NOT EXISTS bvecs (
+    file_id HUGEINT,
+    row_idx BIGINT,
+    x DOUBLE,
+    y DOUBLE,
+    z DOUBLE,
+    PRIMARY KEY (file_id, row_idx),
+    FOREIGN KEY (file_id) REFERENCES file_registry(file_id)
+);
+";
+
+// The image-facing gradient table: one row per (diffusion image, volume), composed from
+// the two views the `describes` declarations generate (`bval_volumes`, `bvec_volumes`),
+// each of which re-keys its payload table onto the images that inherit it.
+//
+// Hand-written rather than generated because it joins *two* generated views, which is one
+// composition step beyond what a per-table `describes` block models — and a composition of
+// the general mechanism rather than an exception to it.
+//
+// The zip is decided by what the image inherits, not by filename surgery: a root-level
+// `dwi.bval` and a per-image `sub-01_dwi.bvec` reach the same `(file_id, volume_idx)`
+// through their own association edges, so a pair split across inheritance levels resolves
+// correctly instead of silently annihilating.
+//
+// `LEFT JOIN` from the b-values, so they define the volume axis — the same rule the old
+// row-per-volume writer applied when it NULL-filled a short `.bvec`. A `.bvec` with no
+// `.bval` therefore contributes no `diffusion` rows, but unlike before its values are not
+// lost: they are in `bvecs`, and keyed by image in `bvec_volumes`.
+pub const CREATE_DIFFUSION_VIEW: &str = "
+CREATE OR REPLACE VIEW diffusion AS
+SELECT v.file_id,
+       v.volume_idx,
+       v.b AS bval,
+       c.x AS bvec_x,
+       c.y AS bvec_y,
+       c.z AS bvec_z,
+       v.source_file_id AS bval_file_id,
+       c.source_file_id AS bvec_file_id
+FROM bval_volumes v
+LEFT JOIN bvec_volumes c USING (file_id, volume_idx);
 ";
 
 // file_associations is best-effort, import-time derived metadata (e.g. an

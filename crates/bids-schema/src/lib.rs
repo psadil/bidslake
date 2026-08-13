@@ -57,13 +57,15 @@ pub const INGESTION_METASCHEMA_JSON: &str = include_str!("../data/ingestion-meta
 
 /// Ingestion fragments bidslake ships, addressable by name on `--adapter`. Excludes
 /// `base`, which is not an adapter — it is applied on every ingest.
-pub const BUNDLED_INGESTION_NAMES: &[&str] = &["fmriprep", "freesurfer", "feat", "dcmstack"];
+pub const BUNDLED_INGESTION_NAMES: &[&str] =
+    &["fmriprep", "qsiprep", "freesurfer", "feat", "dcmstack"];
 
 /// The raw JSON of a bundled ingestion fragment, or `None` if `name` is not bundled.
 pub fn bundled_ingestion_source(name: &str) -> Option<&'static str> {
     Some(match name {
         "base" => include_str!("../data/ingestion/base.json"),
         "fmriprep" => include_str!("../data/ingestion/fmriprep.json"),
+        "qsiprep" => include_str!("../data/ingestion/qsiprep.json"),
         "freesurfer" => include_str!("../data/ingestion/freesurfer.json"),
         "feat" => include_str!("../data/ingestion/feat.json"),
         // Not a pipeline but a *converter convention*: dcmstack's DcmMeta extension

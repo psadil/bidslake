@@ -379,3 +379,38 @@ def test_resolution_cost_does_not_grow_with_units(lake, monkeypatch) -> None:
     # 1 anchor + 1 per input, plus whatever `get`/`resolve` need for root URIs --
     # the invariant is that it does not scale with the 48 units.
     assert len(calls) < 10, f"{len(calls)} queries for 48 units: {calls}"
+
+
+def test_association_keyed_table_input_matches_the_entity_join(lake) -> None:
+    """`association=` resolves the same rows the entity join does, on a dataset where the
+    two agree — and it does so from the schema's own edges rather than from a name match.
+
+    ds001's events files sit beside their runs and share every entity, which is exactly the
+    case that made the entity heuristic look sound. The point of the association is the case
+    that does *not* look like this: a describing file one level up has no `sub` to join on
+    (see `test_diffusion_inherited.rs::root_level_events_are_stored_once_and_shared`).
+    """
+    anchor = {**BOLD, "dataset_id": "ds001", "sub": "01", "run": "01"}
+    by_entity = Binding(
+        anchor=anchor,
+        key=("sub", "ses", "task", "run"),
+        inputs={"ev": TableInput(join=("sub", "task", "run"), table="events", columns=("onset",))},
+    )
+    by_association = Binding(
+        anchor=anchor,
+        key=("sub", "ses", "task", "run"),
+        inputs={"ev": TableInput(association="events", table="events", columns=("onset",))},
+    )
+
+    entity_unit = next(iter(lake.bind(by_entity)))
+    assoc_unit = next(iter(lake.bind(by_association)))
+    assert not assoc_unit.unresolved
+    assert assoc_unit.frame("ev").equals(entity_unit.frame("ev"))
+
+
+def test_table_input_requires_exactly_one_of_join_or_association() -> None:
+    """Neither is a silent empty result; both is an unstated precedence rule."""
+    with pytest.raises(ValueError, match="exactly one"):
+        TableInput(table="events", columns=("onset",))
+    with pytest.raises(ValueError, match="exactly one"):
+        TableInput(table="events", columns=("onset",), join=("sub",), association="events")

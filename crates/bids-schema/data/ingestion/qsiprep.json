@@ -1,9 +1,9 @@
 {
   "IngestionSchemaVersion": "0.1.0",
   "tables": {
-    "fmriprep_confounds": {
+    "qsiprep_confounds": {
       "undeclared": "catalog",
-      "describes": { "association": "fmriprep_confounds", "axis": "volume", "view": "timeseries" }
+      "describes": { "association": "qsiprep_confounds", "axis": "volume", "view": "dwi_timeseries" }
     },
     "sidecars": {
       "undeclaredWhen": [

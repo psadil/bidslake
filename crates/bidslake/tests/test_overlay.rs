@@ -29,6 +29,15 @@ fn write_derivative_tree(root: &Path) {
 
     // A preprocessed BOLD scan + sidecar.
     fs::write(func.join("sub-01_task-rest_desc-preproc_bold.nii.gz"), b"").unwrap();
+    // A second spatial variant of the *same* run. One confounds file describes both, which
+    // is the many-to-many the association exists for: fMRIPrep emits several spaces (and
+    // surface GIFTIs) per run and one confounds table covering all of them. Without this
+    // file the fan-out would be 1:1 and the test could not tell a re-key from a copy.
+    fs::write(
+        func.join("sub-01_task-rest_space-MNI152NLin2009cAsym_desc-preproc_bold.nii.gz"),
+        b"",
+    )
+    .unwrap();
     // `SiteSpecificNote` is not a BIDS metadata field, so it has no dedicated column
     // and lands in `other_data` — the custom metadata an undeclared-column policy
     // scoped to *other* files must leave alone.
@@ -145,6 +154,39 @@ async fn overlay_makes_confounds_a_typed_ordered_table() -> anyhow::Result<()> {
         ("T1w", "MNI152NLin2009cAsym", "image", "xfm")
     );
 
+    // The confounds file is *linked* to the images it describes, not just stored beside
+    // them. Two edges, both to the one TSV: the native-space and MNI variants of one run.
+    // (docs/adr/0007 — before this, consumers matched `sub`/`task`/`run` by hand.)
+    let (edges, targets): (i64, i64) = db.conn.query_row(
+        "SELECT COUNT(*), COUNT(DISTINCT target_file_path) FROM file_associations \
+         WHERE association_type = 'fmriprep_confounds'",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    assert_eq!(edges, 2, "one edge per BOLD variant of the run");
+    assert_eq!(targets, 1, "both point at the single confounds file");
+
+    let dangling: i64 = db.conn.query_row(
+        "SELECT COUNT(*) FROM file_associations \
+         WHERE association_type = 'fmriprep_confounds' AND target_file_id IS NULL",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(dangling, 0);
+
+    // The *view* over those edges is not the overlay's doing — it is declared by the
+    // ingestion fragment, which this test deliberately does not apply. See
+    // `adapter_keys_confounds_rows_to_every_image_of_the_run` for the other half.
+    let view_exists: i64 = db.conn.query_row(
+        "SELECT COUNT(*) FROM duckdb_views() WHERE view_name = 'timeseries'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(
+        view_exists, 0,
+        "the overlay supplies the edges; the ingestion fragment supplies the view"
+    );
+
     // The database is self-describing: overlay provenance is stamped.
     assert_eq!(count(&db, "bidslake_schema")?, 1);
     let (idx, source): (i32, String) = db.conn.query_row(
@@ -184,6 +226,22 @@ async fn without_overlay_confounds_is_skipped() -> anyhow::Result<()> {
         status, "skipped",
         "confounds tsv is skipped without the overlay"
     );
+
+    // The *edges* are overlay-carried too, and inert on plain BIDS. `meta.associations` is
+    // a schema document, so a base-schema catalog must not sprout a pipeline's relation —
+    // and with no table to key, a `timeseries` view would have nothing to select from.
+    let edges: i64 = db.conn.query_row(
+        "SELECT COUNT(*) FROM file_associations WHERE association_type = 'fmriprep_confounds'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(edges, 0, "no confounds edges without the overlay");
+    let view_exists: i64 = db.conn.query_row(
+        "SELECT COUNT(*) FROM duckdb_views() WHERE view_name = 'timeseries'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(view_exists, 0, "no timeseries view without the overlay");
 
     // Every database embeds its effective schema, but an un-augmented one records no
     // overlay provenance (NULL digest, and no bidslake_overlays table).
@@ -374,6 +432,73 @@ async fn bundled_fmriprep_adapter_catalogs_undeclared_columns() -> anyhow::Resul
     Ok(())
 }
 
+/// The full adapter — overlay (edges) plus ingestion fragment (the `describes` view) — makes
+/// a confounds table readable *by volume of a given image*, which is the whole point of
+/// docs/adr/0007. Row N of the TSV is volume N of every BOLD variant the run produced.
+///
+/// This has to be a synthetic fixture: the vendored `ds000001-fmriprep` confounds files are
+/// zero bytes, so the corpus can prove the edges exist but never that the rows line up.
+#[tokio::test]
+async fn adapter_keys_confounds_rows_to_every_image_of_the_run() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_derivative_tree(dir.path());
+
+    let ingestion = Ingestion::from_sources(&[
+        bids_schema::bundled_ingestion_source("base").expect("base ingestion"),
+        bids_schema::bundled_ingestion_source("fmriprep").expect("bundled fmriprep ingestion"),
+    ])?;
+    let schema = Schema::load_full(None, &[fmriprep_overlay()], ingestion, &[])?;
+    let db = ingest_with_schema(dir.path(), schema).await?;
+
+    let aligned: Vec<(String, i64, f64)> = {
+        let mut stmt = db.conn.prepare(
+            "SELECT f.file_path, t.volume_idx, t.trans_x \
+             FROM timeseries t JOIN all_files f USING (file_id) \
+             ORDER BY f.file_path, t.volume_idx",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        rows.collect::<Result<_, _>>()?
+    };
+
+    // 2 images x 3 volumes. The native-space variant sorts first (no `space-` entity).
+    assert_eq!(aligned.len(), 6, "both BOLD variants see all three volumes");
+    assert_eq!(
+        aligned.iter().map(|r| r.1).collect::<Vec<_>>(),
+        vec![0, 1, 2, 0, 1, 2]
+    );
+    assert_eq!(
+        aligned.iter().map(|r| r.2).collect::<Vec<_>>(),
+        vec![0.10, 0.11, 0.12, 0.10, 0.11, 0.12],
+        "row N of the TSV is volume N of each image it describes"
+    );
+    assert!(
+        aligned[3].0.contains("space-MNI152NLin2009cAsym"),
+        "the second variant is the MNI one, not a duplicate of the first"
+    );
+
+    // Stored once, read twice: the fan-out belongs to the view, not to the table. This is
+    // the property that makes an inherited describing file cheap — ds114's one `dwi.bval`
+    // covers 20 images without 20 copies.
+    assert_eq!(count(&db, "fmriprep_confounds")?, 3);
+    let sources: i64 = db.conn.query_row(
+        "SELECT COUNT(DISTINCT source_file_id) FROM timeseries",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(sources, 1, "the view records which file the rows came from");
+
+    // `volume_idx`, not `row_idx`: the stored column records line order, the view records
+    // what that line order means (the declaration's `axis`).
+    let has_volume_idx: i64 = db.conn.query_row(
+        "SELECT COUNT(*) FROM information_schema.columns \
+         WHERE table_name = 'timeseries' AND column_name = 'volume_idx'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(has_volume_idx, 1);
+    Ok(())
+}
+
 #[test]
 fn conflicting_overlay_is_rejected() {
     // An overlay that tries to *change* an existing base entity (subject's short
@@ -390,4 +515,82 @@ fn conflicting_overlay_is_rejected() {
         msg.contains("conflict") || msg.contains("additive"),
         "expected an additive-only conflict error, got: {msg}"
     );
+}
+
+/// fMRIPrep and QSIPrep both name their confounds file `*_desc-confounds_timeseries.tsv`,
+/// and `TabularRule::identity_key` drops the non-identity `DatasetType` selector — so before
+/// the two rules were narrowed by `datatype`, applying both adapters collapsed them into one
+/// table and QSIPrep's rows landed in `fmriprep_confounds` while `qsiprep_confounds` stayed
+/// empty. Adding the edges made that newly visible: a join through `qsiprep_confounds` would
+/// have returned nothing while correctly-labelled edges pointed at rows in the other table.
+///
+/// `datatype` is bound at the `Tabular::route` call site, so one selector per rule separates
+/// them completely. This pins that, and that each gets its own re-keying view.
+#[tokio::test]
+async fn fmriprep_and_qsiprep_confounds_do_not_collapse() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_derivative_tree(dir.path());
+
+    // A diffusion run beside the functional one, with QSIPrep's own confounds table.
+    let dwi = dir.path().join("sub-01/dwi");
+    fs::create_dir_all(&dwi).unwrap();
+    fs::write(dwi.join("sub-01_desc-preproc_dwi.nii.gz"), b"").unwrap();
+    fs::write(
+        dwi.join("sub-01_desc-confounds_timeseries.tsv"),
+        "trans_x\tframewise_displacement\n0.90\t0.5\n0.91\t0.6\n",
+    )
+    .unwrap();
+
+    let ingestion = Ingestion::from_sources(&[
+        bids_schema::bundled_ingestion_source("base").expect("base ingestion"),
+        bids_schema::bundled_ingestion_source("fmriprep").expect("fmriprep ingestion"),
+        bids_schema::bundled_ingestion_source("qsiprep").expect("qsiprep ingestion"),
+    ])?;
+    let qsiprep = AppliedOverlay {
+        source: "qsiprep".to_string(),
+        content: bids_schema::overlay::bundled_overlay("qsiprep").expect("bundled qsiprep overlay"),
+    };
+    let schema = Schema::load_full(None, &[fmriprep_overlay(), qsiprep], ingestion, &[])?;
+    let db = ingest_with_schema(dir.path(), schema).await?;
+
+    // Each pipeline's rows land in its own table — 3 functional volumes, 2 diffusion ones.
+    assert_eq!(count(&db, "fmriprep_confounds")?, 3);
+    assert_eq!(count(&db, "qsiprep_confounds")?, 2);
+
+    // ...and each is reachable by volume of its own image, through its own view.
+    let bold: Vec<f64> = {
+        let mut stmt = db
+            .conn
+            .prepare("SELECT trans_x FROM timeseries ORDER BY file_id, volume_idx LIMIT 3")?;
+        stmt.query_map([], |r| r.get(0))?
+            .collect::<Result<_, _>>()?
+    };
+    assert_eq!(bold, vec![0.10, 0.11, 0.12]);
+
+    let (dwi_rows, dwi_images): (i64, i64) = db.conn.query_row(
+        "SELECT COUNT(*), COUNT(DISTINCT file_id) FROM dwi_timeseries",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    assert_eq!((dwi_rows, dwi_images), (2, 1));
+
+    let dwi_first: f64 = db.conn.query_row(
+        "SELECT trans_x FROM dwi_timeseries WHERE volume_idx = 0",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(dwi_first, 0.90, "the dwi view reads the dwi file's rows");
+
+    // Both adapters ship `undeclared: catalog`, so neither table hoards the ~1,800
+    // undeclared regressors as per-row JSON (docs/adr/0004).
+    for table in ["fmriprep_confounds", "qsiprep_confounds"] {
+        let has_other_data: bool = db.conn.query_row(
+            "SELECT count(*) > 0 FROM information_schema.columns \
+             WHERE table_name = ? AND column_name = 'other_data'",
+            [table],
+            |r| r.get(0),
+        )?;
+        assert!(!has_other_data, "{table} should have no other_data column");
+    }
+    Ok(())
 }

@@ -137,5 +137,35 @@ async fn s3_full_ingest_ds000001() -> anyhow::Result<()> {
         db_rows, raw_rows,
         "events row count must match raw for {sample}"
     );
+
+    // Structural associations resolve over S3 too (docs/adr/0007 §6). They used to be
+    // local-only, because `resolve_structural_associations` needed the walked `FileTree` and
+    // the S3 backend has none; it now builds one from the registry path set, which both
+    // backends populate. Without this the `describes` views — `diffusion` above all — would
+    // be empty on every S3 catalog while the payload tables looked fine.
+    let (events_edges, dangling): (i64, i64) = db.conn.query_row(
+        "SELECT COUNT(*), COUNT(*) FILTER (WHERE target_file_id IS NULL) \
+         FROM file_associations WHERE association_type = 'events'",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    assert!(
+        events_edges > 0,
+        "ds000001 ships events files beside its runs; their edges must resolve over S3"
+    );
+    assert_eq!(
+        dangling, 0,
+        "a structural target comes from the registry path set, so it cannot dangle"
+    );
+
+    // And both endpoints are registry rows, as they are locally.
+    let orphans: i64 = db.conn.query_row(
+        "SELECT COUNT(*) FROM file_associations a \
+         LEFT JOIN file_registry f ON f.file_id = a.source_file_id \
+         WHERE f.file_id IS NULL",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(orphans, 0);
     Ok(())
 }

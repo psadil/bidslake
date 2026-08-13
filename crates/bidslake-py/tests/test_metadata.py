@@ -72,3 +72,23 @@ def test_wide_files_view_namespaced_no_collision(lake):
     # Joined columns namespaced; scans columns unprefixed; no bare metadata leak.
     expected = {"sidecar__RepetitionTime", "participant__age", "file_path", "task"}
     assert expected <= columns and "RepetitionTime" not in columns
+
+
+def test_get_described_by_reads_the_same_rows_as_get_events(lake):
+    """`get_events()` is one instance of a general relation, not a special case.
+
+    Both go through `file_associations`: the rows live once against the file that
+    *describes* the run, and the edge says which runs it describes (docs/adr/0007). The
+    generic accessor takes the association name, which is also the table name.
+    """
+    bold = next(lake.get(suffix="bold", dataset_id="ds001"))
+    assert bold.get_described_by("events", order_by="onset").equals(bold.get_events())
+
+
+def test_get_described_by_is_empty_for_an_absent_table(lake):
+    """An adapter's table is missing from a catalog built without that adapter. That is an
+    answer — "this catalog holds no such rows" — not an error, and the same shape a run with
+    no describing file gives back.
+    """
+    bold = next(lake.get(suffix="bold", dataset_id="ds001"))
+    assert bold.get_described_by("fmriprep_confounds").is_empty()

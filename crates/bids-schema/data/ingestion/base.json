@@ -6,6 +6,11 @@
     { "selectors": ["extension == \".tsv\""], "disposition": "read", "reader": "csv" }
   ],
   "tables": {
-    "events": { "ordered": false }
+    "events": { "ordered": false, "describes": { "association": "events" } },
+    "asl_context": {
+      "describes": { "association": "aslcontext", "axis": "volume", "view": "asl_volumes" }
+    },
+    "bvals": { "describes": { "association": "bval", "axis": "volume", "view": "bval_volumes" } },
+    "bvecs": { "describes": { "association": "bvec", "axis": "volume", "view": "bvec_volumes" } }
   }
 }

@@ -91,6 +91,7 @@
         "qsiprep_confounds": {
           "selectors": [
             "dataset.dataset_description.DatasetType == \"derivative\"",
+            "datatype == \"dwi\"",
             "suffix == \"timeseries\"",
             "extension == \".tsv\""
           ],
@@ -105,6 +106,19 @@
             "framewise_displacement__confounds": "optional"
           }
         }
+      }
+    }
+  },
+  "meta": {
+    "associations": {
+      "qsiprep_confounds": {
+        "selectors": ["suffix == 'dwi'", "extension != '.json'"],
+        "target": {
+          "suffix": "timeseries",
+          "extension": ".tsv",
+          "entities": ["desc"]
+        },
+        "inherit": false
       }
     }
   }

@@ -203,7 +203,8 @@ async fn the_view_computes_concepts_for_every_kind() -> anyhow::Result<()> {
 /// applies dotfile and `.bidsignore` rules identically and cannot drift. Before this, 26% of
 /// ds000117 was in no table at all — including every sidecar JSON (whose `sidecars` row is
 /// keyed by the *data file* it describes, leaving the JSON itself unaddressable) and every
-/// `.bval`/`.bvec` (whose values land in `diffusion` under the DWI image's path).
+/// `.bval`/`.bvec` (whose values land in `bvals`/`bvecs` under the gradient file's own id,
+/// and reach the images through `file_associations` — docs/adr/0007).
 #[tokio::test]
 async fn every_walked_file_has_a_registry_row() -> anyhow::Result<()> {
     let root = common::bids_example("ds000117");
