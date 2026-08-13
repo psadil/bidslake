@@ -37,6 +37,7 @@ use crate::schema::tabular::{ColumnSpec, FileContext, RowIdentity, TableSpec};
 use crate::timing::{self, Counter, Phase};
 use anyhow::{Context, Result};
 use bids_core::entities::read_entities;
+use bids_core::filetree::FileTree;
 use bids_schema::term_map::{FileFacts, TermMap};
 use duckdb::Connection;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
@@ -2781,12 +2782,18 @@ impl BidsParser {
     /// Schema-driven structural associations for the whole dataset: for each data file in the
     /// tree, resolve the schema's `meta.associations` (via the shared `bids_schema` resolver)
     /// into `(source data file → discovered associated file)` rows — events↔bold, bval/bvec↔dwi,
-    /// channels/electrodes/coordsystem↔electrophysiology, physio, … Local backend only (needs the
-    /// in-memory `FileTree`; the S3 path has none — the same limitation as sidecar inheritance).
+    /// channels/electrodes/coordsystem↔electrophysiology, physio, …
+    ///
+    /// The tree comes from the **registry path set**, not from the backend, so this runs on
+    /// every backend rather than only the ones that can produce a `read_file_tree`. The
+    /// resolver is pure path matching — it reads no file content — so a content-less
+    /// [`FileTree::from_paths`] is exactly enough, and `registered_paths` is the same set the
+    /// walk produced (`test_file_registry::every_walked_file_has_a_registry_row` asserts the
+    /// two are equal). It differs only where an ingestion `ignore` rule fired, which is the
+    /// reading we want: a file bidslake was told not to register is not an association target
+    /// either, so a structural association's `target_file_id` is never NULL.
     fn resolve_structural_associations(&self) -> Vec<PendingAssociation> {
-        let Some(tree) = self.fs.file_tree() else {
-            return Vec::new();
-        };
+        let tree = FileTree::from_paths("", self.registered_paths());
         let schema = self.schema.raw();
         let meta_assoc = self.schema.associations();
         // The entity abbreviation→key map depends only on the schema, so derive it once here
