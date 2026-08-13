@@ -3,7 +3,7 @@
 //! [`BidsDb`] owns the `duckdb::Connection` and exposes the write primitives the
 //! ingestion pipeline uses. Row shaping and SQL generation for these methods live
 //! in [`crate::schema`]; this module just routes calls to it and holds the two
-//! hand-written insert paths ([`BidsDb::insert_diffusion`],
+//! hand-written insert paths ([`BidsDb::insert_bvals`],
 //! [`BidsDb::append_file_associations`]) for the static tables.
 //!
 //! Note that the tabular ingest in [`crate::bids`] (and the driver in `main`) also
@@ -101,8 +101,12 @@ impl BidsDb {
     }
 
     /// Create every table: the schema-generated ones ([`Schema::create_tables_sql`])
-    /// plus the static `diffusion`, `file_associations`, and cross-dataset
-    /// `dataset_links`/`dataset_identity` tables (and the `dataset_relations` view).
+    /// plus the static `bvals`/`bvecs`, `file_associations`, and cross-dataset
+    /// `dataset_links`/`dataset_identity` tables, then every view.
+    ///
+    /// Tables first — all of them — because a view may select from a static table just as
+    /// easily as from a generated one, and `diffusion` selects from two *generated* views
+    /// (docs/adr/0007), so it comes last of all.
     ///
     /// Creates nothing and returns `Err` when an existing catalog's `file_registry` lacks a
     /// *physical* column this run would write — in practice the `projected` column a term map
@@ -112,24 +116,34 @@ impl BidsDb {
     /// `check_registry_shape`, and the narrowing caveat recorded in `TODO.md`.
     pub fn create_tables(&self, schema: &Schema) -> anyhow::Result<()> {
         self.check_registry_shape(schema)?;
-        let sqls = schema.create_tables_sql();
-        for sql in sqls {
+        // Tables first — all of them — then every view, because a view may select from a
+        // static table (`bvals` through `file_associations`) just as easily as from a
+        // generated one (`all_files` from `file_registry`). See `create_views_sql`.
+        for sql in schema.create_tables_sql() {
             self.conn.execute(&sql, [])?;
         }
-        // Create static tables (diffusion and file associations)
-        self.conn.execute(schema::CREATE_DIFFUSION_TABLE, [])?;
+        // Static tables: the gradient payloads and file associations.
+        self.conn.execute(schema::CREATE_BVALS_TABLE, [])?;
+        self.conn.execute(schema::CREATE_BVECS_TABLE, [])?;
         self.conn
             .execute(schema::CREATE_FILE_ASSOCIATIONS_TABLE, [])?;
         self.conn
             .execute(schema::CREATE_TABULAR_UNDECLARED_COLUMNS_TABLE, [])?;
         // The ingest roots a dataset was built from (see docs/adr/0005).
         self.conn.execute(schema::CREATE_DATASET_ROOTS_TABLE, [])?;
-        // Cross-dataset links + the query-time relation view (see docs/adr/0003).
+        // Cross-dataset links (see docs/adr/0003).
         self.conn.execute(schema::CREATE_DATASET_LINKS_TABLE, [])?;
         self.conn
             .execute(schema::CREATE_DATASET_IDENTITY_TABLE, [])?;
+
+        for sql in schema.create_views_sql() {
+            self.conn.execute(&sql, [])?;
+        }
+        // The query-time relation view (docs/adr/0003), and `diffusion`, which composes the
+        // two generated gradient views and so must follow them (docs/adr/0007).
         self.conn
             .execute(schema::CREATE_DATASET_RELATIONS_VIEW, [])?;
+        self.conn.execute(schema::CREATE_DIFFUSION_VIEW, [])?;
         self.stamp_meta(schema)?;
         self.stamp_schema(schema)?;
         Ok(())
@@ -578,40 +592,35 @@ impl BidsDb {
         Ok(())
     }
 
-    /// Insert one diffusion NIfTI's parsed `.bval` / `.bvec` values, **one row per
-    /// volume**. The four arrays are aligned by index (BIDS guarantees the same
-    /// length); a shorter `.bvec` yields NULL for the missing components. Uses the
-    /// bulk Appender path.
-    pub fn insert_diffusion(
-        &self,
-        file_id: &str,
-        bval: &[f64],
-        bvec_x: &[f64],
-        bvec_y: &[f64],
-        bvec_z: &[f64],
-    ) -> Result<()> {
-        use duckdb::types::Value;
-        let component = |v: &[f64], i: usize| v.get(i).copied().map_or(Value::Null, Value::Double);
-
-        // `INSERT OR REPLACE`, not the bulk Appender: a re-index recomputes these rows, and the
-        // Appender has no conflict handling, so an identical row would be a primary-key
-        // violation. Upserting keeps the write self-contained — no clearing step whose scope has
-        // to be kept in step with what the run produces. Static SQL, so `prepare_cached` reuses
-        // one plan across every volume.
+    /// Insert one `.bval` file's values, one row per volume, keyed by **that file's** id.
+    ///
+    /// `INSERT OR REPLACE`, not the bulk Appender: a re-index recomputes these rows, and the
+    /// Appender has no conflict handling, so an identical row would be a primary-key
+    /// violation. Upserting keeps the write self-contained — no clearing step whose scope has
+    /// to be kept in step with what the run produces. Static SQL, so `prepare_cached` reuses
+    /// one plan across every volume.
+    pub fn insert_bvals(&self, file_id: &str, bvals: &[f64]) -> Result<()> {
         let mut stmt = self.conn.prepare_cached(
-            "INSERT OR REPLACE INTO diffusion \
-             (file_id, volume_idx, bval, bvec_x, bvec_y, bvec_z) \
-             VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO bvals (file_id, row_idx, b) VALUES (?, ?, ?)",
         )?;
-        for (i, &b) in bval.iter().enumerate() {
-            stmt.execute(params![
-                file_id,
-                i as i64,
-                b,
-                component(bvec_x, i),
-                component(bvec_y, i),
-                component(bvec_z, i),
-            ])?;
+        for (i, &b) in bvals.iter().enumerate() {
+            stmt.execute(params![file_id, i as i64, b])?;
+        }
+        Ok(())
+    }
+
+    /// Insert one `.bvec` file's directions, one row per volume, keyed by **that file's** id.
+    ///
+    /// The three arrays are the file's three rows and are the same length (`parse_bvec`
+    /// rejects a ragged one), so unlike the pre-ADR-0007 writer there is no cross-file
+    /// alignment to guess at here: pairing a `.bvec` with a `.bval` is the `diffusion` view's
+    /// job, and it does it through the image both are associated with.
+    pub fn insert_bvecs(&self, file_id: &str, x: &[f64], y: &[f64], z: &[f64]) -> Result<()> {
+        let mut stmt = self.conn.prepare_cached(
+            "INSERT OR REPLACE INTO bvecs (file_id, row_idx, x, y, z) VALUES (?, ?, ?, ?, ?)",
+        )?;
+        for i in 0..x.len() {
+            stmt.execute(params![file_id, i as i64, x[i], y[i], z[i]])?;
         }
         Ok(())
     }

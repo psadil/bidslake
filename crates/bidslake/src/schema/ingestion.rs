@@ -63,6 +63,44 @@ pub enum Undeclared {
     Catalog,
 }
 
+/// A declaration that a table's rows are facts about *other* files — the data files its
+/// source file is associated with — resolved through `file_associations` (docs/adr/0007).
+///
+/// The relation itself comes from the BIDS schema's `meta.associations`; what this adds is
+/// the two things that document cannot carry, because the metaschema pins its entries to
+/// `additionalProperties: false`: what the row ordinal *means* on the described file, and
+/// what to call the view that re-keys the rows onto it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Describes {
+    /// The `meta.associations` key whose edges fan this table's rows out to the data files
+    /// they describe.
+    ///
+    /// One per table, because a table holds the rows of one *kind* of file. A payload split
+    /// across sibling files is split across tables too — a gradient set is a `.bval` and a
+    /// `.bvec`, so it is `bvals` and `bvecs` — and joining those is a view over views rather
+    /// than a case this declaration has to model. That is what keeps the generated view a
+    /// plain one-to-one join with nothing to aggregate.
+    pub association: String,
+    /// What one step of the ordinal is a step along, on the *described* file: `volume` for a
+    /// 4D image's frames.
+    ///
+    /// Present only where the alignment is load-bearing. The stored `row_idx` records line
+    /// order; the view exposes it as `<axis>_idx`, recording what that line order *means*.
+    /// Absent for a table whose rows carry no positional correspondence — `events`, whose
+    /// rows are addressed by `onset`, which is exactly why it is [`ordered`] false.
+    ///
+    /// [`ordered`]: TablePolicy::ordered
+    #[serde(default)]
+    pub axis: Option<String>,
+    /// Name of the view to emit, keyed by the described data file.
+    ///
+    /// Optional: omitting it records the relation without materializing a second name for
+    /// it, which is right when the payload table and the described-file view would want the
+    /// same one (`events`).
+    #[serde(default)]
+    pub view: Option<String>,
+}
+
 /// An [`Undeclared`] policy that applies only to the files a selector matches.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ScopedUndeclared {
@@ -109,6 +147,9 @@ pub struct TablePolicy {
     /// column.
     #[serde(default, rename = "ignoreKeys")]
     pub ignore_keys: Vec<String>,
+    /// That this table's rows describe *other* files, and how to reach them (docs/adr/0007).
+    #[serde(default)]
+    pub describes: Option<Describes>,
 }
 
 impl TablePolicy {
@@ -128,6 +169,9 @@ impl TablePolicy {
         }
         if other.undeclared.is_some() {
             self.undeclared = other.undeclared;
+        }
+        if other.describes.is_some() {
+            self.describes = other.describes;
         }
         // Appends rather than replaces, so several adapters can each scope a policy
         // onto a shared table (`sidecars` above all) without clobbering one another.
@@ -180,7 +224,69 @@ impl Ingestion {
                     .merge_from(policy);
             }
         }
+        ingestion.validate_describes()?;
         Ok(ingestion)
+    }
+
+    /// Refuse a `describes` declaration the view generator could not honour.
+    ///
+    /// Checked after the merge rather than per fragment, because both failures are properties
+    /// of the *effective* policy: an adapter can declare `describes` on a table whose `ordered`
+    /// another fragment set, and two independently-authored adapters can each name a view.
+    fn validate_describes(&self) -> anyhow::Result<()> {
+        let mut views: BTreeMap<&str, &str> = BTreeMap::new();
+        for (table, policy) in &self.tables {
+            let Some(describes) = &policy.describes else {
+                continue;
+            };
+            // The ordinal a view would expose as `<axis>_idx` is `row_idx`, which an unordered
+            // table does not have — `schema::dynamic`'s `PerRow` arm omits the column entirely.
+            // Naming an axis there asks for an alignment the storage cannot carry.
+            if describes.axis.is_some() && !self.ordered(table) {
+                anyhow::bail!(
+                    "ingestion schema: table `{table}` declares `describes.axis` but is \
+                     `ordered: false`, so it has no `row_idx` to align on. Either drop the \
+                     axis (the view is then a plain re-key) or make the table ordered."
+                );
+            }
+            let Some(view) = describes.view.as_deref() else {
+                continue;
+            };
+            // `CREATE OR REPLACE VIEW` would otherwise let one fragment silently shadow
+            // another's view, or shadow a table outright.
+            if self.tables.contains_key(view) {
+                anyhow::bail!(
+                    "ingestion schema: table `{table}` declares view `{view}`, which is \
+                     already the name of a table. Pick a name for the described-file view \
+                     that the payload table does not already use."
+                );
+            }
+            if let Some(other) = views.insert(view, table) {
+                anyhow::bail!(
+                    "ingestion schema: tables `{other}` and `{table}` both declare the view \
+                     `{view}`. Views are emitted `CREATE OR REPLACE`, so one would silently \
+                     shadow the other."
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// A table's [`Describes`] declaration, if it has one.
+    pub fn describes(&self, table: &str) -> Option<&Describes> {
+        self.tables.get(table).and_then(|p| p.describes.as_ref())
+    }
+
+    /// Every `(table, declaration)` pair that asks for a view, in table order.
+    ///
+    /// The generator's input. A declaration with no `view` records the relation only and is
+    /// skipped here.
+    pub fn described_views(&self) -> impl Iterator<Item = (&str, &Describes)> {
+        self.tables.iter().filter_map(|(table, policy)| {
+            let describes = policy.describes.as_ref()?;
+            describes.view.as_ref()?;
+            Some((table.as_str(), describes))
+        })
     }
 
     /// The base ingestion policy bidslake applies to every ingest (BIDS defaults), even
@@ -501,5 +607,66 @@ mod tests {
             desc.contains("`sidecars` table only"),
             "metaschema must state where ignoreKeys applies: {desc}"
         );
+    }
+
+    /// An `axis` names what the *stored ordinal* means, and an unordered table has no
+    /// ordinal — `schema::dynamic`'s `PerRow` arm omits `row_idx` entirely. Refuse at load
+    /// rather than emit a view selecting a column that does not exist.
+    #[test]
+    fn an_axis_on_an_unordered_table_is_refused() {
+        let err = Ingestion::from_sources(&[r#"{
+            "IngestionSchemaVersion": "0.1.0",
+            "tables": {
+                "events": {
+                    "ordered": false,
+                    "describes": { "association": "events", "axis": "volume", "view": "ev" }
+                }
+            }
+        }"#])
+        .expect_err("an axis on an unordered table must be refused");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("row_idx"), "the error should say why: {msg}");
+    }
+
+    /// Two fragments naming the same view is the failure mode `CREATE OR REPLACE VIEW`
+    /// cannot report: the second would silently shadow the first. fMRIPrep and QSIPrep both
+    /// declare a confounds view, so this is a live risk, not a hypothetical.
+    #[test]
+    fn two_tables_claiming_one_view_name_are_refused() {
+        let err = Ingestion::from_sources(&[r#"{
+            "IngestionSchemaVersion": "0.1.0",
+            "tables": {
+                "fmriprep_confounds": {
+                    "describes": { "association": "a", "axis": "volume", "view": "timeseries" }
+                },
+                "qsiprep_confounds": {
+                    "describes": { "association": "b", "axis": "volume", "view": "timeseries" }
+                }
+            }
+        }"#])
+        .expect_err("a duplicate view name must be refused");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("timeseries"), "name the collision: {msg}");
+    }
+
+    /// `events` declares the relation without an axis or a view: its rows are addressed by
+    /// `onset`, and both sides of the relation would want the name `events`. Pinned because
+    /// the two optional fields are what let a relation be *recorded* rather than materialized.
+    #[test]
+    fn events_declares_the_relation_without_a_view() {
+        let base = Ingestion::base();
+        let events = base.describes("events").expect("events declares describes");
+        assert_eq!(events.association, "events");
+        assert!(
+            events.axis.is_none(),
+            "an event row is a time, not a position"
+        );
+        assert!(events.view.is_none());
+        assert!(!base.described_views().any(|(t, _)| t == "events"));
+
+        // Whereas the gradient tables do ask for one.
+        let bvals = base.describes("bvals").expect("bvals declares describes");
+        assert_eq!(bvals.axis.as_deref(), Some("volume"));
+        assert_eq!(bvals.view.as_deref(), Some("bval_volumes"));
     }
 }

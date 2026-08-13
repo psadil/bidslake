@@ -112,6 +112,26 @@
             "type": "string"
           },
           "description": "Source keys this table never stores, by name \u2014 the key-level counterpart of the `ignore` disposition. Dropped as the JSON is parsed, before anything reads the metadata, so an ignored key costs nothing to merge, store, or hold in memory, and it applies whether or not the key has a declared column. For a converter that attaches something large and non-BIDS to otherwise ordinary metadata (dcmstack's DcmMeta writes per-slice DICOM dumps under `global` and `time`, megabytes per sidecar), `undeclared: catalog` is the wrong shape: it would discard every other custom field along with it. Honoured on the `sidecars` table only: it acts at the JSON parse, and `sidecars` is the table fed from parsed JSON. Naming it on another table validates but does nothing \u2014 for a tabular table, the column-level dial is `undeclared`."
+        },
+        "describes": {
+          "type": "object",
+          "description": "This table's rows are facts about *other* files — the data files its source file is associated with — reached through `file_associations`. The relation itself is the BIDS schema's (`meta.associations`); what this adds is the two things that document cannot carry, because its entries are `additionalProperties: false`: what the row ordinal *means* on the described file, and what to call the view that re-keys the rows onto it. Declaring it emits that view, resolving the many-to-many at query time rather than duplicating the rows once per described file. Within one dataset only — cross-dataset correspondence is a binding, not an association (docs/adr/0003).",
+          "properties": {
+            "association": {
+              "type": "string",
+              "description": "The `meta.associations` key whose edges fan this table's rows out to the data files they describe. One per table, because a table holds the rows of one *kind* of file: a payload split across sibling files is split across tables too (`bvals`/`bvecs`), and joining those is a view over views rather than a case this block has to model. That is what keeps the generated view a one-to-one join with nothing to aggregate."
+            },
+            "axis": {
+              "type": "string",
+              "description": "What one step of the ordinal is a step along, on the *described* file — `volume` for a 4D image's frames. Present only where the alignment is load-bearing: the stored `row_idx` records line order, and the view exposes it as `<axis>_idx`, recording what that line order *means*. Absent for a table whose rows carry no positional correspondence (`events`, addressed by `onset`), whose view is then a plain re-key with no ordinal. Requires `ordered`, since `row_idx` is what carries the alignment."
+            },
+            "view": {
+              "type": "string",
+              "description": "Name of the view to emit, keyed by the described data file. Must not collide with a table or another declared view: views are emitted `CREATE OR REPLACE`, so one would silently shadow the other. Omit to record the relation without materializing a second name for it — right when the payload table and the described-file view would want the same name (`events`)."
+            }
+          },
+          "required": ["association"],
+          "additionalProperties": false
         }
       },
       "additionalProperties": false

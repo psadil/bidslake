@@ -90,19 +90,37 @@ async fn compact_preserves_everything_and_reclaims_space() -> anyhow::Result<()>
     );
 
     // Keys, constraints, and views come across with the schema copy.
-    let (fks, pks, views): (i64, i64, i64) = db.conn.query_row(
+    let (fks, pks): (i64, i64) = db.conn.query_row(
         "SELECT (SELECT count(*) FROM duckdb_constraints() WHERE constraint_type='FOREIGN KEY'), \
-                (SELECT count(*) FROM duckdb_constraints() WHERE constraint_type='PRIMARY KEY'), \
-                (SELECT count(*) FROM duckdb_views() WHERE view_name='dataset_relations')",
+                (SELECT count(*) FROM duckdb_constraints() WHERE constraint_type='PRIMARY KEY')",
         [],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     assert_eq!(
-        fks, 4,
-        "sessions->participants, and scans/sidecars/diffusion->file_registry"
+        fks, 5,
+        "sessions->participants, and scans/sidecars/bvals/bvecs->file_registry"
     );
     assert!(pks > 0);
-    assert_eq!(views, 1, "the dataset_relations view must survive");
+
+    // Views survive the schema copy — including the ones that depend on *another view*.
+    // `diffusion` selects from `bval_volumes`/`bvec_volumes`, which select from `bvals`/
+    // `bvecs` and `file_associations`, so it is the first object in the catalog needing
+    // `COPY FROM DATABASE (SCHEMA)` to emit views in dependency order. Nothing else asserts
+    // that it does.
+    for view in [
+        "dataset_relations",
+        "all_files",
+        "bval_volumes",
+        "bvec_volumes",
+        "diffusion",
+    ] {
+        let n: i64 = db.conn.query_row(
+            "SELECT count(*) FROM duckdb_views() WHERE view_name = ?",
+            [view],
+            |r| r.get(0),
+        )?;
+        assert_eq!(n, 1, "the {view} view must survive compaction");
+    }
 
     // And the point of the exercise.
     let free: i64 =
