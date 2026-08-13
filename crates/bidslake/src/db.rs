@@ -2,9 +2,11 @@
 //!
 //! [`BidsDb`] owns the `duckdb::Connection` and exposes the write primitives the
 //! ingestion pipeline uses. Row shaping and SQL generation for these methods live
-//! in [`crate::schema`]; this module just routes calls to it and holds the two
-//! hand-written insert paths ([`BidsDb::insert_bvals`],
-//! [`BidsDb::append_file_associations`]) for the static tables.
+//! in [`crate::schema`]; this module just routes calls to it and shapes the rows of
+//! the **static** tables itself ([`BidsDb::upsert_file_associations`],
+//! [`BidsDb::upsert_bvals`], [`BidsDb::upsert_bvecs`]), whose DDL is hand-written and
+//! so unknown to the schema. All four bulk paths stage through
+//! [`BidsDb::upsert_staged`].
 //!
 //! Note that the tabular ingest in [`crate::bids`] (and the driver in `main`) also
 //! execute their own hand-built SQL directly against the public [`BidsDb::conn`] —
@@ -508,12 +510,11 @@ impl BidsDb {
     /// for a table a re-index rewrites, where a row already present must be replaced rather
     /// than collided with.
     ///
-    /// Staged through a temporary table, because the two halves of that cannot be had directly.
-    /// The Appender has no conflict handling at all, so it cannot upsert; and a row-at-a-time
-    /// `INSERT OR REPLACE` is far more expensive than the bulk path — measured on `sidecars`
-    /// over ds000117 (1,492 imaging files, 2026-08), the append went 21 ms → 759 ms and the
-    /// whole run 1.8 s → 2.6 s. So the Appender still does the writing, into a staging table,
-    /// and one `INSERT OR REPLACE … SELECT` moves the rows across and resolves conflicts there.
+    /// Staged through a temporary table (see [`Self::upsert_staged`]), because the two halves
+    /// of that cannot be had directly. The Appender has no conflict handling at all, so it
+    /// cannot upsert; and a row-at-a-time `INSERT OR REPLACE` is far more expensive than the
+    /// bulk path — measured on `sidecars` over ds000117 (1,492 imaging files, 2026-08), the
+    /// append went 21 ms → 759 ms and the whole run 1.8 s → 2.6 s.
     ///
     /// Upsert rather than clear-then-append so the write is self-contained: nothing has to keep
     /// a deletion's scope in step with what the run produces, and re-indexing one dataset can
@@ -521,14 +522,59 @@ impl BidsDb {
     /// deleted — as `scans` already does — which is a question for an integrity pass, not for
     /// the write path.
     ///
-    /// Requires `table_name` to have a primary key (nothing to upsert on otherwise) and no
-    /// generated columns (`SELECT *` would materialize them, and inserting into a generated
-    /// column is an error). `sidecars` satisfies both; `scans` has generated columns and uses
-    /// [`Self::append_rows`] behind its own read-back guard.
+    /// `sidecars` and `file_registry` qualify for the staging requirements in
+    /// [`Self::upsert_staged`]; `scans` has generated columns and uses [`Self::append_rows`]
+    /// behind its own read-back guard.
     pub fn upsert_rows(&self, schema: &Schema, table_name: &str, rows: &[Value]) -> Result<()> {
         if rows.is_empty() {
             return Ok(());
         }
+        self.upsert_staged(table_name, |appender| {
+            for row in rows {
+                let values = schema.row_values(table_name, row)?;
+                let refs: Vec<&dyn duckdb::ToSql> =
+                    values.iter().map(|v| v as &dyn duckdb::ToSql).collect();
+                appender.append_row(refs.as_slice())?;
+            }
+            Ok(())
+        })
+    }
+
+    /// The staging machinery of [`Self::upsert_rows`], with the caller filling the stage.
+    ///
+    /// `fill` appends into a temporary table shaped exactly like `table_name`, and one
+    /// `INSERT OR REPLACE … SELECT` then moves those rows across and resolves conflicts there.
+    /// Splitting it out is what lets the **static** tables share the pattern — the ones whose
+    /// DDL is hand-written in [`crate::schema`] rather than generated, so they are absent from
+    /// `Schema::table_columns` and [`Schema::row_values`] cannot shape them. They append their
+    /// own rows instead; everything around that is identical.
+    ///
+    /// Two properties every caller inherits:
+    ///
+    /// - **The caller must ensure the staged rows are free of duplicate primary keys, because
+    ///   nothing here will.** `CREATE TABLE … AS SELECT` does not copy constraints, so the
+    ///   stage has no primary key and the Appender has nothing to violate; and the
+    ///   `INSERT OR REPLACE … SELECT` does not raise on a duplicate *within* its source either.
+    ///   Measured on the pinned engine (DuckDB 1.5.5): two staged rows sharing a key insert as
+    ///   one, keeping the **first** and dropping the rest, silently. That inverts the
+    ///   row-at-a-time `INSERT OR REPLACE` this replaced, where the **last** write won. So a
+    ///   caller that stops deduping gets quiet data loss rather than a failed run — the one
+    ///   way this path is not behaviour-preserving, and why each caller says where its
+    ///   uniqueness comes from.
+    ///
+    ///   Conflicts with rows *already in the table* are a different matter: those are the
+    ///   point, and `OR REPLACE` resolves them as intended.
+    /// - **The Appender writes physical columns**, bypassing the planner, so none of the
+    ///   implicit casting an `INSERT` performs happens (see [`file_id_value`]).
+    ///
+    /// Requires `table_name` to have a primary key (nothing to upsert on otherwise) and no
+    /// generated columns (`SELECT *` would materialize them, and inserting into a generated
+    /// column is an error).
+    fn upsert_staged(
+        &self,
+        table_name: &str,
+        fill: impl FnOnce(&mut duckdb::Appender<'_>) -> Result<()>,
+    ) -> Result<()> {
         // `table_name` is always an internal literal, never user input.
         let stage = format!("{table_name}_upsert_stage");
         // `OR REPLACE` so a previous run that died mid-flight leaves nothing to trip over.
@@ -537,12 +583,7 @@ impl BidsDb {
         ))?;
         {
             let mut appender = self.conn.appender(&stage)?;
-            for row in rows {
-                let values = schema.row_values(table_name, row)?;
-                let refs: Vec<&dyn duckdb::ToSql> =
-                    values.iter().map(|v| v as &dyn duckdb::ToSql).collect();
-                appender.append_row(refs.as_slice())?;
-            }
+            fill(&mut appender)?;
             appender.flush()?;
         }
         self.conn.execute_batch(&format!(
@@ -551,77 +592,115 @@ impl BidsDb {
         Ok(())
     }
 
-    /// Bulk-insert derived file associations into `file_associations`.
+    /// Bulk-upsert derived file associations into `file_associations`.
     ///
-    /// Via the Appender, like `scans` and `sidecars`, rather than a statement per row.
-    /// The schema resolves two associations for nearly every data file (`events` and
-    /// `physio` both select on `extension != '.json'`), so a per-row `execute` meant
-    /// roughly two statements per file in the dataset — the one bulk-writable table
-    /// still going through the planner one row at a time.
+    /// `INSERT OR REPLACE`, because a re-index recomputes these rows and an identical row
+    /// through a bare Appender would be a primary-key violation — which aborts the ingest
+    /// transaction and takes every later write with it.
     ///
-    /// The caller owns primary-key dedup; the Appender does not enforce it.
-    pub fn append_file_associations(&self, assocs: &[FileAssociation]) -> Result<()> {
+    /// `OR REPLACE` rather than `OR IGNORE`, because one column sits *outside* the primary
+    /// key and is exactly the one that changes between runs: `target_file_id` is the
+    /// resolution of `target_file_path` against the files the catalog holds, and a target
+    /// absent when this row was first written resolves once its dataset is indexed. Under
+    /// `OR IGNORE` the recomputed row loses the conflict and the NULL is frozen for good --
+    /// which is the normal case for a dataset spanning several roots (docs/adr/0005), where
+    /// an `IntendedFor` routinely names a file another root supplies.
+    ///
+    /// Both halves are had at once through [`Self::upsert_staged`]. The row-at-a-time
+    /// `INSERT OR REPLACE` this replaced was the dominant cost of the whole run: the schema
+    /// resolves roughly two associations per data file, and at ~0.5 ms of planning per
+    /// statement that was most of the ingest. Measured over ds000117 (2,209 files, 909
+    /// associations and 715 rows in each of `bvals`/`bvecs`, 2026-08), the three writes
+    /// together went 1,183 ms → 5 ms and the whole run 1.50 s → 0.30 s; over an existing
+    /// catalog, where every row conflicts, 1,744 ms → 4 ms.
+    ///
+    /// The caller owns primary-key dedup, and owns it alone: staging cannot check it, and a
+    /// duplicate within one batch is dropped rather than refused (see [`Self::upsert_staged`],
+    /// and `tests/test_staged_upsert_duplicates.rs` for the pinned behaviour).
+    pub fn upsert_file_associations(&self, assocs: &[FileAssociation]) -> Result<()> {
         if assocs.is_empty() {
             return Ok(());
         }
-        // `INSERT OR REPLACE`, not the bulk Appender: a re-index recomputes these rows, and the
-        // Appender has no conflict handling, so an identical row would be a primary-key
-        // violation — which aborts the ingest transaction and takes every later write with it.
-        //
-        // `OR REPLACE` rather than `OR IGNORE`, because one column sits *outside* the primary
-        // key and is exactly the one that changes between runs: `target_file_id` is the
-        // resolution of `target_file_path` against the files the catalog holds, and a target
-        // absent when this row was first written resolves once its dataset is indexed. Under
-        // `OR IGNORE` the recomputed row loses the conflict and the NULL is frozen for good --
-        // which is the normal case for a dataset spanning several roots (docs/adr/0005), where
-        // an `IntendedFor` routinely names a file another root supplies. Static SQL, so
-        // `prepare_cached` reuses one plan; the table is small (a few per data file).
-        let mut stmt = self.conn.prepare_cached(
-            "INSERT OR REPLACE INTO file_associations \
-             (source_file_id, target_file_id, target_file_path, association_type) \
-             VALUES (?, ?, ?, ?)",
-        )?;
-        for assoc in assocs {
-            stmt.execute(params![
-                &assoc.source_file_id,
-                &assoc.target_file_id,
-                &assoc.target_file_path,
-                &assoc.assoc_type
-            ])?;
-        }
-        Ok(())
+        self.upsert_staged("file_associations", |appender| {
+            for assoc in assocs {
+                let source = file_id_value(&assoc.source_file_id)?;
+                let target = match &assoc.target_file_id {
+                    Some(id) => file_id_value(id)?,
+                    None => duckdb::types::Value::Null,
+                };
+                appender.append_row(params![
+                    source,
+                    target,
+                    &assoc.target_file_path,
+                    &assoc.assoc_type
+                ])?;
+            }
+            Ok(())
+        })
     }
 
-    /// Insert one `.bval` file's values, one row per volume, keyed by **that file's** id.
+    /// Bulk-upsert every `.bval` file's values, one row per volume, keyed by **that file's** id.
     ///
-    /// `INSERT OR REPLACE`, not the bulk Appender: a re-index recomputes these rows, and the
-    /// Appender has no conflict handling, so an identical row would be a primary-key
-    /// violation. Upserting keeps the write self-contained — no clearing step whose scope has
-    /// to be kept in step with what the run produces. Static SQL, so `prepare_cached` reuses
-    /// one plan across every volume.
-    pub fn insert_bvals(&self, file_id: &str, bvals: &[f64]) -> Result<()> {
-        let mut stmt = self.conn.prepare_cached(
-            "INSERT OR REPLACE INTO bvals (file_id, row_idx, b) VALUES (?, ?, ?)",
-        )?;
-        for (i, &b) in bvals.iter().enumerate() {
-            stmt.execute(params![file_id, i as i64, b])?;
+    /// One staged upsert for the whole dataset rather than one per gradient file: a temp table
+    /// per file would cost more than the row-at-a-time path it replaces, and the rows across
+    /// files are independent, so there is nothing to keep them apart.
+    ///
+    /// `INSERT OR REPLACE` for the same reason as the associations above — a re-index
+    /// recomputes these rows — and upserting keeps the write self-contained, with no clearing
+    /// step whose scope has to be kept in step with what the run produces.
+    pub fn upsert_bvals(&self, files: &[(String, &[f64])]) -> Result<()> {
+        if files.is_empty() {
+            return Ok(());
         }
-        Ok(())
+        self.upsert_staged("bvals", |appender| {
+            for (file_id, bvals) in files {
+                let id = file_id_value(file_id)?;
+                for (i, &b) in bvals.iter().enumerate() {
+                    appender.append_row(params![id, i as i64, b])?;
+                }
+            }
+            Ok(())
+        })
     }
 
-    /// Insert one `.bvec` file's directions, one row per volume, keyed by **that file's** id.
+    /// Bulk-upsert every `.bvec` file's directions, one row per volume, keyed by **that
+    /// file's** id.
     ///
-    /// The three arrays are the file's three rows and are the same length (`parse_bvec`
+    /// Each file's three arrays are its three rows and are the same length (`parse_bvec`
     /// rejects a ragged one), so unlike the pre-ADR-0007 writer there is no cross-file
     /// alignment to guess at here: pairing a `.bvec` with a `.bval` is the `diffusion` view's
     /// job, and it does it through the image both are associated with.
-    pub fn insert_bvecs(&self, file_id: &str, x: &[f64], y: &[f64], z: &[f64]) -> Result<()> {
-        let mut stmt = self.conn.prepare_cached(
-            "INSERT OR REPLACE INTO bvecs (file_id, row_idx, x, y, z) VALUES (?, ?, ?, ?, ?)",
-        )?;
-        for i in 0..x.len() {
-            stmt.execute(params![file_id, i as i64, x[i], y[i], z[i]])?;
+    pub fn upsert_bvecs(&self, files: &[BvecFile<'_>]) -> Result<()> {
+        if files.is_empty() {
+            return Ok(());
         }
-        Ok(())
+        self.upsert_staged("bvecs", |appender| {
+            for (file_id, x, y, z) in files {
+                let id = file_id_value(file_id)?;
+                for i in 0..x.len() {
+                    appender.append_row(params![id, i as i64, x[i], y[i], z[i]])?;
+                }
+            }
+            Ok(())
+        })
     }
+}
+
+/// One `.bvec` file's three direction rows — `x`, `y`, `z` — alongside the id of the gradient
+/// file they came from. Borrowed from the parse, so a batch costs no copy of the values.
+pub type BvecFile<'a> = (String, &'a [f64], &'a [f64], &'a [f64]);
+
+/// A `file_id` as the Appender needs it: the physical `HUGEINT`, not the decimal string the
+/// SQL planner used to cast on our behalf.
+///
+/// [`crate::bids::file_id`] always renders an `i128`, so a parse failure is a bug rather than
+/// bad data — surfaced here rather than turned into the NULL that `Schema::row_values`
+/// substitutes for a value it cannot shape. A NULL would be rejected by these tables'
+/// `PRIMARY KEY` anyway, and in `target_file_id` it would silently read as "target not in the
+/// catalog", which is a claim about the dataset rather than about the write.
+fn file_id_value(file_id: &str) -> Result<duckdb::types::Value> {
+    file_id
+        .parse::<i128>()
+        .map(duckdb::types::Value::HugeInt)
+        .map_err(|e| duckdb::Error::ToSqlConversionFailure(Box::new(e)))
 }

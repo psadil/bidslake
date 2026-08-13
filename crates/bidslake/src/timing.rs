@@ -52,8 +52,14 @@ pub enum Phase {
     TabularReadCsv,
     /// Resolving the schema's structural associations over the file tree.
     Associations,
-    /// Everything else between the passes and inheritance: links, diffusion,
-    /// orphan promotion, the `scans` append.
+    /// The slice of `Finalize` spent in the staged upserts of `file_associations`,
+    /// `bvals` and `bvecs`. Note this brackets the `BidsDb::upsert_*` calls, which parse
+    /// each `file_id` into its physical `HUGEINT` before handing the row to the Appender —
+    /// so, like [`Phase::InheritAppend`], it is not purely DuckDB's write time. The Rust-side
+    /// dedup and the gradient partition are deliberately outside it.
+    Writes,
+    /// Everything else between the passes and inheritance: links, associations,
+    /// gradients, the `.bidsignore` warning.
     Finalize,
     /// Sidecar inheritance and the `sidecars` append.
     Inherit,
@@ -79,6 +85,7 @@ const PHASES: &[Phase] = &[
     Phase::TabularReadCsv,
     Phase::Finalize,
     Phase::Associations,
+    Phase::Writes,
     Phase::Inherit,
     Phase::InheritMerge,
     Phase::InheritAppend,
@@ -96,6 +103,7 @@ impl Phase {
             Phase::Process => "process",
             Phase::TabularReadCsv => "  tabular read_csv",
             Phase::Associations => "  associations",
+            Phase::Writes => "  writes",
             Phase::Finalize => "finalize",
             Phase::Inherit => "inherit",
             Phase::InheritMerge => "  merge + shape",
@@ -112,6 +120,7 @@ impl Phase {
             self,
             Phase::TabularReadCsv
                 | Phase::Associations
+                | Phase::Writes
                 | Phase::InheritMerge
                 | Phase::InheritAppend
         )
@@ -336,6 +345,7 @@ mod tests {
             Phase::Process,
             Phase::TabularReadCsv,
             Phase::Associations,
+            Phase::Writes,
             Phase::Finalize,
             Phase::Inherit,
             Phase::InheritMerge,
