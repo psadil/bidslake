@@ -132,6 +132,7 @@
         "fmriprep_confounds": {
           "selectors": [
             "dataset.dataset_description.DatasetType == \"derivative\"",
+            "datatype == \"func\"",
             "suffix == \"timeseries\"",
             "extension == \".tsv\""
           ],

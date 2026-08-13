@@ -516,3 +516,81 @@ fn conflicting_overlay_is_rejected() {
         "expected an additive-only conflict error, got: {msg}"
     );
 }
+
+/// fMRIPrep and QSIPrep both name their confounds file `*_desc-confounds_timeseries.tsv`,
+/// and `TabularRule::identity_key` drops the non-identity `DatasetType` selector — so before
+/// the two rules were narrowed by `datatype`, applying both adapters collapsed them into one
+/// table and QSIPrep's rows landed in `fmriprep_confounds` while `qsiprep_confounds` stayed
+/// empty. Adding the edges made that newly visible: a join through `qsiprep_confounds` would
+/// have returned nothing while correctly-labelled edges pointed at rows in the other table.
+///
+/// `datatype` is bound at the `Tabular::route` call site, so one selector per rule separates
+/// them completely. This pins that, and that each gets its own re-keying view.
+#[tokio::test]
+async fn fmriprep_and_qsiprep_confounds_do_not_collapse() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_derivative_tree(dir.path());
+
+    // A diffusion run beside the functional one, with QSIPrep's own confounds table.
+    let dwi = dir.path().join("sub-01/dwi");
+    fs::create_dir_all(&dwi).unwrap();
+    fs::write(dwi.join("sub-01_desc-preproc_dwi.nii.gz"), b"").unwrap();
+    fs::write(
+        dwi.join("sub-01_desc-confounds_timeseries.tsv"),
+        "trans_x\tframewise_displacement\n0.90\t0.5\n0.91\t0.6\n",
+    )
+    .unwrap();
+
+    let ingestion = Ingestion::from_sources(&[
+        bids_schema::bundled_ingestion_source("base").expect("base ingestion"),
+        bids_schema::bundled_ingestion_source("fmriprep").expect("fmriprep ingestion"),
+        bids_schema::bundled_ingestion_source("qsiprep").expect("qsiprep ingestion"),
+    ])?;
+    let qsiprep = AppliedOverlay {
+        source: "qsiprep".to_string(),
+        content: bids_schema::overlay::bundled_overlay("qsiprep").expect("bundled qsiprep overlay"),
+    };
+    let schema = Schema::load_full(None, &[fmriprep_overlay(), qsiprep], ingestion, &[])?;
+    let db = ingest_with_schema(dir.path(), schema).await?;
+
+    // Each pipeline's rows land in its own table — 3 functional volumes, 2 diffusion ones.
+    assert_eq!(count(&db, "fmriprep_confounds")?, 3);
+    assert_eq!(count(&db, "qsiprep_confounds")?, 2);
+
+    // ...and each is reachable by volume of its own image, through its own view.
+    let bold: Vec<f64> = {
+        let mut stmt = db
+            .conn
+            .prepare("SELECT trans_x FROM timeseries ORDER BY file_id, volume_idx LIMIT 3")?;
+        stmt.query_map([], |r| r.get(0))?
+            .collect::<Result<_, _>>()?
+    };
+    assert_eq!(bold, vec![0.10, 0.11, 0.12]);
+
+    let (dwi_rows, dwi_images): (i64, i64) = db.conn.query_row(
+        "SELECT COUNT(*), COUNT(DISTINCT file_id) FROM dwi_timeseries",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    assert_eq!((dwi_rows, dwi_images), (2, 1));
+
+    let dwi_first: f64 = db.conn.query_row(
+        "SELECT trans_x FROM dwi_timeseries WHERE volume_idx = 0",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(dwi_first, 0.90, "the dwi view reads the dwi file's rows");
+
+    // Both adapters ship `undeclared: catalog`, so neither table hoards the ~1,800
+    // undeclared regressors as per-row JSON (docs/adr/0004).
+    for table in ["fmriprep_confounds", "qsiprep_confounds"] {
+        let has_other_data: bool = db.conn.query_row(
+            "SELECT count(*) > 0 FROM information_schema.columns \
+             WHERE table_name = ? AND column_name = 'other_data'",
+            [table],
+            |r| r.get(0),
+        )?;
+        assert!(!has_other_data, "{table} should have no other_data column");
+    }
+    Ok(())
+}

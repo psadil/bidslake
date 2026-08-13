@@ -649,6 +649,30 @@ mod tests {
         assert!(msg.contains("timeseries"), "name the collision: {msg}");
     }
 
+    /// The bundled fragments must not collide with each other, which is the whole point of
+    /// the check above — `--adapter fmriprep --adapter qsiprep` is a supported combination.
+    #[test]
+    fn every_bundled_ingestion_fragment_can_be_applied_together() {
+        let mut sources = vec![bids_schema::bundled_ingestion_source("base").unwrap()];
+        for name in bids_schema::BUNDLED_INGESTION_NAMES {
+            sources.push(bids_schema::bundled_ingestion_source(name).unwrap());
+        }
+        let ingestion = Ingestion::from_sources(&sources).expect("bundled fragments co-apply");
+        // And the two confounds tables keep distinct views.
+        assert_eq!(
+            ingestion
+                .describes("fmriprep_confounds")
+                .and_then(|d| d.view.as_deref()),
+            Some("timeseries")
+        );
+        assert_eq!(
+            ingestion
+                .describes("qsiprep_confounds")
+                .and_then(|d| d.view.as_deref()),
+            Some("dwi_timeseries")
+        );
+    }
+
     /// `events` declares the relation without an axis or a view: its rows are addressed by
     /// `onset`, and both sides of the relation would want the name `events`. Pinned because
     /// the two optional fields are what let a relation be *recorded* rather than materialized.
