@@ -70,14 +70,14 @@ async fn test_bids_inheritance() -> Result<()> {
     // Note: RepetitionTime is a standard BIDS field, so it's extracted to its own
     // (verbatim BIDS-named) "RepetitionTime" column and removed from 'other_data'.
     let tr1: f64 = db.conn.query_row(
-        "SELECT \"RepetitionTime\" FROM sidecars WHERE file_path LIKE '%sub-01%'",
+        "SELECT \"RepetitionTime\" FROM sidecars JOIN all_files USING (file_id) WHERE file_path LIKE '%sub-01%'",
         [],
         |r| r.get(0),
     )?;
     assert_eq!(tr1, 2.0, "sub-01 should inherit TR=2.0");
 
     let manuf1: String = db.conn.query_row(
-        "SELECT \"Manufacturer\" FROM sidecars WHERE file_path LIKE '%sub-01%'",
+        "SELECT \"Manufacturer\" FROM sidecars JOIN all_files USING (file_id) WHERE file_path LIKE '%sub-01%'",
         [],
         |r| r.get(0),
     )?;
@@ -89,14 +89,14 @@ async fn test_bids_inheritance() -> Result<()> {
     // Verify sub-02 (Override)
     // Should have TR=1.5 (override), Manufacturer=Siemens (inherited)
     let tr2: f64 = db.conn.query_row(
-        "SELECT \"RepetitionTime\" FROM sidecars WHERE file_path LIKE '%sub-02%'",
+        "SELECT \"RepetitionTime\" FROM sidecars JOIN all_files USING (file_id) WHERE file_path LIKE '%sub-02%'",
         [],
         |r| r.get(0),
     )?;
     assert_eq!(tr2, 1.5, "sub-02 should override TR=1.5");
 
     let manuf2: String = db.conn.query_row(
-        "SELECT \"Manufacturer\" FROM sidecars WHERE file_path LIKE '%sub-02%'",
+        "SELECT \"Manufacturer\" FROM sidecars JOIN all_files USING (file_id) WHERE file_path LIKE '%sub-02%'",
         [],
         |r| r.get(0),
     )?;
@@ -108,7 +108,7 @@ async fn test_bids_inheritance() -> Result<()> {
     // Verify Foreign Key relationship
     // Check that we can join scans and sidecars
     let join_count: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM scans s JOIN sidecars m ON s.dataset_id = m.dataset_id AND s.file_path = m.file_path",
+        "SELECT COUNT(*) FROM all_files s JOIN sidecars m USING (file_id) WHERE s.kind = 'data'",
         [],
         |r| r.get(0),
     )?;

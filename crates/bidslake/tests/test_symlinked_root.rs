@@ -12,7 +12,7 @@
 
 mod common;
 
-use common::{count, ingest};
+use common::{count, count_data_files, ingest};
 use std::fs;
 use std::os::unix::fs as unix_fs;
 
@@ -67,9 +67,9 @@ async fn symlinked_dataset_ingests_like_a_real_one() -> anyhow::Result<()> {
     // Both data files are registered, the broken link included — the walk classifies
     // from the link itself, so a dangling target is still a file.
     assert_eq!(
-        count(&db, "scans")?,
+        count_data_files(&db)?,
         2,
-        "both data files should reach `scans`"
+        "both data files should reach the registry"
     );
 
     // The TSV was read through its symlink, and the batched ingest's join on the
@@ -82,7 +82,7 @@ async fn symlinked_dataset_ingests_like_a_real_one() -> anyhow::Result<()> {
 
     // Inheritance picked up the sidecar through its symlink too.
     let tr: Option<f64> = db.conn.query_row(
-        "SELECT RepetitionTime FROM sidecars WHERE file_path LIKE '%_bold.nii.gz'",
+        "SELECT RepetitionTime FROM sidecars JOIN all_files USING (file_id) WHERE file_path LIKE '%_bold.nii.gz'",
         [],
         |r| r.get(0),
     )?;

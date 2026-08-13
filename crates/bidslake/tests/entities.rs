@@ -13,8 +13,8 @@ async fn generated_columns_populated() -> anyhow::Result<()> {
     // Assert all concept columns at once: exactly the facerecognition func-bold
     // runs must have every derived column set as expected.
     let matches: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM scans \
-         WHERE task = 'facerecognition' AND datatype = 'func' AND suffix = 'bold' \
+        "SELECT COUNT(*) FROM all_files \
+         WHERE kind = 'data' AND task = 'facerecognition' AND datatype = 'func' AND suffix = 'bold' \
            AND ses = 'mri' AND modality = 'mri' AND extension = '.nii.gz' \
            AND sub IS NOT NULL AND run IS NOT NULL",
         [],
@@ -34,7 +34,7 @@ async fn null_session_for_sessionless_dataset() -> anyhow::Result<()> {
     let db = ingest(bids_example("ds001")).await?;
 
     let with_ses: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM scans WHERE ses IS NOT NULL",
+        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND ses IS NOT NULL",
         [],
         |r| r.get(0),
     )?;
@@ -42,7 +42,7 @@ async fn null_session_for_sessionless_dataset() -> anyhow::Result<()> {
 
     // task/suffix are still populated for its bold runs.
     let bold: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM scans WHERE suffix = 'bold' AND task = 'balloonanalogrisktask'",
+        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND suffix = 'bold' AND task = 'balloonanalogrisktask'",
         [],
         |r| r.get(0),
     )?;
@@ -101,7 +101,7 @@ async fn query_by_concept_across_mixed_pool() -> anyhow::Result<()> {
     }
 
     let rest: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM scans WHERE task = 'rest' AND datatype = 'func' AND suffix = 'bold'",
+        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND task = 'rest' AND datatype = 'func' AND suffix = 'bold'",
         [],
         |r| r.get(0),
     )?;
@@ -112,7 +112,7 @@ async fn query_by_concept_across_mixed_pool() -> anyhow::Result<()> {
 
     // The pool genuinely mixes session and no-session datasets.
     let ses_states: i64 = db.conn.query_row(
-        "SELECT COUNT(DISTINCT ses IS NULL) FROM scans WHERE task = 'rest'",
+        "SELECT COUNT(DISTINCT ses IS NULL) FROM all_files WHERE kind = 'data' AND task = 'rest'",
         [],
         |r| r.get(0),
     )?;

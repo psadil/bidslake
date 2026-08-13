@@ -50,8 +50,6 @@ pub enum Phase {
     Process,
     /// The slice of `Process` spent in the tabular `read_csv` ingest.
     TabularReadCsv,
-    /// Reading back the dataset's existing `scans` rows before the bulk append.
-    ScansScan,
     /// Resolving the schema's structural associations over the file tree.
     Associations,
     /// Everything else between the passes and inheritance: links, diffusion,
@@ -80,7 +78,6 @@ const PHASES: &[Phase] = &[
     Phase::Process,
     Phase::TabularReadCsv,
     Phase::Finalize,
-    Phase::ScansScan,
     Phase::Associations,
     Phase::Inherit,
     Phase::InheritMerge,
@@ -98,7 +95,6 @@ impl Phase {
             Phase::Prefetch => "prefetch",
             Phase::Process => "process",
             Phase::TabularReadCsv => "  tabular read_csv",
-            Phase::ScansScan => "  scans read-back",
             Phase::Associations => "  associations",
             Phase::Finalize => "finalize",
             Phase::Inherit => "inherit",
@@ -115,7 +111,6 @@ impl Phase {
         matches!(
             self,
             Phase::TabularReadCsv
-                | Phase::ScansScan
                 | Phase::Associations
                 | Phase::InheritMerge
                 | Phase::InheritAppend
@@ -340,7 +335,6 @@ mod tests {
             Phase::Prefetch,
             Phase::Process,
             Phase::TabularReadCsv,
-            Phase::ScansScan,
             Phase::Associations,
             Phase::Finalize,
             Phase::Inherit,

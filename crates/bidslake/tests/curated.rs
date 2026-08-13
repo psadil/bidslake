@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{count, ingest};
+use common::{count, count_data_files, ingest};
 
 /// ds001 — plain anat/func dataset with a dataset-level `task-*_bold.json` that
 /// must be inherited into every matching bold sidecar.
@@ -15,7 +15,9 @@ async fn ds001_structure_and_inheritance() -> anyhow::Result<()> {
 
     assert_eq!(count(&db, "dataset_description")?, 1);
     assert_eq!(count(&db, "participants")?, 16, "ds001 has 16 participants");
-    assert_eq!(count(&db, "scans")?, 80);
+    assert_eq!(count_data_files(&db)?, 80);
+    // ds001 ships no `scans.tsv`, and `scans` is that file's satellite (docs/adr/0006).
+    assert_eq!(count(&db, "scans")?, 0, "no scans.tsv, so no scans rows");
     assert_eq!(count(&db, "sidecars")?, 48);
 
     // dataset_description fields.
@@ -39,14 +41,14 @@ async fn ds001_structure_and_inheritance() -> anyhow::Result<()> {
     // carries RepetitionTime=2.0, which must land on every bold sidecar.
     let (n_bold, distinct_tr): (i64, i64) = db.conn.query_row(
         "SELECT COUNT(*), COUNT(DISTINCT \"RepetitionTime\") \
-         FROM sidecars WHERE file_path LIKE '%bold.nii.gz'",
+         FROM sidecars JOIN all_files USING (file_id) WHERE file_path LIKE '%bold.nii.gz'",
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     assert!(n_bold > 0, "expected bold sidecars");
     assert_eq!(distinct_tr, 1, "all bold sidecars share the inherited TR");
     let tr: f64 = db.conn.query_row(
-        "SELECT DISTINCT \"RepetitionTime\" FROM sidecars WHERE file_path LIKE '%bold.nii.gz'",
+        "SELECT DISTINCT \"RepetitionTime\" FROM sidecars JOIN all_files USING (file_id) WHERE file_path LIKE '%bold.nii.gz'",
         [],
         |r| r.get(0),
     )?;
@@ -110,7 +112,7 @@ async fn ds000117_diffusion_and_associations() -> anyhow::Result<()> {
     assert_eq!(count(&db, "diffusion")?, 11 * 65);
     let (files, min_vols, max_vols): (i64, i64, i64) = db.conn.query_row(
         "SELECT COUNT(*), MIN(v), MAX(v) FROM \
-         (SELECT COUNT(*) v FROM diffusion GROUP BY dataset_id, file_path)",
+         (SELECT COUNT(*) v FROM diffusion GROUP BY file_id)",
         [],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
@@ -140,7 +142,7 @@ async fn ds000117_diffusion_and_associations() -> anyhow::Result<()> {
 
     let resolved: i64 = db.conn.query_row(
         "SELECT COUNT(*) FROM file_associations a \
-         JOIN scans s ON s.dataset_id = a.dataset_id AND s.file_path = a.target_file_path \
+         JOIN all_files s ON s.file_id = a.target_file_id \
          WHERE a.association_type = 'fieldmap'",
         [],
         |r| r.get(0),

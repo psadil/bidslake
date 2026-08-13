@@ -77,7 +77,7 @@ fn check_events(db: &BidsDb, root: &Path) -> anyhow::Result<usize> {
 
         let mut db_onset: Vec<Option<f64>> = db
             .conn
-            .prepare("SELECT onset FROM events WHERE file_path = ?")?
+            .prepare("SELECT onset FROM events JOIN all_files USING (file_id) WHERE file_path = ?")?
             .query_map([&rel], |r| r.get::<_, Option<f64>>(0))?
             .collect::<Result<_, _>>()?;
 
@@ -137,7 +137,7 @@ async fn ds001_batched_events_and_other_data() -> anyhow::Result<()> {
     let (has_extra, has_onset): (bool, bool) = db.conn.query_row(
         "SELECT list_contains(json_keys(other_data), 'cash_demean'), \
                 list_contains(json_keys(other_data), 'onset') \
-         FROM events WHERE file_path = ? LIMIT 1",
+         FROM events JOIN all_files USING (file_id) WHERE file_path = ? LIMIT 1",
         [&rel],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
@@ -179,7 +179,7 @@ async fn trailing_tab_header_still_ingests() -> anyhow::Result<()> {
     let db = ingest(root).await?;
 
     let (n, failed): (i64, i64) = db.conn.query_row(
-        "SELECT count(*), count(*) FILTER (WHERE status = 'failed') FROM tabular_files \
+        "SELECT count(*), count(*) FILTER (WHERE status = 'failed') FROM file_registry \
          WHERE file_path LIKE '%_events.tsv'",
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
@@ -233,7 +233,7 @@ async fn channels_preserve_line_order() -> anyhow::Result<()> {
 
         let db_names: Vec<String> = db
             .conn
-            .prepare("SELECT name FROM eeg_channels WHERE file_path = ? ORDER BY row_idx")?
+            .prepare("SELECT name FROM eeg_channels JOIN all_files USING (file_id) WHERE file_path = ? ORDER BY row_idx")?
             .query_map([&rel], |r| r.get(0))?
             .collect::<Result<_, _>>()?;
 
@@ -260,7 +260,8 @@ async fn xeeg_mixed_line_endings_batch_correctly() -> anyhow::Result<()> {
     // rejected by DuckDB's strict CSV parser. `strict_mode=false` ingests it; guard
     // that it stays ingested (all 166 rows), not silently skipped.
     let electrodes: i64 = db.conn.query_row(
-        "SELECT count(*) FROM ieeg_electrodes WHERE file_path LIKE '%sub-ieegModulator%electrodes.tsv'",
+        "SELECT count(*) FROM ieeg_electrodes JOIN all_files USING (file_id) \
+                  WHERE file_path LIKE '%sub-ieegModulator%electrodes.tsv'",
         [],
         |r| r.get(0),
     )?;

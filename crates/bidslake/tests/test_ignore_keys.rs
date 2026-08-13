@@ -63,7 +63,7 @@ async fn ignored_keys_are_dropped_and_the_rest_kept() -> anyhow::Result<()> {
     let db = ingest_with(tmp.path(), FRAGMENT).await?;
 
     let (tr, other): (Option<f64>, Option<String>) = db.conn.query_row(
-        "SELECT RepetitionTime, other_data FROM sidecars WHERE file_path LIKE '%_bold.nii.gz'",
+        "SELECT RepetitionTime, other_data FROM sidecars JOIN all_files USING (file_id) WHERE file_path LIKE '%_bold.nii.gz'",
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
@@ -94,7 +94,7 @@ async fn the_same_keys_are_kept_without_the_policy() -> anyhow::Result<()> {
     let db = ingest_with(tmp.path(), NO_IGNORES).await?;
 
     let other: Option<String> = db.conn.query_row(
-        "SELECT other_data FROM sidecars WHERE file_path LIKE '%_bold.nii.gz'",
+        "SELECT other_data FROM sidecars JOIN all_files USING (file_id) WHERE file_path LIKE '%_bold.nii.gz'",
         [],
         |r| r.get(0),
     )?;

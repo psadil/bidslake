@@ -17,16 +17,17 @@ for f in lake.get(task="rest", suffix="bold", extension=".nii.gz"):
     events = f.get_events()          # associated events (inheritance-resolved)
 
 # Whole tables as Polars (eager or lazy with projection pushdown):
-df = lake.scans.pl()
-lf = lake.sidecars.lazy().select("dataset_id", "RepetitionTime")
+df = lake.datafiles.pl()             # the file registry, narrowed to primary data files
+all_of_it = lake.all_files.pl()      # every file the walk saw: sidecars, .bval, README, …
+lf = lake.sidecars.lazy().select("file_id", "RepetitionTime")
 
 # Typed per-table column expressions and the wide one-big-table view:
 from bidslake import C
-lake.scans.pl().filter((C.scans.task == "rest") & (C.scans.suffix == "bold"))
-lake.files.pl()                      # scans + sidecar__*/participant__*/dataset__*
+lake.datafiles.pl().filter((C.all_files.task == "rest") & (C.all_files.suffix == "bold"))
+lake.files.pl()                      # registry + sidecar__*/participant__*/dataset__*/scan__*
 
 # Safe raw SQL via t-strings:
-lake.sql(t"SELECT count(*) FROM scans WHERE suffix = {suffix}")
+lake.sql(t"SELECT count(*) FROM all_files WHERE suffix = {suffix}")
 ```
 
 ## Reading what the catalog did not store
@@ -37,8 +38,8 @@ record of the rest — which is how fMRIPrep confounds stay tractable, since a s
 file has ~1,800 columns against the ~13 the schema names (see
 [ADR 0004](../../docs/adr/0004-undeclared-column-policy.md)).
 
-Nothing is unreachable. `tabular_files` indexes every tabular file the ingest saw, and
-`lake.resolve()` opens any of them:
+Nothing is unreachable. `lake.all_files` is the registry — every file the ingest saw,
+whatever it did with it — and `lake.resolve()` opens any of them:
 
 ```python
 import polars as pl
@@ -47,13 +48,17 @@ import polars as pl
 lake.table("tabular_undeclared_columns").pl()
 
 # And the values, from the file itself.
-row = (lake.table("tabular_files").pl()
-       .filter(pl.col("table_name") == "fmriprep_confounds")
+row = (lake.all_files.pl()
+       .filter(pl.col("file_path").str.contains("confounds.tsv"))
        .row(0, named=True))
-path = lake.resolve(row["dataset_id"], row["file_path"])
+path = lake.resolve(row["dataset_id"], row["file_path"], row["root_uri"])
 full = pl.read_csv(path.open("rb"), separator="\t", null_values="n/a")
 full.select("^a_comp_cor_.*$")
 ```
+
+Pass `root_uri` when a dataset spans several ingest roots — subject-sharded pipeline
+output is one dataset with one root per subject ([ADR 0005](../../docs/adr/0005-multi-root-datasets.md)),
+and the root a file came from is what says where to open it. Every registry row carries it.
 
 `resolve()` uses the same root resolution as `BidsFile.path` (so `base_dir` and
 `root_override` apply) and returns a `UPath`. Read through `.open()` rather than

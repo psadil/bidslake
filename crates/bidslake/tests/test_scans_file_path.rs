@@ -31,12 +31,12 @@ async fn test_scans_file_path_with_root_uri() -> Result<()> {
     let mut parser = BidsParser::new(fs, None, schema, None, true);
     parser.parse(&db).await?;
 
-    // Get root_uri from dataset_description
-    let root_uri: String = db.conn.query_row(
-        "SELECT root_uri FROM dataset_description LIMIT 1",
-        [],
-        |r| r.get(0),
-    )?;
+    // Get root_uri from the dataset's root registry
+    let root_uri: String =
+        db.conn
+            .query_row("SELECT root_uri FROM dataset_roots LIMIT 1", [], |r| {
+                r.get(0)
+            })?;
 
     println!("Root URI: {}", root_uri);
     assert!(
@@ -45,7 +45,9 @@ async fn test_scans_file_path_with_root_uri() -> Result<()> {
     );
 
     // Get some file_path entries from scans table
-    let mut stmt = db.conn.prepare("SELECT file_path FROM scans LIMIT 5")?;
+    let mut stmt = db
+        .conn
+        .prepare("SELECT file_path FROM all_files WHERE kind = 'data' LIMIT 5")?;
     let file_paths: Vec<String> = stmt
         .query_map([], |row| row.get(0))?
         .collect::<Result<Vec<_>, _>>()?;
@@ -87,25 +89,22 @@ async fn test_scans_file_path_with_root_uri() -> Result<()> {
         assert!(full_path.exists(), "File should exist at: {:?}", full_path);
     }
 
-    // This dataset ships no `scans.tsv`, so every `scans` row is auto-generated and
-    // carries no source fields at all — `other_data` must be NULL, not merely free of
-    // the structural keys. Asserting NULL (rather than inspecting the JSON only when
-    // present) is what keeps this test from passing vacuously: `filename` used to be
-    // written here, duplicating the tail of `file_path` on every row.
-    let non_null: i64 = db.conn.query_row(
-        "SELECT count(*) FROM scans WHERE other_data IS NOT NULL",
+    // This dataset ships no `scans.tsv`, and since docs/adr/0006 `scans` is that file's
+    // satellite rather than a row per data file — so it is empty, while the files themselves
+    // are all in the registry. `scans` used to be seeded with a stub per data file, whose only
+    // purpose was to give the sidecars foreign key a referent; that key points at
+    // `file_registry` now, so the stubs were rows describing acquisitions nothing had
+    // described.
+    let scans: i64 = db
+        .conn
+        .query_row("SELECT count(*) FROM scans", [], |r| r.get(0))?;
+    assert_eq!(scans, 0, "no scans.tsv, so no scans rows");
+    let registered: i64 = db.conn.query_row(
+        "SELECT count(*) FROM all_files WHERE kind = 'data'",
         [],
         |r| r.get(0),
     )?;
-    let total: i64 = db
-        .conn
-        .query_row("SELECT count(*) FROM scans", [], |r| r.get(0))?;
-    assert!(total > 0, "expected at least one auto-generated scans row");
-    assert_eq!(
-        non_null, 0,
-        "auto-generated scans rows must leave other_data NULL \
-         (structural keys like `filename` are consumed into file_path, not stored)"
-    );
+    assert!(registered > 0, "the data files are still registered");
 
     Ok(())
 }
@@ -154,7 +153,7 @@ async fn scans_tsv_file_path_is_composed_from_its_directory() -> Result<()> {
         "sub-01/func/sub-01_task-rest_bold.nii.gz",
     ] {
         let n: i64 = db.conn.query_row(
-            "SELECT count(*) FROM scans WHERE file_path = ?",
+            "SELECT count(*) FROM all_files WHERE kind = 'data' AND file_path = ?",
             [expected],
             |r| r.get(0),
         )?;
@@ -163,15 +162,14 @@ async fn scans_tsv_file_path_is_composed_from_its_directory() -> Result<()> {
 
     // The failure mode: a row at the bare `filename` value, alongside the real one.
     let bare: i64 = db.conn.query_row(
-        "SELECT count(*) FROM scans WHERE file_path IN \
+        "SELECT count(*) FROM all_files WHERE kind = 'data' AND file_path IN \
          ('anat/sub-01_T1w.nii.gz', 'func/sub-01_task-rest_bold.nii.gz')",
         [],
         |r| r.get(0),
     )?;
     assert_eq!(bare, 0, "no scans row may keep the bare `filename` value");
 
-    // The TSV's own data reached the row — this is what `OR REPLACE` is for, since the walk
-    // synthesized a stub for each of these files first.
+    // The TSV's own data reached the row.
     let with_time: i64 = db.conn.query_row(
         "SELECT count(*) FROM scans WHERE acq_time IS NOT NULL",
         [],
@@ -179,7 +177,7 @@ async fn scans_tsv_file_path_is_composed_from_its_directory() -> Result<()> {
     )?;
     assert_eq!(with_time, 2, "acq_time from scans.tsv must be stored");
 
-    // Exactly the two data files: the stub and the TSV row collapsed onto one key.
+    // Exactly the two rows the TSV has, one per data file it names.
     let total: i64 = db
         .conn
         .query_row("SELECT count(*) FROM scans", [], |r| r.get(0))?;
@@ -194,12 +192,5 @@ async fn scans_tsv_file_path_is_composed_from_its_directory() -> Result<()> {
     )?;
     assert_eq!(leaked, 0, "`filename` must not appear in other_data");
 
-    // Provenance: the row count recorded for the scans.tsv is the rows it contributed.
-    let n_rows: i64 = db.conn.query_row(
-        "SELECT n_rows FROM tabular_files WHERE file_path = 'sub-01/sub-01_scans.tsv'",
-        [],
-        |r| r.get(0),
-    )?;
-    assert_eq!(n_rows, 2, "tabular_files.n_rows for the scans.tsv");
     Ok(())
 }

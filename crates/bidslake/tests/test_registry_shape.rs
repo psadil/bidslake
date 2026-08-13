@@ -41,9 +41,9 @@ fn schema_for(adapters: &[&str]) -> anyhow::Result<Schema> {
 }
 
 fn registry_columns(db: &BidsDb) -> anyhow::Result<Vec<String>> {
-    let mut stmt = db
-        .conn
-        .prepare("SELECT column_name FROM information_schema.columns WHERE table_name = 'scans'")?;
+    let mut stmt = db.conn.prepare(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'all_files'",
+    )?;
     let cols = stmt
         .query_map([], |r| r.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
@@ -53,17 +53,22 @@ fn registry_columns(db: &BidsDb) -> anyhow::Result<Vec<String>> {
 /// fMRIPrep's overlay adds `from`/`to`/`mode`; FreeSurfer's does not. Creating the
 /// registry from the narrower one and then indexing the wider one must not proceed
 /// quietly — those entities would be absent from every row with nothing to show for it.
+///
+/// **That refusal is retired** (docs/adr/0006). The concept columns are select items of the
+/// `all_files` view, not generated columns of a table, and a view is emitted
+/// `CREATE OR REPLACE` — so a later, wider run simply redefines it, retroactively, for rows
+/// already stored. What a wider run once had nowhere to put, it now computes on read.
 #[test]
-fn widening_an_existing_registry_is_refused() -> anyhow::Result<()> {
+fn widening_an_existing_registry_now_succeeds() -> anyhow::Result<()> {
     let db = BidsDb::new(":memory:")?;
     db.create_tables(&schema_for(&["freesurfer"])?)?;
+    db.create_tables(&schema_for(&["fmriprep"])?)?;
 
-    let err = db
-        .create_tables(&schema_for(&["fmriprep"])?)
-        .expect_err("indexing a wider adapter into a narrower catalog must fail");
-    let msg = err.to_string();
-    for want in ["from", "to", "mode", "adapter set describes the catalog"] {
-        assert!(msg.contains(want), "message should mention {want:?}: {msg}");
+    // The fMRIPrep entities the narrower first run knew nothing about are queryable now,
+    // without re-indexing anything.
+    let cols = registry_columns(&db)?;
+    for want in ["from", "to", "mode"] {
+        assert!(cols.iter().any(|c| c == want), "view should carry {want:?}");
     }
     Ok(())
 }
@@ -130,13 +135,15 @@ fn narrowing_is_allowed() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A dataset has one root, and `root_uri` is what turns a stored `file_path` back into an
-/// openable URI. Indexing a second root under the same id is therefore not additive: the
-/// first root wins, so every file from the second resolves under it — to a path that does
-/// not exist, with nothing raised. A study processed one subject at a time falls into this
-/// shape naturally, because subject-sharded output has one root per subject.
+/// A dataset may span several ingest roots, and naming the same `--dataset-id` for a
+/// second one adds it rather than being refused (docs/adr/0005). This is the shape a study
+/// processed one subject at a time falls into, because subject-sharded pipeline output has
+/// one root per subject — it is one logical dataset, so it gets one `dataset_id`.
+///
+/// The registry shape check is a separate concern and still applies; this lives here
+/// because it used to be that check's neighbour, as a refusal.
 #[tokio::test]
-async fn a_second_root_under_one_dataset_id_is_refused() -> anyhow::Result<()> {
+async fn a_second_root_is_registered_not_refused() -> anyhow::Result<()> {
     let first = tempfile::tempdir()?;
     let second = tempfile::tempdir()?;
     for (dir, sub) in [(&first, "01"), (&second, "02")] {
@@ -146,14 +153,28 @@ async fn a_second_root_under_one_dataset_id_is_refused() -> anyhow::Result<()> {
     }
 
     let db = common::ingest_as(first.path(), "study").await?;
-    let err = common::ingest_into(&db, second.path(), "study")
-        .await
-        .expect_err("a second root under one id must be refused");
-    let msg = err.to_string();
-    assert!(msg.contains("one root"), "{msg}");
-    assert!(msg.contains("distinct --dataset-id"), "{msg}");
+    common::ingest_into(&db, second.path(), "study").await?;
 
-    // Re-indexing the *same* root is the common case and must stay a no-op.
+    // One dataset, two roots — and both subjects in the one participants list.
+    let roots = db.dataset_roots("study")?;
+    assert_eq!(roots.len(), 2, "{roots:?}");
+    for dir in [&first, &second] {
+        let want = format!("file://{}", dir.path().canonicalize()?.display());
+        assert!(roots.contains(&want), "{want} missing from {roots:?}");
+    }
+    let datasets: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM dataset_description", [], |r| r.get(0))?;
+    assert_eq!(datasets, 1, "the two roots are one dataset");
+    let subjects: i64 = db.conn.query_row(
+        "SELECT COUNT(*) FROM participants WHERE dataset_id = 'study'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(subjects, 2, "participants spans both roots");
+
+    // Re-indexing a root already registered is the common case and must stay a no-op.
     common::ingest_into(&db, first.path(), "study").await?;
+    assert_eq!(db.dataset_roots("study")?.len(), 2);
     Ok(())
 }

@@ -55,7 +55,7 @@ pub enum Undeclared {
     /// and what every BIDS table does.
     #[default]
     Store,
-    /// Do not store them. The file stays on disk and stays in `tabular_files`, whose
+    /// Do not store them. The file stays on disk and stays in `file_registry`, whose
     /// `file_path` is the record of its full column set; the names seen are collected
     /// into `tabular_undeclared_columns`. For sources whose undeclared columns dwarf
     /// the declared ones — fMRIPrep confounds are ~1,800 columns against ~13 declared,

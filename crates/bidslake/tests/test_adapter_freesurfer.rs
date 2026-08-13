@@ -153,13 +153,13 @@ async fn catalog_files_land_in_scans_and_labels_join() -> anyhow::Result<()> {
 
     // Catalog: surf/mri files are registered in the standard `scans` table (left on disk).
     let surf: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM scans WHERE file_path LIKE '%surf/lh.thickness'",
+        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND file_path LIKE '%surf/lh.thickness'",
         [],
         |r| r.get(0),
     )?;
     assert_eq!(surf, 1, "surface cataloged in scans");
     let mri: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM scans WHERE file_path LIKE '%mri/aseg.mgz'",
+        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND file_path LIKE '%mri/aseg.mgz'",
         [],
         |r| r.get(0),
     )?;
@@ -193,8 +193,9 @@ async fn catalog_files_land_in_scans_and_labels_join() -> anyhow::Result<()> {
 /// A dataset ingested through an adapter has no `dataset_description.json` — that is what
 /// makes it non-BIDS — but it must still record a `root_uri`, because that is what turns a
 /// stored dataset-relative `file_path` back into an openable URI for a client (e.g.
-/// bidslake-py's `BidsFile.local_path`). Without the synthesized row its files are
-/// unresolvable.
+/// bidslake-py's `BidsFile.local_path`). Without a `dataset_roots` row its files are
+/// unresolvable; without the synthesized `dataset_description` row it is absent from
+/// `lake.datasets()` and from the wide `files` view.
 #[tokio::test]
 async fn adapter_dataset_records_a_root_uri() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
@@ -213,7 +214,7 @@ async fn adapter_dataset_records_a_root_uri() -> anyhow::Result<()> {
 
     let root: String = db
         .conn
-        .query_row("SELECT root_uri FROM dataset_description", [], |r| r.get(0))?;
+        .query_row("SELECT root_uri FROM dataset_roots", [], |r| r.get(0))?;
     assert!(
         root.starts_with("file://"),
         "root_uri should be a file:// URI, got {root}"
@@ -221,7 +222,7 @@ async fn adapter_dataset_records_a_root_uri() -> anyhow::Result<()> {
 
     // It must actually resolve: root_uri + a stored file_path is a real file on disk.
     let file_path: String = db.conn.query_row(
-        "SELECT file_path FROM scans WHERE file_path LIKE '%mri/aseg.mgz' LIMIT 1",
+        "SELECT file_path FROM all_files WHERE kind = 'data' AND file_path LIKE '%mri/aseg.mgz' LIMIT 1",
         [],
         |r| r.get(0),
     )?;
@@ -257,7 +258,7 @@ async fn cataloged_projection_reaches_the_registry() -> anyhow::Result<()> {
         String,
         String,
     ) = db.conn.query_row(
-        "SELECT sub, ses, seg, datatype, suffix, modality FROM scans \
+        "SELECT sub, ses, seg, datatype, suffix, modality FROM all_files \
          WHERE file_path LIKE '%sub-01_ses-1/mri/aseg.mgz'",
         [],
         |r| {
@@ -290,7 +291,7 @@ async fn cataloged_projection_reaches_the_registry() -> anyhow::Result<()> {
 
     // Every cataloged file carries its term map's `datatype`, not just the segmentations.
     let missing: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM scans WHERE datatype IS NULL",
+        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND datatype IS NULL",
         [],
         |r| r.get(0),
     )?;
@@ -310,22 +311,37 @@ async fn only_the_file_registry_carries_a_projection() -> anyhow::Result<()> {
     write_fs_tree(dir.path());
     let db = ingest_with_adapters(dir.path(), &["freesurfer"]).await?;
 
+    // Asserted as a set rather than a list: the registry's own name and the surfaces built
+    // over it are an implementation detail in flux (docs/adr/0006), but *which* things may
+    // carry a projection is not — the registry, and whatever views expose it.
     let mut stmt = db.conn.prepare(
-        "SELECT table_name FROM information_schema.columns WHERE column_name = 'projected'",
+        "SELECT table_name FROM information_schema.columns WHERE column_name = 'projected' \
+         ORDER BY table_name",
     )?;
-    let tables: Vec<String> = stmt
+    let carriers: Vec<String> = stmt
         .query_map([], |r| r.get::<_, String>(0))?
         .collect::<Result<_, _>>()?;
-    assert_eq!(tables, ["scans"], "only `scans` should carry a projection");
+    const REGISTRY_SURFACES: [&str; 2] = ["all_files", "file_registry"];
+    assert_eq!(
+        carriers, REGISTRY_SURFACES,
+        "only the registry and its views may carry a projection"
+    );
 
-    // ...and no other file-based table wraps its concepts in a COALESCE for it.
-    let wrapped: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM duckdb_tables() \
-         WHERE table_name <> 'scans' AND sql LIKE '%json_extract_string(projected%'",
-        [],
-        |r| r.get(0),
+    // ...and **no base table at all** pays the COALESCE. It used to be on `scans`' generated
+    // columns; the concept columns are now select items of the `all_files` view, so the cost
+    // is paid once, on read, by whoever queries the view. `duckdb_tables()` excludes views,
+    // which is exactly the point of asserting against it.
+    let mut stmt = db.conn.prepare(
+        "SELECT table_name FROM duckdb_tables() \
+         WHERE sql LIKE '%json_extract_string(projected%' ORDER BY table_name",
     )?;
-    assert_eq!(wrapped, 0);
+    let wrapped: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<Result<_, _>>()?;
+    assert!(
+        wrapped.is_empty(),
+        "no base table should carry a projection fallback: {wrapped:?}"
+    );
     Ok(())
 }
 
@@ -352,7 +368,7 @@ async fn bids_named_files_still_read_concepts_from_the_path() -> anyhow::Result<
         String,
         bool,
     ) = db.conn.query_row(
-        "SELECT sub, task, run, datatype, suffix, projected IS NULL FROM scans \
+        "SELECT sub, task, run, datatype, suffix, projected IS NULL FROM all_files \
          WHERE file_path LIKE '%_task-rest_run-01_bold.nii.gz'",
         [],
         |r| {
@@ -463,8 +479,8 @@ async fn projected_subjects_register_as_participants() -> anyhow::Result<()> {
 
     // The point of the fix: the join is total. Every cataloged file resolves to a participant.
     let orphans: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM scans s \
-         WHERE s.sub IS NOT NULL \
+        "SELECT COUNT(*) FROM all_files s \
+         WHERE s.kind = 'data' AND s.sub IS NOT NULL \
            AND NOT EXISTS (SELECT 1 FROM participants p \
                            WHERE p.dataset_id = s.dataset_id \
                              AND p.participant_id = 'sub-' || s.sub)",
@@ -487,7 +503,7 @@ async fn recognized_bookkeeping_files_are_not_cataloged() -> anyhow::Result<()> 
 
     for pattern in ["%scripts/%", "%touch/%"] {
         let n: i64 = db.conn.query_row(
-            "SELECT COUNT(*) FROM scans WHERE file_path LIKE ?",
+            "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND file_path LIKE ?",
             [pattern],
             |r| r.get(0),
         )?;
@@ -520,7 +536,9 @@ async fn reindexing_an_adapter_dataset_does_not_duplicate_reader_rows() -> anyho
         "freesurfer_aparc",
         "freesurfer_measures",
         "freesurfer_labels",
-        "scans",
+        // The registry rather than `scans`: a recon-all tree ships no `scans.tsv`, and since
+        // docs/adr/0006 `scans` is that file's satellite, so it is legitimately empty here.
+        "file_registry",
         "participants",
     ];
     let snapshot = |db: &bidslake::db::BidsDb| -> anyhow::Result<Vec<(String, i64)>> {

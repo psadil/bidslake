@@ -20,7 +20,7 @@ def test_generated_tables_match_database(lake):
 
 def test_c_namespace_is_typed_pl_col():
     # Per-table accessors resolve to the matching pl.col expression.
-    assert str(C.scans.task) == str(pl.col("task")) and str(C.sidecars.RepetitionTime) == str(
+    assert str(C.all_files.task) == str(pl.col("task")) and str(C.sidecars.RepetitionTime) == str(
         pl.col("RepetitionTime")
     )
 

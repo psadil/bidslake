@@ -86,7 +86,7 @@ async fn feat_roles_are_projected_onto_bids_concepts() -> anyhow::Result<()> {
         ("T1w", "standard", 1),
     ] {
         let got: i64 = db.conn.query_row(
-            "SELECT COUNT(*) FROM scans WHERE suffix = ? AND \"desc\" = ?",
+            "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND suffix = ? AND \"desc\" = ?",
             duckdb::params![suffix, desc],
             |r| r.get(0),
         )?;
@@ -96,7 +96,7 @@ async fn feat_roles_are_projected_onto_bids_concepts() -> anyhow::Result<()> {
     // The unit's entities come from the directory name, for both the session/run form
     // and the bare one.
     let (sub, ses, task, run): (String, String, String, String) = db.conn.query_row(
-        "SELECT sub, ses, task, run FROM scans WHERE suffix = 'mixing'",
+        "SELECT sub, ses, task, run FROM all_files WHERE kind = 'data' AND suffix = 'mixing'",
         [],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
@@ -105,7 +105,7 @@ async fn feat_roles_are_projected_onto_bids_concepts() -> anyhow::Result<()> {
         ("01", "V1", "rest", "01")
     );
     let bare: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM scans WHERE sub = '02' AND ses IS NULL AND run IS NULL \
+        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND sub = '02' AND ses IS NULL AND run IS NULL \
          AND task = 'cuff' AND suffix = 'mask'",
         [],
         |r| r.get(0),
@@ -132,7 +132,7 @@ async fn registration_transforms_carry_from_and_to() -> anyhow::Result<()> {
         ("exfunc", "standard", ".nii.gz"),
     ] {
         let got: i64 = db.conn.query_row(
-            "SELECT COUNT(*) FROM scans WHERE suffix = 'xfm' \
+            "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND suffix = 'xfm' \
              AND \"from\" = ? AND \"to\" = ? AND extension = ? AND mode = 'image'",
             duckdb::params![from, to, ext],
             |r| r.get(0),
@@ -152,12 +152,12 @@ async fn rater_separates_hand_classification_from_automatic() -> anyhow::Result<
     let db = ingest_with_adapters(dir.path(), &["feat"]).await?;
 
     let automatic: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM scans WHERE suffix = 'classification' AND rater IS NULL",
+        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND suffix = 'classification' AND rater IS NULL",
         [],
         |r| r.get(0),
     )?;
     let by_hand: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM scans WHERE suffix = 'classification' AND rater = 'psadil'",
+        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND suffix = 'classification' AND rater = 'psadil'",
         [],
         |r| r.get(0),
     )?;
@@ -166,7 +166,7 @@ async fn rater_separates_hand_classification_from_automatic() -> anyhow::Result<
     // The training set the classifier used lands in `desc`, so runs classified with
     // different training data stay distinguishable.
     let desc: String = db.conn.query_row(
-        "SELECT DISTINCT \"desc\" FROM scans WHERE suffix = 'classification'",
+        "SELECT DISTINCT \"desc\" FROM all_files WHERE kind = 'data' AND suffix = 'classification'",
         [],
         |r| r.get(0),
     )?;
@@ -193,7 +193,7 @@ async fn scratch_is_ignored_not_cataloged() -> anyhow::Result<()> {
         "%/pyfix.log",
     ] {
         let got: i64 = db.conn.query_row(
-            "SELECT COUNT(*) FROM scans WHERE file_path LIKE ?",
+            "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND file_path LIKE ?",
             duckdb::params![pattern],
             |r| r.get(0),
         )?;
@@ -204,7 +204,7 @@ async fn scratch_is_ignored_not_cataloged() -> anyhow::Result<()> {
     // ignore rules must discriminate within a directory rather than by prefix alone.
     for keeper in ["%/mc/prefiltered_func_data_mcf.par", "%/melodic_mix"] {
         let got: i64 = db.conn.query_row(
-            "SELECT COUNT(*) FROM scans WHERE file_path LIKE ?",
+            "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND file_path LIKE ?",
             duckdb::params![keeper],
             |r| r.get(0),
         )?;

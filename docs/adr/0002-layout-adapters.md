@@ -3,6 +3,9 @@
 Status: accepted (2026-07-14)
 
 Relates to: [ADR 0001](0001-schema-augmentation-overlays.md) (supersedes its §6).
+Amended by [ADR 0004](0004-undeclared-column-policy.md) (§11 below),
+[ADR 0005](0005-multi-root-datasets.md) (§3, §10) and
+[ADR 0006](0006-file-registry.md) (§3, §6, §7) — see the inline notes.
 
 ## Context
 
@@ -110,9 +113,9 @@ so both end up queryable side by side, distinguished by `dataset_id`. This is th
 model anyway: the recon-all tree *is* a separate dataset that fMRIPrep happens to vendor.
 
 Accumulation has one constraint, and it bites exactly here. Because tables are created only
-if absent, `scans` keeps the shape the **first** run gave it — so a later, **wider** run,
-whose overlay adds concept columns or whose term map adds the `projected` column of §7, has
-nowhere to put the difference. It used to drop it in silence;
+if absent, the file registry keeps the shape the **first** run gave it — so a later, **wider**
+run, whose overlay adds concept columns or whose term map adds the `projected` column of §7,
+has nowhere to put the difference. It used to drop it in silence;
 `BidsDb::check_registry_shape` now refuses. Both commands therefore name every adapter the
 catalog uses:
 
@@ -136,6 +139,20 @@ only, and only against widening, so a fresh catalog is unconstrained and a later
 run simply leaves columns NULL. Rebuilding `scans` in place would lift the constraint
 entirely and is not free — `sidecars` carries a foreign key to it — so it is recorded in
 `TODO.md` rather than done here.
+
+> **Amended 2026-08-12 (ADR 0005, ADR 0006).** Two of the paragraphs above are retired.
+>
+> **"A dataset also has exactly one root" is false**, and the refusal it describes is deleted.
+> `dataset_roots(dataset_id, root_uri)` holds one row per root, and the per-subject shards of
+> one pipeline run are one dataset with N roots — which is what makes `participants` a list of
+> participants again. See [ADR 0005](0005-multi-root-datasets.md).
+>
+> **The widening refusal now covers `projected` alone.** The concept columns moved off the
+> registry table onto the `all_files` *view*, which is emitted `CREATE OR REPLACE`, so a wider
+> run redefines them retroactively for rows already stored — there is nothing left to drop and
+> nothing to refuse. `projected` is still a physical column and still guarded. The rebuild
+> recorded in `TODO.md` is therefore no longer needed for the concept set. See
+> [ADR 0006](0006-file-registry.md) §3.
 
 ### 4. The ingestion schema: bidslake's own concern, formalized (supersedes ADR 0001 §6)
 
@@ -198,6 +215,14 @@ tabular file lands in `tabular_files`. That is why compressed continuous recordi
 (`*_physio.tsv.gz`) are `catalog`, not `ignore` — they are far too large to ingest row-per-sample,
 but users must still be able to *find* them in order to read them with e.g. polars.
 
+> **Amended 2026-08-12 (ADR 0006).** There is no longer a "which registry" question: there is
+> one registry, `file_registry`, and every file the walk sees is in it whatever its disposition
+> — including the sidecars, gradients and documentation that used to land nowhere at all. What
+> the file *is* became a `kind` column and what became of its contents a `status` column, so
+> the sentence above survives only as the shape of the classification, not of the storage.
+> `tabular_files` is deleted. The reason `*_physio.tsv.gz` is `catalog` rather than `ignore` is
+> unchanged, and is now visible as `kind = 'tabular', status = 'on_disk'`.
+
 *Rejected:* an `identity` field (`per_file`/`per_row`/`per_entity`). It conflated three things
 that are already structural — `scans` is always per-file, a `read` is always per-row, and
 per-entity is a BIDS relational notion expressed by `index_columns`. *Rejected:* `sort_by` —
@@ -217,13 +242,22 @@ it holds, and all three shapes are emitted by the one shared `generate_tabular_t
 | adapter data tables (`freesurfer_aparc`, …) | reader output only | **physical** `TEXT`, written by the reader |
 | the file registry (`scans`) | **both** | virtual, **falling back from** a stored projection |
 
+> **Amended 2026-08-12 (ADR 0006).** The first row is retired and the third has moved. A
+> BIDS-native data table now has **no** concept columns at all: it keys on `file_id` and reaches
+> its concepts by joining the registry, which is what removed 25 duplicated copies of them. The
+> third row's `COALESCE`-over-`projected` rule is unchanged in every detail — including the
+> derived projectable set and the measured cost below — but it is now the select list of the
+> `all_files` view rather than the generated columns of a table. The second row is untouched:
+> an adapter table's concepts are the reader's output and stay physical. See
+> [ADR 0006](0006-file-registry.md) §3.
+
 The first two are an either/or, selected by the ingestion schema's per-table `concepts` list
 (`freesurfer_aparc: {concepts: ["sub","ses","hemi","parc"]}`), which marks a table
 materialized.
 
-`scans` is the case that either/or does not fit, because it is the one table every cataloged
-file lands in — BIDS-named or term-mapped. Replacing its virtual columns would blank every
-BIDS row; keeping only them discards the projection. So its concept columns read
+The registry is the case that either/or does not fit, because it is the one relation every
+cataloged file lands in — BIDS-named or term-mapped. Replacing its virtual columns would blank
+every BIDS row; keeping only them discards the projection. So its concept columns read
 `COALESCE(json_extract_string(projected, '$.<name>'), <the existing regex>)`, over a physical
 `projected JSON` column holding what the term map computed. Precedence is explicit and lives
 in the DDL — which is stamped into `bidslake_schema`, so it travels with the catalog.
@@ -245,7 +279,10 @@ filename" — and the metaschema says outright that `tables` excludes the regist
 a side table joined at query time. It splits "what is this file?" across two places, so
 `get()` must either keep returning nothing for a projected concept or silently learn to join,
 and derived columns like `modality` would need re-implementing in the view. Chained generated
-columns give `modality` the projected `datatype` for free.
+columns give `modality` the projected `datatype` for free. *(ADR 0006 keeps this rejection:
+the projection and the concepts derived from it stay in one relation. What moved is the
+relation — from a table's generated columns to a view's select list, where lateral aliases give
+`modality` the projected `datatype` for free just as chained generated columns did.)*
 
 ### 8. Hand-written JSON Schema metaschemas, validated per artifact
 
@@ -275,6 +312,13 @@ is emitted **after** the walk: the insert carries a `WHERE NOT EXISTS` primary-k
 bare row written up front would shadow a real `dataset_description.json` and silently drop its
 metadata. (Across *runs* the table remains first-writer-wins on `dataset_id`; see the `eh-04`
 TODO.)
+
+> **Amended 2026-08-12 (ADR 0005).** `root_uri` no longer lives on `dataset_description`; it
+> lives in `dataset_roots`, one row per root, because a dataset may have several. The
+> synthesized row survives — `lake.datasets()` reads this table and the wide `files` view LEFT
+> JOINs it — but now holds only `dataset_id`. A real description upserts, which closes the
+> `eh-04` first-writer-wins gap the parenthesis above records. See
+> [ADR 0005](0005-multi-root-datasets.md) §1, §5, §6.
 
 ### 11. The validator consults term maps
 
@@ -360,7 +404,7 @@ have prevented only *textual* drift; this prevents semantic drift.
 - **A projection is worth the same whether the file is read or merely cataloged.** A term map
   answers "what does this path denote?", and §7 is what makes the file registry answer the
   same way. Before it, a cataloged file kept nothing: on a real `recon-all` tree, 0 of 249
-  `scans` rows carried a `datatype`, though the term map declares `anat` for every mapping —
+  registry rows carried a `datatype`, though the term map declares `anat` for every mapping —
   so consumers fell back to matching paths by hand (`file_path LIKE '%mri/wmparc.mgz'`), which
   is exactly what a term map exists to remove.
 - FSL's FEAT/MELODIC/FIX tree is the second bundled adapter, and it exercises a different

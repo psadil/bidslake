@@ -36,7 +36,7 @@ async fn test_sbref_files() -> Result<()> {
     let db = ingest(bids_example("ieeg_visual_multimodal")).await?;
 
     let sbref_count: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM scans WHERE file_path LIKE '%_sbref.nii%'",
+        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND file_path LIKE '%_sbref.nii%'",
         [],
         |r| r.get(0),
     )?;
@@ -50,7 +50,7 @@ async fn test_fieldmaps() -> Result<()> {
     let db = ingest(bids_example("ds000117")).await?;
 
     let fmap_count: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM scans WHERE file_path LIKE '%/fmap/%'",
+        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND file_path LIKE '%/fmap/%'",
         [],
         |r| r.get(0),
     )?;

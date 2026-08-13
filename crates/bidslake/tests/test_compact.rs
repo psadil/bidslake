@@ -53,7 +53,7 @@ async fn compact_preserves_everything_and_reclaims_space() -> anyhow::Result<()>
         // the re-index `DELETE` uses (and `events` has no `row_idx` to slice by — it is
         // declared order-insensitive).
         db.conn
-            .execute("DELETE FROM events WHERE hash(file_path) % 2 = 0", [])?;
+            .execute("DELETE FROM events WHERE hash(file_id) % 2 = 0", [])?;
         db.conn.execute("CHECKPOINT", [])?;
     }
 
@@ -80,7 +80,7 @@ async fn compact_preserves_everything_and_reclaims_space() -> anyhow::Result<()>
     // Generated (virtual) columns are re-derived, not copied — `SELECT *` on the
     // source would have included them and the INSERT would have been rejected.
     let with_task: i64 = db.conn.query_row(
-        "SELECT count(*) FROM scans WHERE task IS NOT NULL",
+        "SELECT count(*) FROM all_files WHERE kind = 'data' AND task IS NOT NULL",
         [],
         |r| r.get(0),
     )?;
@@ -97,7 +97,10 @@ async fn compact_preserves_everything_and_reclaims_space() -> anyhow::Result<()>
         [],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
-    assert_eq!(fks, 2, "sessions->participants and sidecars->scans");
+    assert_eq!(
+        fks, 4,
+        "sessions->participants, and scans/sidecars/diffusion->file_registry"
+    );
     assert!(pks > 0);
     assert_eq!(views, 1, "the dataset_relations view must survive");
 

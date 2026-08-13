@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://bidslake.dev/schemas/ingestion-metaschema.json",
   "title": "bidslake ingestion schema",
-  "description": "A bidslake-specific (not BIDS) schema that decides, for files already projected onto BIDS concepts, what bidslake does with each: read its contents into a data table, catalog it in the file registry, or ignore it. It selects with the BIDS selector-expression language over projected concepts (datatype/suffix/extension/\u2026), and declares per-table policy for the data tables that readers populate. It replaces bidslake's previously-hardcoded read-vs-catalog logic (the `.tsv` gate, `.bval`/`.bvec` handling, recording/ordering rules).",
+  "description": "A bidslake-specific (not BIDS) schema that decides, for files already projected onto BIDS concepts, what bidslake does with each: read its contents into a data table, catalog it (registry row only), or ignore it \u2014 keeping it out of the registry entirely. It selects with the BIDS selector-expression language over projected concepts (datatype/suffix/extension/\u2026), and declares per-table policy for the data tables that readers populate. It replaces bidslake's previously-hardcoded read-vs-catalog logic (the `.tsv` gate, `.bval`/`.bvec` handling, recording/ordering rules).",
   "type": "object",
   "properties": {
     "IngestionSchemaVersion": {
@@ -17,7 +17,7 @@
     },
     "tables": {
       "type": "object",
-      "description": "Per-data-table policy (materialized concepts, row ordering), keyed by table name. Only tables that a reader populates need an entry; the file registry (`scans`) and BIDS entity tables are not configured here.",
+      "description": "Per-data-table policy (materialized concepts, row ordering), keyed by table name. Only tables that a reader populates need an entry; the file registry (`file_registry`, surfaced as the `all_files` view) and BIDS entity tables are not configured here.",
       "patternProperties": {
         "^[a-zA-Z0-9_]+$": {
           "$ref": "#/$defs/tablePolicy"
@@ -53,7 +53,7 @@
             },
             {
               "const": "catalog",
-              "description": "Record the file as one row \u2014 its path plus projected BIDS concepts \u2014 in the standard file registry (`scans`, surfaced as the `files` view): the same registry populated for ordinary BIDS files, created even when no adapter is used. Contents are NOT parsed; the file stays on disk. This is how non-tabular data files (images, surfaces, `recon-all.log`) become discoverable."
+              "description": "Record the file as one row \u2014 its identity plus what a term map projected \u2014 in the file registry (`file_registry`, surfaced with its BIDS concepts as the `all_files` view): the same registry populated for ordinary BIDS files, created even when no adapter is used. Contents are NOT parsed; the file stays on disk. This is how non-tabular data files (images, surfaces, `recon-all.log`) become discoverable."
             },
             {
               "const": "ignore",
@@ -95,7 +95,7 @@
             },
             {
               "const": "catalog",
-              "description": "Do not store undeclared columns. The file is NOT parsed away \u2014 it stays on disk and stays in `tabular_files`, whose `file_path` is the authoritative record of its full column set, and the names encountered are collected into `tabular_undeclared_columns`. For sources whose undeclared columns dwarf the declared ones (fMRIPrep confounds carry ~1,800 columns against ~13 declared)."
+              "description": "Do not store undeclared columns. The file is NOT parsed away \u2014 it stays on disk and stays in `file_registry`, whose `file_path` is the authoritative record of its full column set, and the names encountered are collected into `tabular_undeclared_columns`. For sources whose undeclared columns dwarf the declared ones (fMRIPrep confounds carry ~1,800 columns against ~13 declared)."
             }
           ]
         },

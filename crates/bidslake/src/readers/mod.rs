@@ -29,26 +29,21 @@ pub struct ReaderRows {
 pub trait ContentReader: Send + Sync {
     fn read(
         &self,
-        dataset_id: &str,
-        file_path: &str,
+        file_id: &str,
         content: &str,
         facts: &FileFacts,
     ) -> anyhow::Result<Vec<ReaderRows>>;
 }
 
-/// Seed a row with `dataset_id`/`file_path` and every projected entity. Any entity a target
-/// table doesn't declare as a materialized concept falls through to `other_data` via
+/// Seed a row with its source file's `file_id` and every projected entity. Any entity a
+/// target table doesn't declare as a materialized concept falls through to `other_data` via
 /// [`Schema::row_values`](crate::schema::Schema).
-pub(crate) fn seed_row(dataset_id: &str, file_path: &str, facts: &FileFacts) -> Map<String, Value> {
+///
+/// `file_id` rather than `(dataset_id, file_path)`: a data table points at the registry, and
+/// the path it points to is a column of that (docs/adr/0006).
+pub(crate) fn seed_row(file_id: &str, facts: &FileFacts) -> Map<String, Value> {
     let mut obj = Map::new();
-    obj.insert(
-        "dataset_id".to_string(),
-        Value::String(dataset_id.to_string()),
-    );
-    obj.insert(
-        "file_path".to_string(),
-        Value::String(file_path.to_string()),
-    );
+    obj.insert("file_id".to_string(), Value::String(file_id.to_string()));
     for (k, v) in &facts.entities {
         obj.insert(k.clone(), Value::String(v.clone()));
     }

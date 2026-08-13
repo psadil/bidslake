@@ -15,17 +15,25 @@ use bidslake::schema::Schema;
 use serde_json::json;
 
 const FILE: &str = "sub-01/func/sub-01_task-rest_bold.nii.gz";
+/// Any stable id will do — these tests never resolve it back to a path.
+const FILE_ID: &str = "424242";
 
-/// A catalog with the standard schema and the `scans` row `sidecars` keys against — that
-/// foreign key is enforced on this insert path, so the parent has to exist first.
+/// A catalog with the standard schema and the `file_registry` row `sidecars` keys against —
+/// that foreign key is enforced on this insert path, so the parent has to exist first.
 fn db() -> anyhow::Result<(BidsDb, Schema)> {
     let db = BidsDb::new(":memory:")?;
     let schema = Schema::load(None)?;
     db.create_tables(&schema)?;
     db.insert(
         &schema,
-        "scans",
-        &json!({ "dataset_id": "d", "file_path": FILE }),
+        "file_registry",
+        &json!({
+            "file_id": FILE_ID,
+            "dataset_id": "d",
+            "root_uri": "file:///r",
+            "file_path": FILE,
+            "kind": "data",
+        }),
     )?;
     Ok((db, schema))
 }
@@ -38,15 +46,14 @@ fn case_colliding_undeclared_keys_both_survive() -> anyhow::Result<()> {
         &schema,
         "sidecars",
         &json!({
-            "dataset_id": "d",
-            "file_path": FILE,
+            "file_id": FILE_ID,
             "CustomField": "upper",
             "customfield": "lower",
         }),
     )?;
 
     let other: String = db.conn.query_row(
-        "SELECT other_data FROM sidecars WHERE dataset_id = 'd'",
+        "SELECT other_data FROM sidecars JOIN all_files USING (file_id) WHERE dataset_id = 'd'",
         [],
         |r| r.get(0),
     )?;
@@ -74,8 +81,7 @@ fn a_declared_field_is_matched_case_insensitively_and_not_duplicated() -> anyhow
         &schema,
         "sidecars",
         &json!({
-            "dataset_id": "d",
-            "file_path": FILE,
+            "file_id": FILE_ID,
             // The BIDS field is `RepetitionTime`; this is the spelling the DDL dropped.
             "repetitiontime": 2.0,
             "OnlyCustom": 1,
@@ -83,7 +89,7 @@ fn a_declared_field_is_matched_case_insensitively_and_not_duplicated() -> anyhow
     )?;
 
     let (rt, other): (Option<f64>, Option<String>) = db.conn.query_row(
-        "SELECT RepetitionTime, other_data FROM sidecars WHERE dataset_id = 'd'",
+        "SELECT RepetitionTime, other_data FROM sidecars JOIN all_files USING (file_id) WHERE dataset_id = 'd'",
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;

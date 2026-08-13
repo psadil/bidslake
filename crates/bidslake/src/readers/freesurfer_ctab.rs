@@ -15,8 +15,7 @@ pub struct FreeSurferCtab;
 impl ContentReader for FreeSurferCtab {
     fn read(
         &self,
-        dataset_id: &str,
-        file_path: &str,
+        file_id: &str,
         content: &str,
         facts: &FileFacts,
     ) -> anyhow::Result<Vec<ReaderRows>> {
@@ -30,7 +29,7 @@ impl ContentReader for FreeSurferCtab {
             if tokens.len() < 6 {
                 continue; // not an `id name r g b a` row
             }
-            let mut obj = seed_row(dataset_id, file_path, facts);
+            let mut obj = seed_row(file_id, facts);
             obj.insert("row_idx".to_string(), Value::from(row_idx as i64));
             obj.insert("seg_id".to_string(), Value::String(tokens[0].to_string()));
             obj.insert(

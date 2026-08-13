@@ -100,7 +100,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from polars import DataFrame
 from upath import UPath
 
-from ._sql import quote_ident
+from ._sql import DATAFILES, quote_ident
 from .file import BidsFile
 from .paths import to_local_path
 from .schema._generated import Entity, GetFilters
@@ -139,7 +139,7 @@ class FileInputOf[F: Mapping[str, Any], E: str]:
     join: tuple[E, ...]
     where: F
     dataset_id: str | Sequence[str] | None = None
-    table: str = "scans"
+    table: str = DATAFILES
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -251,7 +251,7 @@ class BindingOf[F: Mapping[str, Any], E: str]:
     anchor: F
     key: tuple[E, ...]
     inputs: Mapping[str, InputOf[F, E]]
-    table: str = "scans"
+    table: str = DATAFILES
 
 
 # The vocabulary a binding is checked against is the catalog's, not the library's:
@@ -324,15 +324,23 @@ def _check_scopes(lake: BidsLake, binding: BindingOf[Any, Any]) -> None:
 
 
 def _dataset_ids(lake: BidsLake) -> set[str]:
-    """Every `dataset_id` in the catalog, for naming what a bad scope could have meant."""
-    return set(lake._query("SELECT DISTINCT dataset_id FROM scans", [])["dataset_id"])
+    """Every `dataset_id` in the catalog, for naming what a bad scope could have meant.
+
+    From `dataset_roots` rather than the file registry: a dataset is registered when it is
+    named, so this holds even for one indexed from a root that turned out to be empty —
+    which is exactly the catalog a misspelled scope is most likely to be pointed at.
+    """
+    return set(lake._query("SELECT DISTINCT dataset_id FROM dataset_roots", [])["dataset_id"])
 
 
 def _check_columns(lake: BidsLake, table: str, names: Sequence[str], what: str) -> None:
     """Fail before any query runs, naming the table — a missing join entity is a
     typo far more often than it is a real absence, and the SQL error for it is
     unreadable."""
-    cols = lake.columns(table)
+    # The reachable columns, not the stored ones: a file-keyed table's BIDS concepts live
+    # on the registry and are joined in (docs/adr/0006), so joining on `sub` is legal
+    # against `events` even though `events` does not store it.
+    cols = lake._filter_columns(table)
     missing = [n for n in names if n not in cols]
     if missing:
         msg = f"{what}: column(s) {missing} not in table {table!r}; available: {sorted(cols)}"
@@ -341,7 +349,7 @@ def _check_columns(lake: BidsLake, table: str, names: Sequence[str], what: str) 
 
 def _index_files(
     lake: BidsLake, name: str, spec: FileInputOf[Any, Any]
-) -> dict[tuple[Any, ...], list[tuple[str, str]]]:
+) -> dict[tuple[Any, ...], list[tuple[str, str, str]]]:
     """Every candidate for one file input, bucketed by its join key.
 
     One query for the whole study, not one per unit: the join happens here, in a
@@ -354,15 +362,17 @@ def _index_files(
     if spec.dataset_id is not None:
         where["dataset_id"] = spec.dataset_id
     clause, params = lake._compile_filters(spec.table, where)
-    cols = ", ".join(quote_ident(c) for c in (*spec.join, "dataset_id", "file_path"))
-    sql = f"SELECT {cols} FROM {quote_ident(spec.table)}"
+    # `root_uri` travels with the row: a dataset may span several ingest roots, and which
+    # one a file came from is what says where to open it (docs/adr/0005).
+    cols = ", ".join(quote_ident(c) for c in (*spec.join, "dataset_id", "root_uri", "file_path"))
+    sql = f"SELECT {cols} FROM {lake._relation(spec.table)}"
     if clause:
         sql += f" WHERE {clause}"
 
-    index: dict[tuple[Any, ...], list[tuple[str, str]]] = {}
+    index: dict[tuple[Any, ...], list[tuple[str, str, str]]] = {}
     for row in lake._query(sql, params).iter_rows(named=True):
         key = tuple(row[c] for c in spec.join)
-        index.setdefault(key, []).append((row["dataset_id"], row["file_path"]))
+        index.setdefault(key, []).append((row["dataset_id"], row["root_uri"], row["file_path"]))
     return index
 
 
@@ -374,7 +384,7 @@ def _index_table(
     if spec.order_by is not None:
         _check_columns(lake, spec.table, [spec.order_by], f"input {name!r} order_by")
     select = ", ".join(quote_ident(c) for c in (*spec.join, *spec.columns))
-    sql = f"SELECT {select} FROM {quote_ident(spec.table)}"
+    sql = f"SELECT {select} FROM {lake._relation(spec.table)}"
     if spec.order_by is not None:
         sql += f" ORDER BY {quote_ident(spec.order_by)}"
 
@@ -428,8 +438,8 @@ def resolve(lake: BidsLake, binding: BindingOf[Any, Any]) -> list[Unit]:
         for name, spec in file_specs.items():
             hits = file_index[name].get(tuple(anchor.entities.get(k) for k in spec.join), [])
             if len(hits) == 1:
-                dataset_id, file_path = hits[0]
-                resolved[name] = lake.resolve(dataset_id, file_path)
+                dataset_id, root_uri, file_path = hits[0]
+                resolved[name] = lake.resolve(dataset_id, file_path, root_uri)
             else:
                 unresolved.append(
                     Unresolved(name, len(hits), "missing" if not hits else "ambiguous")

@@ -73,13 +73,19 @@ duckdb dataset.duckdb
 
 ```sql
 -- Files belonging to participants under 30
-SELECT p.participant_id, p.age, s.file_path
+SELECT p.participant_id, p.age, f.file_path
 FROM participants p
-JOIN scans s
-  ON s.dataset_id = p.dataset_id
- AND s.file_path LIKE p.participant_id || '/%'
+JOIN all_files f
+  ON f.dataset_id = p.dataset_id
+ AND f.kind = 'data'
+ AND f.file_path LIKE p.participant_id || '/%'
 WHERE p.age < 30;
 ```
+
+`all_files` is the file registry: one row per file the walk saw, with its BIDS concepts
+(`sub`, `ses`, `task`, `datatype`, `suffix`, …) derived from the path. Everything else that
+is about a file — its sidecar metadata, its events, its channels — keys on `file_id` and
+joins back to it ([ADR 0006](../../docs/adr/0006-file-registry.md)).
 
 ## Tabular data is in the database
 
@@ -87,9 +93,9 @@ BIDS keeps a surprising amount of information in `.tsv` tables — event timings
 
 > Every tabular file a dataset contains is accounted for. Header-bearing tables are ingested into the database; large compressed recordings (`*.tsv.gz`) are, for now, left on disk (a size policy — see the roadmap) but still recorded. Files excluded by `.bidsignore` are never read; a tabular file the BIDS schema does not describe is skipped with a warning and recorded — never silently dropped.
 
-Accounted for is not the same as *stored verbatim*. What a table stores is what the schema declares it stores; a table may be configured to leave undeclared columns in the file rather than in the database, in which case the file — still on disk, still in `tabular_files` — is the record of them.
+Accounted for is not the same as *stored verbatim*. What a table stores is what the schema declares it stores; a table may be configured to leave undeclared columns in the file rather than in the database, in which case the file — still on disk, still in the file registry — is the record of them.
 
-The tables and their columns are **derived from the BIDS schema** (`rules.tabular_data`, `objects.columns`, and — for the headerless recordings — `rules.sidecars` and `meta.associations`), not hardcoded. Each modality gets its own table (`eeg_channels`, `meg_channels`, `blood`, `physio`, …); uncompressed continuous recordings (chiefly `motion`) are stored one row per sample, with their column names taken from the sidecar `Columns` field or the associated `_channels.tsv`. A provenance table, `tabular_files`, records every tabular file with a `status` (`ingested` / `on_disk` / `skipped` / `failed`) and the table it maps to, and a test asserts nothing is silently dropped (`tests/tabular_coverage.rs` — `#[ignore]`d because it ingests the whole corpus, so run it with `cargo test -- --ignored`).
+The tables and their columns are **derived from the BIDS schema** (`rules.tabular_data`, `objects.columns`, and — for the headerless recordings — `rules.sidecars` and `meta.associations`), not hardcoded. Each modality gets its own table (`eeg_channels`, `meg_channels`, `blood`, `physio`, …); uncompressed continuous recordings (chiefly `motion`) are stored one row per sample, with their column names taken from the sidecar `Columns` field or the associated `_channels.tsv`. The file registry records every file with a `status` (`ingested` / `on_disk` / `skipped` / `failed`, or NULL for a file there was nothing to read), and a test asserts nothing is silently dropped (`tests/tabular_coverage.rs` — `#[ignore]`d because it ingests the whole corpus, so run it with `cargo test -- --ignored`).
 
 *What bidslake does* with each file — read its contents, catalog it unread, or ignore it — is a separate, equally declarative layer: the **ingestion schema** ([ADR 0002](../../docs/adr/0002-layout-adapters.md)), a bidslake-specific document whose rules select over projected BIDS concepts and are validated against their own metaschema. That is what routes `.bval`/`.bvec` to the diffusion reader and leaves `*.tsv.gz` on disk, and it is where per-table policy lives (row ordering, materialized concepts, and whether a table stores columns the schema does not declare — see the roadmap).
 
@@ -128,11 +134,16 @@ The saving is the whole reason the dial exists: measured 2026-08 on a 1,800-scan
 `undeclared: catalog` dial, which would have discarded every other custom field along with
 these two.
 
-Datasets accumulate in one catalog, with one constraint: `scans` is created once and keeps
-the shape of the run that created it, so **the adapter set describes the catalog, not the
-dataset being added**. Name every adapter the catalog uses on every run and order stops
-mattering; a run that would need a concept column `scans` lacks is refused rather than
-silently dropping it.
+Datasets accumulate in one catalog, and a dataset may itself span several ingest roots —
+subject-sharded pipeline output is one logical dataset with one root per subject, and naming
+the same `--dataset-id` for each adds a root rather than being refused
+([ADR 0005](../../docs/adr/0005-multi-root-datasets.md)).
+
+One constraint survives: a term map's `projected` column is physical, so a catalog created
+without one cannot gain it, and **the adapter set describes the catalog, not the dataset being
+added**. Name every adapter the catalog uses on every run and order stops mattering. The
+concept columns no longer have this problem — they live on a view, which a wider run simply
+redefines.
 
 Adding another layout is authoring those documents, not writing an ingester — see
 [ADR 0002](../../docs/adr/0002-layout-adapters.md).
@@ -142,7 +153,7 @@ Adding another layout is authoring those documents, not writing an ingester — 
 Everything else lives in the API docs — build and open them with `cargo doc --open`:
 
 - The **crate page** has worked, **runnable** examples for the common tasks (select files by metadata or BIDS concept, iterate the results into a pipeline, rename a participant, find associated files, query across datasets). Each is a doctest, so `cargo test --doc` runs them and they cannot drift from the code.
-- The **`schema` module** is the database reference — every table, its keys, the `other_data` overflow column, and the generated BIDS-concept columns on `scans`.
+- The **`schema` module** is the database reference — every table, its keys, the `other_data` overflow column, and the BIDS-concept columns on `all_files`.
 - Module docs cover the architecture (how the DuckDB schema is generated from the BIDS schema, and the ingestion pipeline).
 
 ## Status
@@ -168,7 +179,7 @@ The **mechanism** for this is settled. [ADR 0002](../../docs/adr/0002-layout-ada
 
 What remains crude is the **criterion**. Two levers exist, at different granularities:
 
-- *Whole file* — one rule, `extension == ".tsv.gz"` → `catalog`, is all that stands between a catalog and two million rows of physio. It is a proxy, not a principle: it happens to catch the physio/stim recordings because BIDS always compresses them. The files stay recorded in `tabular_files` (`status = 'on_disk'`), tracked and findable, just unread. Candidate replacements — row count, byte size, sampling rate from the sidecar, the BIDS suffix — all have failure modes, and the choice interacts with the (stubbed) `transcode` and `verify` commands.
+- *Whole file* — one rule, `extension == ".tsv.gz"` → `catalog`, is all that stands between a catalog and two million rows of physio. It is a proxy, not a principle: it happens to catch the physio/stim recordings because BIDS always compresses them. The files stay recorded in the registry (`kind = 'tabular'`, `status = 'on_disk'`), tracked and findable, just unread. Candidate replacements — row count, byte size, sampling rate from the sidecar, the BIDS suffix — all have failure modes, and the choice interacts with the (stubbed) `transcode` and `verify` commands.
 - *Per column* — `undeclared: "catalog"` in a table's policy, which stores the columns a table declares and leaves the rest in the file. This is what keeps fMRIPrep confounds tractable: the file has ~1,800 columns, the schema declares ~13, and storing the remainder as per-row JSON cost 24 MB of database per confounds file. See [ADR 0004](../../docs/adr/0004-undeclared-column-policy.md).
 
 In managed mode the likely answer for the whole-file case is the DuckLake split applied one level down: small tabular data stays in the catalog, while large continuous recordings are written to partitioned Parquet (or [Vortex](https://vortex.dev/)) files on disk and exposed as views, so SQL still sees one table.

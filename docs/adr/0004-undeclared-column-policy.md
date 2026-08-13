@@ -72,10 +72,16 @@ Omitting the column rather than nulling it is load-bearing: `Schema::row_values`
 iterates `table_columns`, so with no such field there is no branch to populate, and the
 Rust producer follows with no code of its own.
 
-**2. Losslessness by reference, not by value.** The file stays on disk and stays in
-`tabular_files`, whose `file_path` is the authoritative record of its full column set —
-one line of I/O away. Declared-ness becomes the storage dial rather than a wall: a user
-who wants `a_comp_cor_00` declares it in the overlay and pays 8 B/row.
+**2. Losslessness by reference, not by value.** The file stays on disk and stays in the file
+registry, whose `file_path` is the authoritative record of its full column set — one line of
+I/O away. Declared-ness becomes the storage dial rather than a wall: a user who wants
+`a_comp_cor_00` declares it in the overlay and pays 8 B/row.
+
+> **Amended 2026-08-12 (ADR 0006).** That registry was `tabular_files`, which is now deleted;
+> its rows and its `status` column are part of `file_registry`, surfaced as `all_files`. The
+> route is unchanged in substance — `lake.resolve(dataset_id, file_path, root_uri)` off a
+> registry row, then read the file — and `bidslake-py`'s `resolve` docstring carries the
+> worked recipe. See [ADR 0006](0006-file-registry.md) §1.
 
 **3. Discovery via a global name dictionary, not a per-file manifest.** This is the part that
 had to be measured rather than assumed. Keying a manifest by header signature looked free —

@@ -40,7 +40,13 @@ enum Commands {
         #[arg(short, long, default_value = "bidslake.duckdb")]
         output: String,
 
-        /// Dataset ID (optional, inferred from dataset_description.json if not provided)
+        /// Dataset ID (optional, inferred from dataset_description.json if not provided).
+        ///
+        /// A dataset may span several ingest roots — subject-sharded pipeline output is
+        /// one dataset with one root per subject — so naming the same id on a second
+        /// `--input` adds that root rather than being refused (docs/adr/0005). Naming it
+        /// is also how you say two roots belong together when the inferred name cannot:
+        /// a pipeline writes its own name into `Name`, identically for every study.
         #[arg(short, long)]
         dataset_id: Option<String>,
 
@@ -66,10 +72,11 @@ enum Commands {
         /// filenames carry no BIDS entities), and an ingestion fragment (read/catalog
         /// policy). Which of the three exist varies by producer. Repeatable.
         ///
-        /// The set describes the CATALOG, not the dataset being added: `scans` is created
-        /// once and keeps the shape of the run that created it, so name every adapter the
-        /// catalog uses on every run and order stops mattering. A run needing a concept
-        /// column `scans` lacks is refused rather than silently dropping it.
+        /// The set describes the CATALOG, not the dataset being added. Name every adapter
+        /// the catalog uses on every run and order stops mattering: a run needing the term-map
+        /// projection column an existing registry lacks is refused rather than silently
+        /// dropping it, and a run *narrower* than the catalog redefines the `all_files` view
+        /// without the concepts the wider one added.
         #[arg(long = "adapter")]
         adapter: Vec<String>,
 
@@ -367,16 +374,10 @@ fn ensure_link_tables(db: &BidsDb) -> Result<()> {
 /// re-index. Mirrors `BidsParser::record_links`, but reads the stored columns instead of the
 /// live JSON. Returns the number of datasets processed.
 fn backfill_links(db: &BidsDb) -> Result<usize> {
-    type Row = (
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    );
+    type Row = (String, Option<String>, Option<String>, Option<String>);
     let rows: Vec<Row> = {
         let mut stmt = db.conn.prepare(
-            "SELECT dataset_id, root_uri, \"DatasetDOI\", \"SourceDatasets\", \
+            "SELECT dataset_id, \"DatasetDOI\", \"SourceDatasets\", \
              CAST(\"DatasetLinks\" AS VARCHAR) FROM dataset_description",
         )?;
         let mapped = stmt.query_map([], |r| {
@@ -385,21 +386,22 @@ fn backfill_links(db: &BidsDb) -> Result<usize> {
                 r.get::<_, Option<String>>(1)?,
                 r.get::<_, Option<String>>(2)?,
                 r.get::<_, Option<String>>(3)?,
-                r.get::<_, Option<String>>(4)?,
             ))
         })?;
         mapped.collect::<std::result::Result<_, _>>()?
     };
 
-    for (dataset_id, root_uri, doi, sources, named) in &rows {
+    for (dataset_id, doi, sources, named) in &rows {
         db.clear_derived_links(dataset_id)?;
         db.record_dataset_identity(
             dataset_id,
             &links::canonicalize(&format!("dataset:{dataset_id}")),
             "self",
         )?;
-        if let Some(root) = root_uri {
-            db.record_dataset_identity(dataset_id, &links::canonicalize(root), "root_uri")?;
+        // Roots come from `dataset_roots`, not from a column on this row: a dataset may
+        // have been built from several, and all of them are identities it *is*.
+        for root in db.dataset_roots(dataset_id)? {
+            db.record_dataset_identity(dataset_id, &links::canonicalize(&root), "root_uri")?;
         }
         if let Some(doi) = doi {
             db.record_dataset_identity(dataset_id, &links::canonicalize(doi), "DatasetDOI")?;
@@ -924,9 +926,10 @@ fn report_reclaimable_space(db: &BidsDb, output: &str) {
 /// plus the list of `skipped` files (the ones an overlay could bring in).
 fn print_routing_summary(db: &BidsDb) -> Result<()> {
     println!("\n=== dry run: tabular routing ===");
-    let mut stmt = db
-        .conn
-        .prepare("SELECT status, count(*) FROM tabular_files GROUP BY status ORDER BY status")?;
+    let mut stmt = db.conn.prepare(
+        "SELECT status, count(*) FROM file_registry \
+             WHERE status IS NOT NULL GROUP BY status ORDER BY status",
+    )?;
     let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
     for row in rows {
         let (status, n) = row?;
@@ -934,7 +937,7 @@ fn print_routing_summary(db: &BidsDb) -> Result<()> {
     }
 
     let mut stmt = db.conn.prepare(
-        "SELECT file_path FROM tabular_files WHERE status = 'skipped' ORDER BY file_path",
+        "SELECT file_path FROM file_registry WHERE status = 'skipped' ORDER BY file_path",
     )?;
     let skipped: Vec<String> = stmt
         .query_map([], |r| r.get::<_, String>(0))?

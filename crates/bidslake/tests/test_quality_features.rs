@@ -25,7 +25,7 @@ async fn test_root_uri_path_reconstruction() -> Result<()> {
 
     let root_uri: Option<String> =
         db.conn
-            .query_row("SELECT root_uri FROM dataset_description", [], |r| r.get(0))?;
+            .query_row("SELECT root_uri FROM dataset_roots", [], |r| r.get(0))?;
 
     let uri = root_uri.expect("root_uri should be populated");
     assert!(
@@ -98,7 +98,7 @@ async fn case_variant_metadata_reaches_its_typed_column() -> Result<()> {
 
     let (count, other): (Option<i64>, Option<String>) = db.conn.query_row(
         r#"SELECT "MISCChannelCount", other_data::VARCHAR FROM sidecars
-           WHERE file_path LIKE '%_eeg.edf'"#,
+           JOIN all_files USING (file_id) WHERE file_path LIKE '%_eeg.edf'"#,
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;

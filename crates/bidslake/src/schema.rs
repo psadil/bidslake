@@ -8,10 +8,12 @@
 //! `file_associations` (derived `IntendedFor`-style cross-references), and the
 //! cross-dataset `dataset_links`/`dataset_identity` (see `docs/adr/0003`).
 //!
-//! Every table is keyed by `dataset_id`, so multiple datasets can coexist in one
+//! Every table is scoped to one `dataset_id`, so multiple datasets can coexist in one
 //! database and stay isolated while being queried together. The one place datasets
 //! are *related* to each other is the `dataset_relations` **view**, which resolves
 //! cross-dataset provenance at query time without any table crossing that boundary.
+//! A dataset may be built from several ingest **roots** (`dataset_roots`, docs/adr/0005);
+//! a file-keyed table reaches its dataset through `file_registry` rather than storing one.
 //!
 //! # The tabular-data invariant
 //!
@@ -23,7 +25,7 @@
 //! `rules.sidecars` and `meta.associations`), never hardcoded. Large compressed
 //! recordings (`*.tsv.gz`) are left on disk for now as a size policy, but are still
 //! recorded; a file the schema does not describe is skipped with a warning. The
-//! `tabular_files` table records every tabular file with a `status`
+//! `file_registry` records every file it saw with a `status`
 //! (`ingested`/`on_disk`/`skipped`/`failed`) so nothing is dropped unnoticed. See
 //! [`tabular`] for the routing model.
 //!
@@ -31,15 +33,23 @@
 //!
 //! - **`dataset_id`** — a dataset's identity, from the `Name` in its
 //!   `dataset_description.json` (falling back to the directory/prefix name).
-//! - **`file_path`** — a dataset-relative path (`sub-01/func/sub-01_task-x_bold.nii.gz`);
-//!   how imaging files are referenced across tables.
+//! - **`file_path`** — a **root**-relative path (`sub-01/func/sub-01_task-x_bold.nii.gz`).
+//!   It identifies a file only together with the root it was walked from, which is why
+//!   `file_registry` holds `(dataset_id, root_uri, file_path)` and everything else refers
+//!   to a file by `file_id` (docs/adr/0006).
+//! - **`file_id`** — the surrogate key for a file: the first 128 bits of
+//!   `SHA-256(dataset_id ␟ root_uri ␟ file_path)`, as a `HUGEINT`. Content-derived, so it
+//!   is stable across runs and machines and a re-index upserts onto the same rows. Every
+//!   file-keyed table keys on it. Three of them — `scans`, `sidecars`, `diffusion` — declare
+//!   an actual `FOREIGN KEY`; the per-row tables and `file_associations` do not (see the
+//!   diagram below), so the reference is by convention there rather than enforced.
 //! - **`other_data JSON`** — an overflow column on most tables. Any source field
 //!   without a dedicated column is preserved here; fields that *do* have a column are
 //!   not duplicated into it.
 //!
 //!   Conditional, not universal: a table whose ingestion policy declares
 //!   `undeclared: catalog` has no `other_data` column at all, and the columns it does
-//!   not declare stay in the file on disk — still recorded in `tabular_files`, with
+//!   not declare stay in the file on disk — still recorded in `file_registry`, with
 //!   their names in `tabular_undeclared_columns`. A table stores what its schema
 //!   declares it stores; see docs/adr/0004. fMRIPrep confounds are why: ~1,800 columns
 //!   against ~13 declared, which cost 24 MB of database per file as per-row JSON.
@@ -50,35 +60,61 @@
 //!
 //! - **`dataset_description`** — one row per dataset. PK `dataset_id`. Mirrors
 //!   `dataset_description.json`, whose fields keep their verbatim BIDS names
-//!   (`Name`, `BIDSVersion`, `License`, …), plus the bidslake-internal
-//!   `root_uri` (the `file://`/`s3://` origin) and `other_data`.
+//!   (`Name`, `BIDSVersion`, `License`, …), plus `other_data`. A dataset with no
+//!   description of its own still gets a row, holding only its id.
+//! - **`dataset_roots`** — the ingest roots a dataset was built from, PK
+//!   `(dataset_id, root_uri)`. One row for an ordinary dataset, N for subject-sharded
+//!   pipeline output, which is one logical dataset with one root per subject
+//!   (docs/adr/0005). `root_uri` + a root-relative `file_path` is what turns a stored row
+//!   back into an openable URI.
+//! - **`file_registry`** — **the manifest**: one row per file the walk saw, whatever
+//!   bidslake did with it. PK `file_id`, plus `(dataset_id, root_uri, file_path)` — the
+//!   triple that id hashes — and:
+//!   - **`kind`** — what the file *is*: `data` (an image, a recording, a surface),
+//!     `sidecar`, `tabular`, `gradient` (`.bval`/`.bvec`), `description`
+//!     (`dataset_description.json`), or `other` (READMEs, code, stimuli).
+//!   - **`status`** — what became of a file bidslake tried to *read*:
+//!     `ingested`/`on_disk`/`skipped`/`failed`, or NULL for a file there was never any
+//!     reading to report on.
+//!   - **`projected JSON`** — what a term map computed, present only when one is
+//!     configured (ADR 0002 §7).
+//!
+//!   Only the files the walk never reached are absent: `.bidsignore`d ones, and ones an
+//!   `ingest` rule dropped. It is the foreign-key target for every file-keyed table, which
+//!   is only sound because it holds *all* the files (docs/adr/0006).
+//!
+//!   Opaque *directory* datafiles (`.ds`/`.mefd`/`.ome.zarr`) get a **single** row and are
+//!   never descended into, so their internal components are not indexed; the `pseudofile`
+//!   concept column flags them. (Recordings that are genuinely several files — e.g.
+//!   BrainVision `.vhdr`+`.vmrk`+`.eeg` — still get a row each.)
+//! - **`all_files`** (VIEW) — `file_registry` widened with the BIDS-concept columns
+//!   (see below). The query surface; `WHERE kind = 'data'` narrows it to primary data
+//!   files, which is what `bidslake-py`'s `get()` iterates.
 //! - **`participants`** — one row per subject. PK `(dataset_id, participant_id)`.
 //!   Columns from the BIDS participants schema (`age`, `sex`, `handedness`, …).
 //!   From `participants.tsv` and implicit `sub-` entities.
 //! - **`sessions`** — one row per subject-session. PK
 //!   `(dataset_id, session_id, participant_id)`.
-//! - **`scans`** — one row per primary **data file**, across modalities: NIfTI plus
-//!   electrophysiology (`.edf`/`.vhdr`/`.set`/…), MEG (`.ds`/`.fif`/…), NIRS (`.snirf`),
-//!   microscopy, etc. — a file in a datatype directory that is not a sidecar/tabular/gradient
-//!   companion (`.json`/`.tsv`/`.bval`/`.bvec`). PK `(dataset_id, file_path)`. Every discovered
-//!   data file gets a row (including ones a `scans.tsv` omits). It also carries **generated
-//!   columns** (see below), including a boolean **`pseudofile`** flag for opaque *directory*
-//!   datafiles (`.ds`/`.mefd`/`.ome.zarr`): these are indexed as a **single** row and never
-//!   descended into, so their internal components are not indexed. (Recordings that are genuinely
-//!   several files — e.g. BrainVision `.vhdr`+`.vmrk`+`.eeg` — still get a row each.)
+//! - **`scans`** — the `scans.tsv` satellite, and *not* a file registry despite the name
+//!   BIDS gives it: acquisition metadata (`acq_time`, `HED`, `other_data`) for the data
+//!   files a `scans.tsv` describes, PK `file_id`. Built the way `sessions` is — from the
+//!   file's contents — so a dataset with no `scans.tsv` has no rows here.
 //! - **`sidecars`** — the JSON-sidecar metadata for each imaging file after BIDS
 //!   inheritance (dataset-/subject-level sidecars merged, more-specific wins).
-//!   PK `(dataset_id, file_path)` referencing `scans`. Very wide — a column per
-//!   BIDS metadata field, verbatim-named (`RepetitionTime`, `EchoTime`, …), plus
-//!   `other_data`.
+//!   PK `file_id` referencing `file_registry` — the *data* file's id, not the sidecar's
+//!   (the sidecar has its own registry row, under its own path, as `kind = 'sidecar'`).
+//!   Very wide — a column per BIDS metadata field, verbatim-named (`RepetitionTime`,
+//!   `EchoTime`, …), plus `other_data`.
 //! - **`events`** — task-event rows from `*_events.tsv` (`onset`, `duration`,
-//!   `trial_type`, …, `other_data`); one row per line, no primary key, and — alone among
-//!   the per-row tables — **no `row_idx`**: order events by `onset` (see below).
+//!   `trial_type`, …, `other_data`); one row per line keyed by the `file_id` of the
+//!   `*_events.tsv` itself, no primary key, and — alone among the per-row tables —
+//!   **no `row_idx`**: order events by `onset` (see below).
 //! - **Per-modality tabular tables** — one per `rules.tabular_data` rule, named
 //!   for it: `eeg_channels`/`meg_channels`/…, `eeg_electrodes`/…, `nirs_optodes`,
 //!   `blood`, `asl_context`, `behavioral`, `samples`, `phenotype`, `descriptions`,
-//!   `segmentation_lookup`. Each has `(dataset_id, file_path, row_idx)`, the rule's
-//!   typed columns, `other_data`, and the generated virtual columns.
+//!   `segmentation_lookup`. Each has `(file_id, row_idx)` — the `file_id` of the `.tsv`
+//!   the rows came from — plus the rule's typed columns and `other_data`. They carry no
+//!   concept columns of their own; join `all_files` on `file_id` for those.
 //!
 //!   **`row_idx` exists because a SQL table is unordered and a TSV is not**, and it is
 //!   present exactly on the tables where that matters. Several BIDS tables carry meaning
@@ -102,20 +138,19 @@
 //!   `_channels.tsv`. Only *uncompressed* recordings (chiefly `motion`) are
 //!   populated; the compressed `*.tsv.gz` physio/stim files are left on disk (see
 //!   the invariant above), so those tables may be empty.
-//! - **`tabular_files`** — provenance: one row per tabular file the walk saw,
-//!   `(dataset_id, file_path, table_name, n_rows, status)`. `status` is
-//!   `ingested` (rows in `table_name`), `on_disk` (a compressed recording left on
-//!   disk), `skipped` (a suffix the schema does not describe), or `failed` (the batch
-//!   insert errored, so this run stored no rows for it). Backs the tabular-data
-//!   invariant above.
 //! - **`diffusion`** — one row per diffusion volume, parsed from the sibling
-//!   `.bval`/`.bvec` files: scalar `bval`, `bvec_x/_y/_z`, keyed by
-//!   `(dataset_id, file_path, volume_idx)`.
+//!   `.bval`/`.bvec` files: scalar `bval`, `bvec_x/_y/_z`, PK `(file_id, volume_idx)`
+//!   where `file_id` is the *image* the gradients describe. (A gradient set inherited from
+//!   a higher directory level applies to many images and has no single referent to key on,
+//!   so it is skipped — see `TODO.md`.)
 //! - **`file_associations`** — best-effort cross-references (chiefly an fmap's
-//!   `IntendedFor`): `source_file_path`, `target_file_path`, `association_type`
-//!   (`fieldmap`/`sbref`/`mask`/`derivative`). No foreign keys are enforced (the
-//!   source is often a sidecar JSON that isn't itself a `scans` row); targets are
-//!   resolved to full dataset-relative paths so they still join to `scans`.
+//!   `IntendedFor`): `source_file_id`, nullable `target_file_id`, `target_file_path`,
+//!   `association_type` (`fieldmap`/`sbref`/`mask`/`derivative`). PK
+//!   `(source_file_id, target_file_path, association_type)`. No foreign keys are declared:
+//!   `target_file_id` would need one that tolerates NULL, because an `IntendedFor` may name
+//!   a file the catalog does not hold — that target keeps its declared path with a NULL id
+//!   rather than being dropped. The source side needs none: it is always a file the walk
+//!   saw, since that is where the reference was read from.
 //! - **`dataset_links`** — what a dataset declares it came from, one row per
 //!   `SourceDatasets` entry / `--source-dataset` flag / `DatasetLinks` mapping:
 //!   `link_type`, `link_name`, `declared_ref`, and the canonicalized
@@ -127,10 +162,10 @@
 //!   `shares_source` (co-derivatives of one source), `derived_from`, or `source_of`.
 //!   Resolved at query time, so ingest order is irrelevant (`docs/adr/0003`).
 //!
-//! ## Query `scans` by BIDS concept
+//! ## Query `all_files` by BIDS concept
 //!
-//! `scans` carries **generated (virtual) columns** derived from `file_path`, so
-//! you filter on BIDS concepts instead of `LIKE '%…%'` on paths:
+//! `all_files` carries **columns derived from `file_path`**, so you filter on BIDS
+//! concepts instead of `LIKE '%…%'` on paths:
 //!
 //! - one column per BIDS **entity** — `sub`, `ses`, `task`, `run`, `acq`, `dir`,
 //!   `echo`, … — holding the raw value (`task='rest'`), or `NULL` when absent (so
@@ -142,75 +177,63 @@
 //!
 //! They are generated from the BIDS schema itself (`objects.entities`,
 //! `objects.datatypes`, `rules.modalities`) and computed on read, costing nothing
-//! at ingest. See [`dynamic`] for how they're built.
+//! at ingest. They live on the **view**, once, rather than on each of the 25
+//! file-keyed tables — which is what lets a wider later run redefine them
+//! retroactively, with `CREATE OR REPLACE VIEW`, for rows already stored.
+//! See [`dynamic`] for how they're built.
 //!
-//! A path is not always the source. `scans` registers every cataloged file,
+//! A path is not always the source. The registry holds every cataloged file,
 //! including ones a **term map** claimed (`sub-01/mri/wmparc.mgz`), whose names
 //! carry almost no BIDS concepts. Those files store what the term map projected in
-//! a `projected JSON` column, and the concepts it can supply are generated as
+//! a `projected JSON` column, and the concepts it can supply are computed as
 //! `COALESCE(<the projection>, <the path regex>)` — so the same `WHERE seg =
 //! 'wmparc'` reaches a FreeSurfer volume and a BIDS-named one alike. The column
 //! exists only when a term map is configured (ADR 0002 §7).
 //!
 //! ```sql
 //! SELECT dataset_id, sub, ses, run, file_path
-//! FROM scans
-//! WHERE task = 'rest' AND datatype = 'func' AND suffix = 'bold';
+//! FROM all_files
+//! WHERE kind = 'data' AND task = 'rest' AND datatype = 'func' AND suffix = 'bold';
+//! ```
+//!
+//! A satellite stores none of these, so reach them by joining on `file_id`:
+//!
+//! ```sql
+//! SELECT f.sub, f.task, e.onset, e.trial_type
+//! FROM events e JOIN all_files f USING (file_id)
+//! WHERE f.task = 'rest';
 //! ```
 //!
 //! # Relationships
 //!
 //! ```text
 //! dataset_description (dataset_id)
+//!   ├── dataset_roots (dataset_id, root_uri)   where the dataset was walked from
 //!   ├── participants (dataset_id, participant_id)
 //!   │     └── sessions (dataset_id, session_id, participant_id)
-//!   ├── scans (dataset_id, file_path)
-//!   │     ├── sidecars          (dataset_id, file_path)   FK → scans
-//!   │     ├── diffusion         (dataset_id, file_path, volume_idx)
-//!   │     ├── events            (dataset_id, file_path)
-//!   │     └── file_associations (target_file_path → scans.file_path, unenforced)
+//!   ├── file_registry (file_id)  ⇒ all_files (VIEW)   + the BIDS-concept columns
+//!   │     ├── scans             (file_id)              FOREIGN KEY → file_registry
+//!   │     ├── sidecars          (file_id)              FOREIGN KEY
+//!   │     ├── diffusion         (file_id, volume_idx)  FOREIGN KEY
+//!   │     ├── events            (file_id)              by convention, unenforced
+//!   │     ├── <per-modality>    (file_id, row_idx)     by convention, unenforced
+//!   │     └── file_associations (source_file_id, target_file_id nullable)  unenforced
 //!   ├── dataset_links    (dataset_id, …)   what this dataset declares it came from
 //!   └── dataset_identity (dataset_id, …)   what this dataset *is*
 //!         ⇒ dataset_relations (VIEW)        resolved dataset↔dataset edges (query-time)
 //! ```
 //!
-//! `scans` and `participants` aren't linked by an explicit column — a scan
+//! The registry and `participants` aren't linked by an explicit column — a file
 //! belongs to a participant via its `file_path` prefix
-//! (`s.file_path LIKE p.participant_id || '/%'`). To filter sidecar metadata by
-//! concept, join `sidecars` to `scans` on `(dataset_id, file_path)`; entity
-//! values are raw, so join to `participants` with `'sub-' || s.sub = p.participant_id`.
+//! (`f.file_path LIKE p.participant_id || '/%'`). To filter sidecar metadata by
+//! concept, join `sidecars` to `all_files` on `file_id`; entity values are raw, so join
+//! to `participants` with `'sub-' || f.sub = p.participant_id`.
 
 pub mod dynamic;
 pub mod ingestion;
 pub mod tabular;
 pub use dynamic::{AppliedOverlay, Schema};
 pub use ingestion::Ingestion;
-
-// Provenance for the tabular-data invariant: one row per tabular file the walk
-// encountered (minus `.bidsignore`d ones), so nothing is silently dropped.
-// `status` is one of:
-//   - `ingested`  — its rows are in `table_name` (`n_rows` of them).
-//   - `on_disk`   — a compressed continuous recording (`*.tsv.gz`) left on disk;
-//                   `table_name` names the table it *would* map to. This is a
-//                   deliberate, crude size policy (see the crate README roadmap):
-//                   the physio/stim recordings are row-per-sample and dwarf the
-//                   metadata, so for now they stay as files.
-//   - `skipped`   — a tabular file the BIDS schema does not describe (`table_name`
-//                   NULL).
-//   - `failed`    — a batch `INSERT` execution error dropped the file's rows for
-//                   this run (distinct from an empty-but-successful `ingested`);
-//                   `table_name` names the table it was routed to, `n_rows` 0.
-// The set is modeled by [`crate::db::TabularStatus`].
-pub const CREATE_TABULAR_FILES_TABLE: &str = "
-CREATE TABLE IF NOT EXISTS tabular_files (
-    dataset_id TEXT,
-    file_path TEXT,
-    table_name TEXT,
-    n_rows BIGINT,
-    status TEXT,
-    PRIMARY KEY (dataset_id, file_path)
-);
-";
 
 // The column names a table saw but does not declare — one row per distinct name,
 // per table, for the whole catalog.
@@ -219,7 +242,7 @@ CREATE TABLE IF NOT EXISTS tabular_files (
 // the names are otherwise nowhere in the database. It answers "what confound
 // regressors does this catalog's data contain?" without opening a file; the
 // authoritative per-file column set remains the file's own header, reachable via
-// `tabular_files.file_path`.
+// `file_registry.file_path`.
 //
 // Deliberately keyed by name rather than by file or by header signature. Real fMRIPrep
 // output does not share headers between files — the aCompCor component count varies per
@@ -235,19 +258,19 @@ CREATE TABLE IF NOT EXISTS tabular_undeclared_columns (
 ";
 
 // One row per diffusion volume, matching the row-per-sample shape of every other
-// tabular table. `file_path` is the diffusion NIfTI; `volume_idx` is the 0-based
+// tabular table. `file_id` is the diffusion NIfTI's; `volume_idx` is the 0-based
 // position of the volume, and (bval, bvec_x/y/z) are that volume's scalar
 // b-value and gradient direction, parsed from the sibling `.bval`/`.bvec` files.
 pub const CREATE_DIFFUSION_TABLE: &str = "
 CREATE TABLE IF NOT EXISTS diffusion (
-    dataset_id TEXT,
-    file_path TEXT,
+    file_id HUGEINT,
     volume_idx BIGINT,
     bval DOUBLE,
     bvec_x DOUBLE,
     bvec_y DOUBLE,
     bvec_z DOUBLE,
-    PRIMARY KEY (dataset_id, file_path, volume_idx)
+    PRIMARY KEY (file_id, volume_idx),
+    FOREIGN KEY (file_id) REFERENCES file_registry(file_id)
 );
 ";
 
@@ -257,13 +280,49 @@ CREATE TABLE IF NOT EXISTS diffusion (
 // NOT enforce foreign keys here — doing so would drop otherwise-valid
 // associations during import. Targets are resolved to full dataset-relative
 // paths so they still join to `scans` when present.
+// `target_file_id` is deliberately **nullable**, and `target_file_path` is kept beside it:
+// an `IntendedFor` may name a file the dataset does not ship, and dropping those would trade
+// this table's keep-everything contract for referential tidiness. A dangling reference stays
+// recorded as its raw path with no id. `source_file_id` has no such problem — the source is
+// always a file the walk saw, since that is where the reference was read from.
+//
+// Still no foreign keys: `target_file_id` would need one that tolerates NULL, and the source
+// side is already guaranteed by construction.
 pub const CREATE_FILE_ASSOCIATIONS_TABLE: &str = "
 CREATE TABLE IF NOT EXISTS file_associations (
-    dataset_id TEXT,
-    source_file_path TEXT,
+    source_file_id HUGEINT,
+    target_file_id HUGEINT,
     target_file_path TEXT,
     association_type TEXT,
-    PRIMARY KEY (dataset_id, source_file_path, target_file_path, association_type)
+    PRIMARY KEY (source_file_id, target_file_path, association_type)
+);
+";
+
+// Every ingest root a dataset was built from (see docs/adr/0005). One row for the
+// ordinary single-root dataset; N for subject-sharded pipeline output, which is one
+// logical dataset with one root per subject.
+//
+// This is what `dataset_id` no longer has to do. A `file_path` is relative to the
+// `root_uri` it was walked from, so the two together address a file: two roots of one
+// dataset can hold the same relative path without colliding, and everything
+// dataset-scoped (`dataset_description`, `participants`, `dataset_links`,
+// `dataset_identity`) stays single.
+//
+// The root's URI is its own identifier — no separate short label. A label would need a
+// rule for deriving one, an escape hatch for when that rule collides (two roots whose
+// directories share a basename, `scratch/sub-01/fmriprep` and `scratch/sub-02/fmriprep`),
+// and a guarantee it never moves, since it is a stored key that `file_path` resolves
+// through. A URI is unique by construction and needs none of that. DuckDB
+// dictionary-encodes the column, so repeating it per row costs a code, not a path.
+//
+// The registry is explicit rather than `SELECT DISTINCT root_uri FROM file_registry`
+// because it is authoritative for a root that contributed no rows at all — an ingest that
+// found nothing, or whose every file an `ignore` rule claimed.
+pub const CREATE_DATASET_ROOTS_TABLE: &str = "
+CREATE TABLE IF NOT EXISTS dataset_roots (
+    dataset_id TEXT,
+    root_uri TEXT,
+    PRIMARY KEY (dataset_id, root_uri)
 );
 ";
 

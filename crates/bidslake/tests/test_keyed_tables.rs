@@ -113,61 +113,6 @@ async fn participants_tsv_wins_over_the_walk_stub() -> Result<()> {
     Ok(())
 }
 
-/// `tabular_files.n_rows` is a user-facing provenance column that nothing asserted — the
-/// tabular-coverage test checks *classification* only, and this field once read 0 for every
-/// keyed file. The count is identity-dependent: a per-row table stores the source path, while
-/// a keyed table's rows are found by the key they carry.
-#[tokio::test]
-async fn tabular_files_records_the_rows_each_file_contributed() -> Result<()> {
-    let dir = TempDir::new()?;
-    let root = dir.path().join("ds");
-    std::fs::create_dir_all(root.join("sub-01/func"))?;
-    write_dataset(&root)?;
-    // A per-row table too, so both branches are exercised in one catalog.
-    std::fs::write(
-        root.join("sub-01/func/sub-01_task-rest_bold.nii.gz"),
-        b"nii",
-    )?;
-    std::fs::write(
-        root.join("sub-01/func/sub-01_task-rest_events.tsv"),
-        "onset\tduration\ttrial_type\n0.0\t1.0\ta\n2.0\t1.0\tb\n4.0\t1.0\tc\n",
-    )?;
-    let db = common::ingest(&root).await?;
-
-    // Per-row: exactly the lines of the file.
-    let events: i64 = db.conn.query_row(
-        "SELECT n_rows FROM tabular_files \
-         WHERE file_path = 'sub-01/func/sub-01_task-rest_events.tsv'",
-        [],
-        |r| r.get(0),
-    )?;
-    assert_eq!(events, 3, "events n_rows == its data lines");
-
-    // Keyed: the rows bearing the key, which includes stubs the walk made for sessions the
-    // file also lists — so assert it is attributed at all rather than pinning an exact count.
-    for f in [
-        "participants.tsv",
-        "sub-01/sub-01_sessions.tsv",
-        "sub-02/sub-02_sessions.tsv",
-    ] {
-        let n: i64 = db.conn.query_row(
-            "SELECT n_rows FROM tabular_files WHERE file_path = ?",
-            [f],
-            |r| r.get(0),
-        )?;
-        assert!(n > 0, "{f} must not report 0 rows");
-    }
-
-    // Nothing recorded as ingested may claim a table it did not land in.
-    let bad: i64 = db.conn.query_row(
-        "SELECT count(*) FROM tabular_files WHERE status = 'ingested' AND table_name IS NULL",
-        [],
-        |r| r.get(0),
-    )?;
-    assert_eq!(bad, 0);
-    Ok(())
-}
-
 /// Re-ingesting a dataset must **rebuild** it: no duplicate rows, and no rows missing.
 ///
 /// Comparing counts before and after is not enough on its own, and an earlier version of this
@@ -185,13 +130,15 @@ async fn reingesting_the_same_dataset_rebuilds_it() -> Result<()> {
     // must not be collided with. A fixture small enough that deleting one row empties its
     // table would pass no matter what the writers do.
     let root = common::bids_example("ds001");
+    // Not `scans`: ds001 ships no `scans.tsv`, and since docs/adr/0006 that table is the
+    // satellite of that file rather than a row per data file, so it is legitimately empty
+    // here and would fail the "more than one row" precondition below.
     let tables = [
-        "scans",
         "sidecars",
         "events",
         "file_associations",
         "participants",
-        "tabular_files",
+        "file_registry",
     ];
     let counts = |db: &bidslake::db::BidsDb| -> Result<Vec<(String, i64)>> {
         tables
@@ -216,10 +163,15 @@ async fn reingesting_the_same_dataset_rebuilds_it() -> Result<()> {
     // silently fails leaves these missing; one that rebuilds restores them without colliding
     // with the survivors.
     for sql in [
-        "DELETE FROM sidecars WHERE file_path LIKE '%run-01%'",
-        "DELETE FROM events WHERE file_path LIKE '%run-01%'",
-        "DELETE FROM file_associations WHERE source_file_path LIKE '%run-01%'",
-        "DELETE FROM scans WHERE file_path LIKE '%run-01%' AND file_path LIKE '%.nii.gz'",
+        "DELETE FROM sidecars WHERE file_id IN \
+          (SELECT file_id FROM all_files WHERE file_path LIKE '%run-01%')",
+        "DELETE FROM events WHERE file_id IN \
+          (SELECT file_id FROM all_files WHERE file_path LIKE '%run-01%')",
+        "DELETE FROM file_associations WHERE source_file_id IN \
+          (SELECT file_id FROM all_files WHERE file_path LIKE '%run-01%')",
+        "DELETE FROM scans WHERE file_id IN \
+          (SELECT file_id FROM all_files WHERE kind = 'data' AND file_path LIKE '%run-01%' \
+           AND file_path LIKE '%.nii.gz')",
     ] {
         db.conn.execute(sql, [])?;
     }

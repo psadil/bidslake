@@ -24,18 +24,16 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-/// Disposition of a tabular file in the `tabular_files` catalog (see
-/// [`schema::CREATE_TABULAR_FILES_TABLE`] for the column's documentation). A
-/// closed set as a type — not a `&str` — so a typo can't silently corrupt the
-/// tabular-coverage invariant this column backs.
+/// What bidslake did with a file — the `status` column of `file_registry`. A closed set as a
+/// type, not a `&str`, so a typo cannot silently corrupt the tabular-coverage invariant this
+/// column backs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabularStatus {
-    /// Its rows are in `table_name` (`n_rows` of them).
+    /// Its rows are in a data table, joinable on `file_id`.
     Ingested,
-    /// A compressed continuous recording left on disk; `table_name` names the
-    /// table it *would* map to.
+    /// A compressed continuous recording deliberately left on disk, contents unread.
     OnDisk,
-    /// A tabular file the BIDS schema does not describe (`table_name` NULL).
+    /// A tabular file the BIDS schema does not describe, so nothing routed it.
     Skipped,
     /// A batch `INSERT` execution failure dropped this file's rows for the run.
     Failed,
@@ -57,9 +55,12 @@ impl TabularStatus {
 /// `IntendedFor`). Written to the `file_associations` table.
 #[derive(Debug, Clone)]
 pub struct FileAssociation {
-    pub dataset_id: String,
-    pub source_file: String,
-    pub target_file: String,
+    pub source_file_id: String,
+    /// `None` when the target names a file this dataset does not ship — a dangling
+    /// `IntendedFor`. Kept rather than dropped (see the table's DDL), which is why the
+    /// path below travels alongside the id.
+    pub target_file_id: Option<String>,
+    pub target_file_path: String,
     pub assoc_type: String,
 }
 
@@ -103,9 +104,12 @@ impl BidsDb {
     /// plus the static `diffusion`, `file_associations`, and cross-dataset
     /// `dataset_links`/`dataset_identity` tables (and the `dataset_relations` view).
     ///
-    /// Creates nothing and returns `Err` when an existing catalog's `scans` is narrower
-    /// than this run's overlays and term maps need — `check_registry_shape` runs first,
-    /// because `IF NOT EXISTS` would otherwise drop the difference in silence.
+    /// Creates nothing and returns `Err` when an existing catalog's `file_registry` lacks a
+    /// *physical* column this run would write — in practice the `projected` column a term map
+    /// needs — because `IF NOT EXISTS` would otherwise drop the difference in silence. The
+    /// concept columns are not covered: they are select items of the `all_files` view, which
+    /// is emitted `CREATE OR REPLACE`, so a wider run simply redefines them. See
+    /// `check_registry_shape`, and the narrowing caveat recorded in `TODO.md`.
     pub fn create_tables(&self, schema: &Schema) -> anyhow::Result<()> {
         self.check_registry_shape(schema)?;
         let sqls = schema.create_tables_sql();
@@ -116,9 +120,10 @@ impl BidsDb {
         self.conn.execute(schema::CREATE_DIFFUSION_TABLE, [])?;
         self.conn
             .execute(schema::CREATE_FILE_ASSOCIATIONS_TABLE, [])?;
-        self.conn.execute(schema::CREATE_TABULAR_FILES_TABLE, [])?;
         self.conn
             .execute(schema::CREATE_TABULAR_UNDECLARED_COLUMNS_TABLE, [])?;
+        // The ingest roots a dataset was built from (see docs/adr/0005).
+        self.conn.execute(schema::CREATE_DATASET_ROOTS_TABLE, [])?;
         // Cross-dataset links + the query-time relation view (see docs/adr/0003).
         self.conn.execute(schema::CREATE_DATASET_LINKS_TABLE, [])?;
         self.conn
@@ -133,22 +138,22 @@ impl BidsDb {
     /// Refuse to index into a catalog whose file registry is narrower than this run
     /// needs.
     ///
-    /// Tables are created `IF NOT EXISTS`, so `scans` keeps the shape the *first* run
-    /// gave it — while datasets are meant to accumulate across runs (ADR 0002 §3).
-    /// A second run whose overlays or term maps are wider therefore has nowhere to put
-    /// the difference, and drops it silently: fMRIPrep's `from`/`to` entities, or the
-    /// projection a FreeSurfer term map computed, are simply absent from the registry
-    /// with nothing to indicate anything was lost. Silence is the problem; the catalog
-    /// looks fine.
+    /// Tables are created `IF NOT EXISTS`, so `file_registry` keeps the shape the *first*
+    /// run gave it — while datasets are meant to accumulate across runs (ADR 0002 §3). A
+    /// second run needing a physical column the registry lacks would drop it silently.
     ///
-    /// The remedy is that the adapter set describes the **catalog**, not the dataset
-    /// being added: pass every adapter the catalog uses on every run and the shape is
-    /// identical whatever the order. Rebuilding `scans` in place would be the fuller
-    /// fix, but it is not free — `sidecars` carries a foreign key to it — so this is a
-    /// loud error with a remedy rather than a silent truncation.
+    /// **Most of that problem is gone** (docs/adr/0006). The BIDS-concept columns used to be
+    /// generated columns of `scans`, which is why a wider run had to be refused; they are now
+    /// select items of the `all_files` view, and a view is emitted `CREATE OR REPLACE`, so a
+    /// later run simply redefines it — retroactively, for rows already stored. What remains
+    /// frozen is the registry's *physical* shape, which in practice is one column:
+    /// `projected`, present only when a term map is configured.
+    ///
+    /// The remedy is unchanged and now needed far less often: the adapter set describes the
+    /// **catalog**, not the dataset being added.
     fn check_registry_shape(&self, schema: &Schema) -> anyhow::Result<()> {
         let exists: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'scans'",
+            "SELECT COUNT(*) FROM duckdb_tables() WHERE table_name = 'file_registry'",
             [],
             |r| r.get(0),
         )?;
@@ -156,14 +161,15 @@ impl BidsDb {
             return Ok(()); // fresh catalog; the DDL below defines the shape
         }
         let mut stmt = self.conn.prepare(
-            "SELECT column_name FROM information_schema.columns WHERE table_name = 'scans'",
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'file_registry'",
         )?;
         let have: std::collections::HashSet<String> = stmt
             .query_map([], |r| r.get::<_, String>(0))?
             .filter_map(|r| r.ok())
             .collect();
         let missing: Vec<String> = schema
-            .registry_concept_columns()
+            .write_columns("file_registry")
+            .unwrap_or_default()
             .into_iter()
             .filter(|c| !have.contains(c))
             .collect();
@@ -171,7 +177,7 @@ impl BidsDb {
             return Ok(());
         }
         anyhow::bail!(
-            "this catalog's `scans` table has no column for {}, so what this run would \
+            "this catalog's `file_registry` has no column for {}, so what this run would \
              record there is dropped. Tables are created only if absent, so the registry \
              keeps the shape of the run that created it. The adapter set describes the \
              catalog rather than one dataset: pass every adapter this catalog uses on \
@@ -296,29 +302,23 @@ impl BidsDb {
         self.stamp_provenance("bidslake_ingestion", ingestion)
     }
 
-    /// Record a tabular file's [`TabularStatus`] disposition. Backs the
-    /// tabular-data invariant. `INSERT OR REPLACE` keeps it correct across
-    /// re-indexing.
-    pub fn record_tabular_file(
-        &self,
-        dataset_id: &str,
-        file_path: &str,
-        table_name: Option<&str>,
-        n_rows: i64,
-        status: TabularStatus,
-    ) -> anyhow::Result<()> {
+    /// Record what bidslake did with a file, on its registry row. Backs the tabular-data
+    /// invariant, which is now a question the manifest answers on its own.
+    ///
+    /// An `UPDATE` rather than an upsert: the row already exists — the walk registered every
+    /// file it saw before any of this ran — so an insert here could only create a duplicate
+    /// under a second id or mask a file the walk never registered. A status for an unknown
+    /// file updates nothing, which is the honest outcome.
+    ///
+    /// Replaces the former `tabular_files` table, whose `table_name`/`n_rows` are dropped:
+    /// which table a file's rows landed in is recoverable by joining that table on `file_id`.
+    pub fn record_file_status(&self, file_id: &str, status: TabularStatus) -> anyhow::Result<()> {
         use anyhow::Context as _;
-        let mut stmt = self.conn.prepare_cached(
-            "INSERT OR REPLACE INTO tabular_files (dataset_id, file_path, table_name, n_rows, status) VALUES (?, ?, ?, ?, ?)",
-        )?;
-        stmt.execute(params![
-            dataset_id,
-            file_path,
-            table_name,
-            n_rows,
-            status.as_str()
-        ])
-        .with_context(|| format!("recording tabular file {file_path} as {}", status.as_str()))?;
+        let mut stmt = self
+            .conn
+            .prepare_cached("UPDATE file_registry SET status = ? WHERE file_id = ?")?;
+        stmt.execute(params![status.as_str(), file_id])
+            .with_context(|| format!("recording file {file_id} as {}", status.as_str()))?;
         Ok(())
     }
 
@@ -335,6 +335,32 @@ impl BidsDb {
         for name in names {
             stmt.execute(params![table, name])?;
         }
+        Ok(())
+    }
+
+    /// Every ingest root registered for `dataset_id`.
+    ///
+    /// Empty for a dataset not yet in the catalog, which is how
+    /// [`BidsParser::resolve_root`](crate::bids::BidsParser) tells a first ingest from one
+    /// adding a root to an existing dataset. Ordered so an error message listing them
+    /// reads the same way twice.
+    pub fn dataset_roots(&self, dataset_id: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT root_uri FROM dataset_roots WHERE dataset_id = ? ORDER BY root_uri",
+        )?;
+        let rows = stmt
+            .query_map(params![dataset_id], |r| r.get(0))?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Bind one ingest root to a dataset (`dataset_roots`). `INSERT OR REPLACE` so
+    /// re-indexing the same root is a no-op rather than a primary-key violation.
+    pub fn register_dataset_root(&self, dataset_id: &str, root_uri: &str) -> Result<()> {
+        let mut stmt = self.conn.prepare_cached(
+            "INSERT OR REPLACE INTO dataset_roots (dataset_id, root_uri) VALUES (?, ?)",
+        )?;
+        stmt.execute(params![dataset_id, root_uri])?;
         Ok(())
     }
 
@@ -409,6 +435,13 @@ impl BidsDb {
         Ok(())
     }
 
+    /// Insert one row, replacing any already under its primary key
+    /// ([`Schema::insert_or_replace`]).
+    pub fn insert_or_replace(&self, schema: &Schema, table_name: &str, data: &Value) -> Result<()> {
+        schema.insert_or_replace(&self.conn, table_name, data)?;
+        Ok(())
+    }
+
     /// Drop the rows one file contributed to `table`, so re-reading that file replaces them.
     ///
     /// For the per-row tables a content reader fills during the walk. These carry **no primary
@@ -421,11 +454,11 @@ impl BidsDb {
     /// Note the scope: rows belonging to a file that has since been *deleted* are not reached,
     /// because this only runs for files the walk still finds. Pruning those is an integrity
     /// question, deliberately not one the write path answers.
-    pub fn clear_file_rows(&self, table: &str, dataset_id: &str, file_path: &str) -> Result<()> {
+    pub fn clear_file_rows(&self, table: &str, file_id: &str) -> Result<()> {
         // `table` is always an internal literal, never user input.
         self.conn.execute(
-            &format!("DELETE FROM {table} WHERE dataset_id = ? AND file_path = ?"),
-            params![dataset_id, file_path],
+            &format!("DELETE FROM {table} WHERE file_id = ?"),
+            params![file_id],
         )?;
         Ok(())
     }
@@ -517,24 +550,28 @@ impl BidsDb {
         if assocs.is_empty() {
             return Ok(());
         }
-        // `INSERT OR IGNORE`, not the bulk Appender: a re-index recomputes these rows, and the
+        // `INSERT OR REPLACE`, not the bulk Appender: a re-index recomputes these rows, and the
         // Appender has no conflict handling, so an identical row would be a primary-key
         // violation — which aborts the ingest transaction and takes every later write with it.
         //
-        // `OR IGNORE` rather than `OR REPLACE` because every column of this table *is* its
-        // primary key: an existing row and a recomputed one are byte-identical, so there is
-        // nothing an update could change. Static SQL, so `prepare_cached` reuses one plan; the
-        // table is small (a few associations per data file).
+        // `OR REPLACE` rather than `OR IGNORE`, because one column sits *outside* the primary
+        // key and is exactly the one that changes between runs: `target_file_id` is the
+        // resolution of `target_file_path` against the files the catalog holds, and a target
+        // absent when this row was first written resolves once its dataset is indexed. Under
+        // `OR IGNORE` the recomputed row loses the conflict and the NULL is frozen for good --
+        // which is the normal case for a dataset spanning several roots (docs/adr/0005), where
+        // an `IntendedFor` routinely names a file another root supplies. Static SQL, so
+        // `prepare_cached` reuses one plan; the table is small (a few per data file).
         let mut stmt = self.conn.prepare_cached(
-            "INSERT OR IGNORE INTO file_associations \
-             (dataset_id, source_file_path, target_file_path, association_type) \
+            "INSERT OR REPLACE INTO file_associations \
+             (source_file_id, target_file_id, target_file_path, association_type) \
              VALUES (?, ?, ?, ?)",
         )?;
         for assoc in assocs {
             stmt.execute(params![
-                &assoc.dataset_id,
-                &assoc.source_file,
-                &assoc.target_file,
+                &assoc.source_file_id,
+                &assoc.target_file_id,
+                &assoc.target_file_path,
                 &assoc.assoc_type
             ])?;
         }
@@ -547,8 +584,7 @@ impl BidsDb {
     /// bulk Appender path.
     pub fn insert_diffusion(
         &self,
-        dataset_id: &str,
-        file_path: &str,
+        file_id: &str,
         bval: &[f64],
         bvec_x: &[f64],
         bvec_y: &[f64],
@@ -564,13 +600,12 @@ impl BidsDb {
         // one plan across every volume.
         let mut stmt = self.conn.prepare_cached(
             "INSERT OR REPLACE INTO diffusion \
-             (dataset_id, file_path, volume_idx, bval, bvec_x, bvec_y, bvec_z) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+             (file_id, volume_idx, bval, bvec_x, bvec_y, bvec_z) \
+             VALUES (?, ?, ?, ?, ?, ?)",
         )?;
         for (i, &b) in bval.iter().enumerate() {
             stmt.execute(params![
-                dataset_id,
-                file_path,
+                file_id,
                 i as i64,
                 b,
                 component(bvec_x, i),
