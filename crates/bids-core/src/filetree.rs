@@ -3,6 +3,7 @@
 //! Reads a directory on disk into an in-memory tree of files and directories,
 //! respecting `.bidsignore` patterns.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// A node representing a directory in the BIDS dataset.
@@ -194,6 +195,49 @@ pub fn is_pseudo_file(entry_name: &str, pseudo_exts: &[String]) -> bool {
     pseudo_file
 }
 
+/// Build the node for `dir` (a `/`-separated path with no leading slash; empty for the root),
+/// consuming its files out of `by_dir` and recursing into its immediate subdirectories.
+///
+/// Immediate children come from a range scan over the sorted directory set rather than a
+/// search, so the whole tree is built in one pass per level.
+fn build_subtree(
+    name: &str,
+    dir: &str,
+    dirs: &BTreeSet<String>,
+    by_dir: &mut BTreeMap<String, Vec<BidsFile>>,
+) -> FileTree {
+    let prefix = if dir.is_empty() {
+        String::new()
+    } else {
+        format!("{dir}/")
+    };
+    let children: Vec<String> = dirs
+        .range(prefix.clone()..)
+        .take_while(|d| d.starts_with(prefix.as_str()))
+        .filter(|d| !d[prefix.len()..].contains('/'))
+        .cloned()
+        .collect();
+
+    let directories = children
+        .into_iter()
+        .map(|child| {
+            let child_name = child[prefix.len()..].to_string();
+            build_subtree(&child_name, &child, dirs, by_dir)
+        })
+        .collect();
+
+    FileTree {
+        name: name.to_string(),
+        path: if dir.is_empty() {
+            "/".to_string()
+        } else {
+            format!("/{dir}")
+        },
+        files: by_dir.remove(dir).unwrap_or_default(),
+        directories,
+    }
+}
+
 /// Produce a `/`-separated relative path from `root` to `path`, prefixed with `/`.
 fn make_relative_path(path: &Path, root: &Path) -> String {
     let rel = path.strip_prefix(root).unwrap_or(path);
@@ -206,6 +250,66 @@ fn make_relative_path(path: &Path, root: &Path) -> String {
 }
 
 impl FileTree {
+    /// Build a tree from dataset-relative paths (`sub-01/dwi/x.nii.gz`; a leading `/` is
+    /// accepted and ignored).
+    ///
+    /// [`BidsFile::absolute_path`] is left empty, because a backend with no local files has
+    /// none. That is sound only for consumers that work from `name` and `path` alone, which
+    /// is exactly what association resolution does — [`find_associated_file`] and
+    /// [`find_all_associated_files`] never touch it, and neither reads file content. This is
+    /// what lets `bids_schema::associations` run against a backend whose listing *is* a path
+    /// set (S3), rather than being restricted to backends that can produce a
+    /// [`read_file_tree`].
+    ///
+    /// [`find_associated_file`]: crate::inheritance::find_associated_file
+    /// [`find_all_associated_files`]: crate::inheritance::find_all_associated_files
+    pub fn from_paths<I, S>(root_name: &str, paths: I) -> FileTree
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        // Bucket by parent directory, then build the tree top-down. Inserting each file by
+        // descending from the root instead would re-scan `directories` at every level —
+        // `get_mut_subtree` is a linear search per component — which is quadratic on a flat
+        // root with thousands of subject directories.
+        let mut by_dir: BTreeMap<String, Vec<BidsFile>> = BTreeMap::new();
+        let mut dirs: BTreeSet<String> = BTreeSet::new();
+
+        for p in paths {
+            let rel = p.as_ref().trim_start_matches('/');
+            if rel.is_empty() {
+                continue;
+            }
+            let (dir, name) = match rel.rfind('/') {
+                Some(i) => (&rel[..i], &rel[i + 1..]),
+                None => ("", rel),
+            };
+            by_dir.entry(dir.to_string()).or_default().push(BidsFile {
+                name: name.to_string(),
+                path: format!("/{rel}"),
+                absolute_path: PathBuf::new(),
+            });
+            // Every ancestor needs a node, including ones holding no files of their own.
+            let mut ancestor = String::new();
+            for component in dir.split('/').filter(|c| !c.is_empty()) {
+                if !ancestor.is_empty() {
+                    ancestor.push('/');
+                }
+                ancestor.push_str(component);
+                dirs.insert(ancestor.clone());
+            }
+        }
+
+        // Match `read_file_tree`'s `sort_by_file_name`: `find_associated_file` returns the
+        // first hit in a directory, so a stable order is what makes the resolution
+        // deterministic rather than dependent on the order paths arrived in.
+        for files in by_dir.values_mut() {
+            files.sort_by(|a, b| a.name.cmp(&b.name));
+        }
+
+        build_subtree(root_name, "", &dirs, &mut by_dir)
+    }
+
     /// Recursively iterate over all files in this tree.
     /// Return an iterator over all files in the tree, traversing recursively.
     pub fn walk_files(&self) -> WalkFiles<'_> {
@@ -456,5 +560,72 @@ mod tests {
         // The normal directory and its file must be present
         assert!(tree.find_dir("sub-01").is_some());
         assert!(tree.find_file("/sub-01/sub-01_T1w.nii.gz").is_some());
+    }
+
+    /// `from_paths` must produce the same shape `read_file_tree` does — `/`-prefixed paths,
+    /// a node per ancestor directory, root-level files on the root — because the association
+    /// resolver walks it by `subtree(dir)` and compares `file.path`.
+    #[test]
+    fn from_paths_builds_the_same_shape_as_a_walk() {
+        let tree = FileTree::from_paths(
+            "ds114",
+            [
+                // Deliberately unsorted, and mixing leading-slash conventions: the S3 listing
+                // and the file registry each have their own, and neither is guaranteed sorted.
+                "sub-01/ses-test/dwi/sub-01_ses-test_dwi.nii.gz",
+                "/dwi.bval",
+                "dwi.bvec",
+                "sub-01/ses-test/anat/sub-01_ses-test_T1w.nii.gz",
+            ],
+        );
+
+        // Root-level files land on the root, which is what makes an inherited gradient
+        // reachable from a subject directory three levels down.
+        assert_eq!(tree.path, "/");
+        assert_eq!(tree.name, "ds114");
+        let root_names: Vec<&str> = tree.files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(root_names, vec!["dwi.bval", "dwi.bvec"]); // sorted, like the walk
+
+        // Every ancestor exists as a node, including `ses-test`, which holds no files itself.
+        assert!(tree.subtree("/sub-01/ses-test").is_some());
+        let dwi = tree.subtree("/sub-01/ses-test/dwi").expect("dwi dir");
+        assert_eq!(dwi.name, "dwi");
+        assert_eq!(dwi.files.len(), 1);
+        assert_eq!(
+            dwi.files[0].path,
+            "/sub-01/ses-test/dwi/sub-01_ses-test_dwi.nii.gz"
+        );
+
+        // A leading slash on the input is accepted, not doubled.
+        assert!(tree.find_file("/dwi.bval").is_some());
+        assert!(tree.find_file("//dwi.bval").is_none());
+
+        // Round-trip: every input path comes back out of `walk_files`.
+        let mut walked: Vec<&str> = tree.walk_files().map(|f| f.path.as_str()).collect();
+        walked.sort();
+        assert_eq!(
+            walked,
+            vec![
+                "/dwi.bval",
+                "/dwi.bvec",
+                "/sub-01/ses-test/anat/sub-01_ses-test_T1w.nii.gz",
+                "/sub-01/ses-test/dwi/sub-01_ses-test_dwi.nii.gz",
+            ]
+        );
+    }
+
+    /// `absolute_path` is deliberately empty — a backend with no local files has none. Pinned
+    /// so that a consumer added later cannot start depending on it without this test failing.
+    #[test]
+    fn from_paths_leaves_absolute_path_empty() {
+        let tree = FileTree::from_paths("ds", ["sub-01/anat/sub-01_T1w.nii.gz"]);
+        let file = tree.walk_files().next().expect("one file");
+        assert_eq!(file.absolute_path, PathBuf::new());
+    }
+
+    #[test]
+    fn from_paths_tolerates_empty_and_slash_only_entries() {
+        let tree = FileTree::from_paths("ds", ["", "/", "sub-01/anat/sub-01_T1w.nii.gz"]);
+        assert_eq!(tree.walk_files().count(), 1);
     }
 }
