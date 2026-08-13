@@ -26,7 +26,7 @@
 //! through the DuckDB `Appender` (see [`BidsDb::append_rows`]). And the entire parse runs
 //! inside a single transaction (opened by the caller in `main`), so it commits atomically.
 
-use crate::db::{BidsDb, FileAssociation, TabularStatus};
+use crate::db::{BidsDb, BvecFile, FileAssociation, TabularStatus};
 use crate::fs::BidsFileSystem;
 use crate::links;
 use crate::readers::{self, ContentReader};
@@ -1062,13 +1062,24 @@ impl BidsParser {
                 assoc_type: a.assoc_type.clone(),
             })
             .collect();
-        // That dedup is only against this run's own candidates; a row this dataset already has
-        // from a previous run is handled by the insert's own `OR IGNORE` (see
-        // `BidsDb::append_file_associations`), so a re-index refreshes rather than colliding.
+        // That dedup is against this run's own candidates, and the staged upsert *depends* on
+        // it without being able to check it: a duplicate within one batch is dropped silently
+        // rather than refused (see `BidsDb::upsert_staged`). It holds because the key deduped
+        // above — `(source_file, target_file, assoc_type)` — is the primary key
+        // `(source_file_id, target_file_path, association_type)` under a different name:
+        // `dataset_id` is fixed here, so `file_key` maps source paths to ids one-for-one.
+        //
+        // A row this dataset already has from a previous run is a different matter, and is
+        // what the `OR REPLACE` is for (see `BidsDb::upsert_file_associations`), so a re-index
+        // refreshes rather than colliding.
+        //
         // One statement for the whole dataset, so a failure here loses every association
         // it has — with nothing in the catalog to say so. Fatal, like the registry.
-        db.append_file_associations(&deduped)
-            .with_context(|| format!("writing {} file associations", deduped.len()))?;
+        {
+            let _t = timing::scope(Phase::Writes);
+            db.upsert_file_associations(&deduped)
+                .with_context(|| format!("writing {} file associations", deduped.len()))?;
+        }
 
         // Gradient payloads, keyed by the gradient file itself. No lookup and no pairing:
         // the path is a registered file by construction, so nothing can be skipped for
@@ -1076,17 +1087,38 @@ impl BidsParser {
         // (or either half inherited from a different level) is stored rather than dropped.
         // Which images they describe is `file_associations`' answer, and the `diffusion`
         // view's (docs/adr/0007).
+        //
+        // Split by kind and written in two batches rather than a call per file, because each
+        // call is one staged upsert: per file that would be a temp table per file, which costs
+        // more than the row-at-a-time path it replaces.
+        //
+        // `(file_id, row_idx)` must be unique across a batch, and the staged upsert cannot
+        // check it (see `BidsDb::upsert_staged`). It holds because `pending_gradients` takes
+        // one entry per walked gradient file and the walk yields a path once, so no two
+        // entries share a `file_key`.
+        let mut bvals: Vec<(String, &[f64])> = Vec::new();
+        let mut bvecs: Vec<BvecFile<'_>> = Vec::new();
         for (dataset, path, gradient) in &self.pending_gradients {
             let file_id = self.file_key(dataset, path);
+            match gradient {
+                PendingGradient::Bvals(b) => bvals.push((file_id, b)),
+                PendingGradient::Bvecs(x, y, z) => bvecs.push((file_id, x, y, z)),
+            }
+        }
+        {
+            let _t = timing::scope(Phase::Writes);
             // Fatal, unlike the tabular flush's per-file tolerance: a failed tabular file is
             // still recorded, with `status = "failed"`, so the catalog says the rows are
             // missing. Gradients have no such bookkeeping — a swallowed error here is a file
             // whose values are simply absent, indistinguishable from one that never had any.
-            match gradient {
-                PendingGradient::Bvals(b) => db.insert_bvals(&file_id, b),
-                PendingGradient::Bvecs(x, y, z) => db.insert_bvecs(&file_id, x, y, z),
-            }
-            .with_context(|| format!("writing gradients for {path}"))?;
+            //
+            // Batching costs the file name in that error, the same trade the associations
+            // above already make: one statement for the whole dataset means a failure loses
+            // all of them at once, so there is nothing narrower to name.
+            db.upsert_bvals(&bvals)
+                .with_context(|| format!("writing b-values for {} gradient files", bvals.len()))?;
+            db.upsert_bvecs(&bvecs)
+                .with_context(|| format!("writing b-vectors for {} gradient files", bvecs.len()))?;
         }
 
         // An empty catalog is almost always a `.bidsignore` that hid the very files the
