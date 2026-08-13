@@ -1,11 +1,11 @@
 """Resolving dataset-relative file paths to openable handles.
 
-``root_uri`` (stored once per dataset on ``dataset_description``) is
-``file:///abs/path`` for a locally-ingested dataset or ``s3://bucket/prefix`` for
-an S3 one. The join itself is done in Rust (``_bidslake.resolve_uri``) so it
-matches exactly how the ingester formats those URIs; this module wraps the
-result in a :class:`upath.UPath` so callers get one handle that works for local
-and remote alike.
+``root_uri`` (one row per ingest root in ``dataset_roots`` — a dataset may have
+several; see ``docs/adr/0005``) is ``file:///abs/path`` for a locally-ingested
+dataset or ``s3://bucket/prefix`` for an S3 one. The join itself is done in Rust
+(``_bidslake.resolve_uri``) so it matches exactly how the ingester formats those
+URIs; this module wraps the result in a :class:`upath.UPath` so callers get one
+handle that works for local and remote alike.
 """
 
 from __future__ import annotations

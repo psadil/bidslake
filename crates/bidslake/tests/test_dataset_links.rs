@@ -131,6 +131,119 @@ async fn shares_source_without_source_in_catalog() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The query-layer payoff of multi-root datasets (docs/adr/0005).
+///
+/// Shards of one pipeline run all declare the same `SourceDatasets`, so when each was its
+/// own `dataset_id` the `shares_source` view fired **between them** — N×(N−1) edges of a
+/// dataset with itself, burying the one relation a consumer wants. Sharing a `dataset_id`
+/// removes them at the source: the view's `from <> to` drops the self-pairs, and the real
+/// fMRIPrep↔MRIQC edge is all that is left.
+#[tokio::test]
+async fn shards_of_one_dataset_do_not_relate_to_each_other() -> anyhow::Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let doi = "10.18112/openneuro.ds001761.v2.0.1";
+    let (s1, s2, qc) = (
+        tmp.path().join("fmriprep-sub-01"),
+        tmp.path().join("fmriprep-sub-02"),
+        tmp.path().join("mriqc"),
+    );
+    // Two fMRIPrep shards — identical descriptions, as one pipeline run produces — plus an
+    // unrelated-by-tool but same-source MRIQC derivative.
+    write_dataset(&s1, "fMRIPrep - fMRI PREProcessing workflow", &[doi], None);
+    write_dataset(&s2, "fMRIPrep - fMRI PREProcessing workflow", &[doi], None);
+    write_dataset(&qc, "MRIQC", &[doi], None);
+
+    let db = empty_db();
+    ingest_into(&db, &s1, "fmriprep", &[]).await;
+    ingest_into(&db, &s2, "fmriprep", &[]).await;
+    ingest_into(&db, &qc, "mriqc", &[]).await;
+
+    assert_eq!(db.dataset_roots("fmriprep")?.len(), 2, "two shards, one id");
+    assert_eq!(
+        relations(&db),
+        vec![
+            ("fmriprep".into(), "mriqc".into(), "shares_source".into()),
+            ("mriqc".into(), "fmriprep".into(), "shares_source".into()),
+        ],
+        "only the real cross-pipeline relation survives"
+    );
+    Ok(())
+}
+
+/// Every root of a dataset is an identity it *is*, and re-indexing one must not drop the
+/// others. `clear_derived_links` wipes all of a dataset's identities before they are
+/// re-recorded, so this only holds because `record_links` re-reads `dataset_roots` rather
+/// than recording the single root the current run happens to be walking.
+#[tokio::test]
+async fn every_root_is_an_identity_and_survives_reindexing_another() -> anyhow::Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let (a, b) = (tmp.path().join("shard-a"), tmp.path().join("shard-b"));
+    write_dataset(&a, "study", &["10.18112/x/y"], None);
+    write_dataset(&b, "study", &["10.18112/x/y"], None);
+
+    let db = empty_db();
+    ingest_into(&db, &a, "study", &[]).await;
+    ingest_into(&db, &b, "study", &[]).await;
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM dataset_identity WHERE source = 'root_uri'"
+        ),
+        2,
+        "one root_uri identity per root"
+    );
+
+    // Re-index the first shard: the second's identity must still be there.
+    ingest_into(&db, &a, "study", &[]).await;
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM dataset_identity WHERE source = 'root_uri'"
+        ),
+        2,
+        "re-indexing one root kept the other's identity"
+    );
+    Ok(())
+}
+
+/// A dataset's description is re-read every run, so a re-index must *refresh* the stored
+/// row rather than defer to whatever wrote it first (the `eh-04` follow-up). Before this,
+/// a `dataset_description.json` corrected after the first index never reached the catalog.
+#[tokio::test]
+async fn reindexing_refreshes_the_stored_description() -> anyhow::Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("study");
+    write_dataset(&root, "study", &["10.18112/x/y"], None);
+
+    let db = empty_db();
+    ingest_into(&db, &root, "study", &[]).await;
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM dataset_description WHERE \"DatasetDOI\" IS NULL"
+        ),
+        1
+    );
+
+    // The description gains a DOI, as one does when a dataset is published.
+    write_dataset(&root, "study renamed", &["10.18112/x/y"], Some("10.0/pub"));
+    ingest_into(&db, &root, "study", &[]).await;
+
+    let (name, doi): (String, String) = db.conn.query_row(
+        "SELECT \"Name\", \"DatasetDOI\" FROM dataset_description WHERE dataset_id = 'study'",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    assert_eq!(name, "study renamed");
+    assert_eq!(doi, "10.0/pub");
+    assert_eq!(
+        count(&db, "SELECT COUNT(*) FROM dataset_description"),
+        1,
+        "refreshed, not duplicated"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn ingest_order_does_not_matter() -> anyhow::Result<()> {
     let tmp = tempfile::tempdir()?;

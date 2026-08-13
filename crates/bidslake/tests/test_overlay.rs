@@ -136,7 +136,7 @@ async fn overlay_makes_confounds_a_typed_ordered_table() -> anyhow::Result<()> {
 
     // The transform's non-BIDS entities are parsed into generated scans columns.
     let (from, to, mode, suffix): (String, String, String, String) = db.conn.query_row(
-        r#"SELECT "from", "to", "mode", suffix FROM scans WHERE "from" IS NOT NULL"#,
+        r#"SELECT "from", "to", "mode", suffix FROM all_files WHERE kind = 'data' AND "from" IS NOT NULL"#,
         [],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
@@ -176,7 +176,7 @@ async fn without_overlay_confounds_is_skipped() -> anyhow::Result<()> {
     );
 
     let status: String = db.conn.query_row(
-        "SELECT status FROM tabular_files WHERE file_path LIKE '%confounds%'",
+        "SELECT status FROM file_registry WHERE file_path LIKE '%confounds%.tsv'",
         [],
         |r| r.get(0),
     )?;
@@ -208,7 +208,7 @@ async fn without_overlay_confounds_is_skipped() -> anyhow::Result<()> {
 
 /// `undeclared: catalog` on a table drops its `other_data` column entirely, so the
 /// columns the schema does not declare are never stored — while the declared ones
-/// and the file's own `tabular_files` record are untouched. This is a *column*
+/// and the file's own registry record are untouched. This is a *column*
 /// policy, not a read/skip policy: the file is still parsed.
 #[tokio::test]
 async fn undeclared_catalog_drops_the_overflow_column() -> anyhow::Result<()> {
@@ -245,7 +245,7 @@ async fn undeclared_catalog_drops_the_overflow_column() -> anyhow::Result<()> {
 
     // And it is still accounted for, so the file on disk remains findable.
     let status: String = db.conn.query_row(
-        "SELECT status FROM tabular_files WHERE file_path LIKE '%confounds_timeseries.tsv'",
+        "SELECT status FROM file_registry WHERE file_path LIKE '%confounds_timeseries.tsv'",
         [],
         |r| r.get(0),
     )?;
@@ -294,7 +294,7 @@ async fn undeclared_when_scopes_sidecars_per_file() -> anyhow::Result<()> {
     // declared `SamplingFrequency` still reaches its typed column.
     let (other, sampling): (Option<String>, Option<f64>) = db.conn.query_row(
         r#"SELECT other_data::VARCHAR, "SamplingFrequency" FROM sidecars
-           WHERE file_path LIKE '%confounds_timeseries.json'"#,
+           JOIN all_files USING (file_id) WHERE file_path LIKE '%confounds_timeseries.json'"#,
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
@@ -308,7 +308,7 @@ async fn undeclared_when_scopes_sidecars_per_file() -> anyhow::Result<()> {
     // The ordinary BOLD sidecar in the same database keeps its custom field — this is
     // the assertion that proves the scope is per-file, not per-table.
     let bold: Option<String> = db.conn.query_row(
-        "SELECT other_data::VARCHAR FROM sidecars WHERE file_path LIKE '%preproc_bold.nii.gz'",
+        "SELECT other_data::VARCHAR FROM sidecars JOIN all_files USING (file_id) WHERE file_path LIKE '%preproc_bold.nii.gz'",
         [],
         |r| r.get(0),
     )?;
@@ -355,7 +355,7 @@ async fn bundled_fmriprep_adapter_catalogs_undeclared_columns() -> anyhow::Resul
 
     // The confounds sidecar loses its per-column dictionary...
     let confounds_sidecar: Option<String> = db.conn.query_row(
-        "SELECT other_data::VARCHAR FROM sidecars WHERE file_path LIKE '%confounds_timeseries.json'",
+        "SELECT other_data::VARCHAR FROM sidecars JOIN all_files USING (file_id) WHERE file_path LIKE '%confounds_timeseries.json'",
         [],
         |r| r.get(0),
     )?;
@@ -363,7 +363,7 @@ async fn bundled_fmriprep_adapter_catalogs_undeclared_columns() -> anyhow::Resul
 
     // ...while an ordinary sidecar in the same dataset keeps its custom fields.
     let bold_sidecar: Option<String> = db.conn.query_row(
-        "SELECT other_data::VARCHAR FROM sidecars WHERE file_path LIKE '%preproc_bold.nii.gz'",
+        "SELECT other_data::VARCHAR FROM sidecars JOIN all_files USING (file_id) WHERE file_path LIKE '%preproc_bold.nii.gz'",
         [],
         |r| r.get(0),
     )?;

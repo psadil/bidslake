@@ -8,11 +8,12 @@
 //!
 //! 1. **No rows dropped.** Each file's DB row count equals its raw data-line count
 //!    (a `filename`↔path join that failed to match would silently drop rows).
-//! 2. **`row_idx` order policy.** `events` are read in parallel, so `row_idx` is a
-//!    unique-but-arbitrary key (onset values must still match as a multiset).
-//!    Positional tables (`*_channels`/…) are read `parallel=false`, so their
-//!    `row_idx` must reproduce TSV line order — consumers reconstruct channel order
-//!    via `ORDER BY row_idx`.
+//! 2. **`row_idx` order policy.** A table has the column only when its line order is
+//!    load-bearing. Positional tables (`*_channels`/…) are read `parallel=false`, so
+//!    their `row_idx` must reproduce TSV line order — consumers reconstruct channel
+//!    order via `ORDER BY row_idx`. `events` is declared order-insensitive and read in
+//!    parallel, so it has **no** `row_idx` at all: its rows must still match as a
+//!    multiset, and are addressed by `onset`.
 //! 3. **`other_data` is exact.** Grouping by header (not `union_by_name`) folds in
 //!    exactly each file's non-schema columns — no NULL fillers from siblings.
 //!
@@ -51,8 +52,9 @@ fn rel_of(root: &Path, file: &Path) -> String {
         .to_string()
 }
 
-/// For every `_events.tsv` in `root`, assert the batched ingest reproduced the raw
-/// file: same row count, same `onset` multiset, and `row_idx` a unique 0..n key.
+/// For every `_events.tsv` in `root`, assert the batched ingest reproduced the raw file: same
+/// row count and same `onset` multiset. Not the *sequence* — `events` is declared
+/// order-insensitive, so its files are read concurrently and it carries no `row_idx` to order by.
 fn check_events(db: &BidsDb, root: &Path) -> anyhow::Result<usize> {
     let files: Vec<std::path::PathBuf> = walk_tabular(root)
         .into_iter()
@@ -75,7 +77,7 @@ fn check_events(db: &BidsDb, root: &Path) -> anyhow::Result<usize> {
 
         let mut db_onset: Vec<Option<f64>> = db
             .conn
-            .prepare("SELECT onset FROM events WHERE file_path = ? ORDER BY row_idx")?
+            .prepare("SELECT onset FROM events JOIN all_files USING (file_id) WHERE file_path = ?")?
             .query_map([&rel], |r| r.get::<_, Option<f64>>(0))?
             .collect::<Result<_, _>>()?;
 
@@ -84,8 +86,8 @@ fn check_events(db: &BidsDb, root: &Path) -> anyhow::Result<usize> {
             rows.len(),
             "row count must match raw file for {rel} (no rows dropped)"
         );
-        // events read in parallel, so row_idx is arbitrary — compare the onset
-        // *multiset*, not the sequence.
+        // Compare the onset *multiset*: a concurrent read fixes no row order, which is why
+        // this table has no `row_idx` to compare a sequence by.
         let mut raw_sorted = raw.clone();
         let cmp = |a: &Option<f64>, b: &Option<f64>| {
             a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
@@ -96,21 +98,25 @@ fn check_events(db: &BidsDb, root: &Path) -> anyhow::Result<usize> {
             db_onset, raw_sorted,
             "onset values must match raw for {rel}"
         );
-
-        // row_idx is a unique 0..n key (regardless of order).
-        let mut idxs: Vec<i64> = db
-            .conn
-            .prepare("SELECT row_idx FROM events WHERE file_path = ?")?
-            .query_map([&rel], |r| r.get(0))?
-            .collect::<Result<_, _>>()?;
-        idxs.sort_unstable();
-        assert_eq!(
-            idxs,
-            (0..rows.len() as i64).collect::<Vec<_>>(),
-            "row_idx must be a unique 0..n key for {rel}"
-        );
     }
     Ok(files.len())
+}
+
+/// An order-insensitive table has no `row_idx` column at all — the point of the policy. A
+/// column of arbitrary labels invites `ORDER BY row_idx`, which would silently return rows in
+/// an order that differs between two ingests of the same dataset.
+fn assert_no_row_idx(db: &BidsDb, table: &str) -> anyhow::Result<()> {
+    let n: i64 = db.conn.query_row(
+        "SELECT count(*) FROM information_schema.columns \
+         WHERE table_name = ? AND column_name = 'row_idx'",
+        [table],
+        |r| r.get(0),
+    )?;
+    assert_eq!(
+        n, 0,
+        "{table} is order-insensitive and must have no row_idx"
+    );
+    Ok(())
 }
 
 #[tokio::test]
@@ -120,6 +126,7 @@ async fn ds001_batched_events_and_other_data() -> anyhow::Result<()> {
 
     let n = check_events(&db, &root)?;
     assert!(n >= 40, "expected the ds001 submodule (many events files)");
+    assert_no_row_idx(&db, "events")?;
 
     // other_data holds exactly the non-schema header columns: `cash_demean` is not
     // a BIDS events column (→ other_data), `onset` is (→ not).
@@ -130,7 +137,7 @@ async fn ds001_batched_events_and_other_data() -> anyhow::Result<()> {
     let (has_extra, has_onset): (bool, bool) = db.conn.query_row(
         "SELECT list_contains(json_keys(other_data), 'cash_demean'), \
                 list_contains(json_keys(other_data), 'onset') \
-         FROM events WHERE file_path = ? LIMIT 1",
+         FROM events JOIN all_files USING (file_id) WHERE file_path = ? LIMIT 1",
         [&rel],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
@@ -172,7 +179,7 @@ async fn trailing_tab_header_still_ingests() -> anyhow::Result<()> {
     let db = ingest(root).await?;
 
     let (n, failed): (i64, i64) = db.conn.query_row(
-        "SELECT count(*), count(*) FILTER (WHERE status = 'failed') FROM tabular_files \
+        "SELECT count(*), count(*) FILTER (WHERE status = 'failed') FROM file_registry \
          WHERE file_path LIKE '%_events.tsv'",
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
@@ -226,7 +233,7 @@ async fn channels_preserve_line_order() -> anyhow::Result<()> {
 
         let db_names: Vec<String> = db
             .conn
-            .prepare("SELECT name FROM eeg_channels WHERE file_path = ? ORDER BY row_idx")?
+            .prepare("SELECT name FROM eeg_channels JOIN all_files USING (file_id) WHERE file_path = ? ORDER BY row_idx")?
             .query_map([&rel], |r| r.get(0))?
             .collect::<Result<_, _>>()?;
 
@@ -253,7 +260,8 @@ async fn xeeg_mixed_line_endings_batch_correctly() -> anyhow::Result<()> {
     // rejected by DuckDB's strict CSV parser. `strict_mode=false` ingests it; guard
     // that it stays ingested (all 166 rows), not silently skipped.
     let electrodes: i64 = db.conn.query_row(
-        "SELECT count(*) FROM ieeg_electrodes WHERE file_path LIKE '%sub-ieegModulator%electrodes.tsv'",
+        "SELECT count(*) FROM ieeg_electrodes JOIN all_files USING (file_id) \
+                  WHERE file_path LIKE '%sub-ieegModulator%electrodes.tsv'",
         [],
         |r| r.get(0),
     )?;

@@ -6,6 +6,11 @@
 //! use), so they are `#[ignore]` — run explicitly:
 //!   `cargo test -p bidslake --test s3_ingest -- --ignored`
 //! Anonymous/unsigned access is used, so no AWS credentials are required.
+//!
+//! The whole file is behind the `s3` feature: without it there is no S3 backend to
+//! test, and the alternative — a test that silently compiles to nothing — would look
+//! like coverage that isn't there.
+#![cfg(feature = "s3")]
 
 use bidslake::{
     bids::{BidsParser, S3Httpfs},
@@ -98,10 +103,14 @@ async fn s3_full_ingest_ds000001() -> anyhow::Result<()> {
     assert!(count(&db, "events") > 0, "events ingested via httpfs");
 
     // Every tabular file must be recorded as ingested (materialize no longer fails).
+    // Scoped to `kind = 'tabular'` explicitly: a file bidslake never tried to read has a
+    // NULL `status`, and `NULL <> 'ingested'` would silently exclude it rather than fail.
     let skipped: i64 = db
         .conn
         .query_row(
-            "SELECT count(*) FROM tabular_files WHERE status <> 'ingested' AND status <> 'on_disk'",
+            "SELECT count(*) FROM file_registry \
+             WHERE kind = 'tabular' AND status IS DISTINCT FROM 'ingested' \
+                                    AND status IS DISTINCT FROM 'on_disk'",
             [],
             |r| r.get(0),
         )
@@ -110,15 +119,17 @@ async fn s3_full_ingest_ds000001() -> anyhow::Result<()> {
 
     // No rows dropped: compare a sample events file's DB count to its raw S3 lines.
     let client = S3Client::new(BUCKET, "ds000001", s3::SigningMode::Anonymous).await?;
+    // The per-row tables key on `file_id`; the path lives once, on the registry.
     let sample: String = db.conn.query_row(
-        "SELECT file_path FROM events GROUP BY file_path ORDER BY file_path LIMIT 1",
+        "SELECT any_value(f.file_path) FROM events e JOIN all_files f USING (file_id) \
+         GROUP BY e.file_id ORDER BY e.file_id LIMIT 1",
         [],
         |r| r.get(0),
     )?;
     let raw = client.read_to_string(Path::new(&sample)).await?;
     let raw_rows = raw.lines().filter(|l| !l.is_empty()).count() as i64 - 1; // minus header
     let db_rows: i64 = db.conn.query_row(
-        "SELECT count(*) FROM events WHERE file_path = ?",
+        "SELECT count(*) FROM events JOIN all_files USING (file_id) WHERE file_path = ?",
         [&sample],
         |r| r.get(0),
     )?;

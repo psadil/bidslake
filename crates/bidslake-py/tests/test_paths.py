@@ -32,11 +32,15 @@ def test_root_override_wins_over_base_dir(lake_db):
 
 
 def test_resolve_opens_a_row_from_any_table(lake):
-    """`resolve` reaches files that are not `scans` rows — the route to columns a
-    catalog deliberately did not store (they stay in the file, indexed by
-    `tabular_files`)."""
-    row = lake.table("tabular_files").pl().filter(pl.col("status") == "ingested").row(0, named=True)
-    path = lake.resolve(row["dataset_id"], row["file_path"])
+    """`resolve` reaches files that are not data files — the route to columns a
+    catalog deliberately did not store (they stay in the file, indexed by the
+    registry)."""
+    row = (
+        lake.all_files.pl()
+        .filter((pl.col("kind") == "tabular") & (pl.col("status") == "ingested"))
+        .row(0, named=True)
+    )
+    path = lake.resolve(row["dataset_id"], row["file_path"], row["root_uri"])
     assert path.exists(), f"{path} should be readable"
     # `.open()`, not `str(path)`: a UPath stringifies back to a URI.
     assert pl.read_csv(path.open("rb"), separator="\t", null_values="n/a").height >= 0

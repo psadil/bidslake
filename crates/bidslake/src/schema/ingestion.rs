@@ -55,7 +55,7 @@ pub enum Undeclared {
     /// and what every BIDS table does.
     #[default]
     Store,
-    /// Do not store them. The file stays on disk and stays in `tabular_files`, whose
+    /// Do not store them. The file stays on disk and stays in `file_registry`, whose
     /// `file_path` is the record of its full column set; the names seen are collected
     /// into `tabular_undeclared_columns`. For sources whose undeclared columns dwarf
     /// the declared ones — fMRIPrep confounds are ~1,800 columns against ~13 declared,
@@ -93,6 +93,22 @@ pub struct TablePolicy {
     /// [`TablePolicy::undeclared`], then to [`Undeclared::Store`].
     #[serde(default, rename = "undeclaredWhen")]
     pub undeclared_when: Vec<ScopedUndeclared>,
+    /// Source keys this table never stores, by name.
+    ///
+    /// The key-level counterpart of [`Disposition::Ignore`], completing the vocabulary:
+    /// a file is read/cataloged/ignored, the columns a table does not declare are
+    /// stored or cataloged, and a *named key* can be dropped outright. It exists
+    /// because the other two dials are the wrong shape for a converter that attaches
+    /// something enormous and non-BIDS to otherwise ordinary metadata — dcmstack's
+    /// DcmMeta writes per-slice DICOM dumps under `global` and `time`, megabytes per
+    /// sidecar — where `undeclared: catalog` would discard every other custom field
+    /// along with it.
+    ///
+    /// Dropped before anything reads the metadata, so an ignored key costs nothing to
+    /// merge, store, or hold in memory. Applies whether or not the key has a declared
+    /// column.
+    #[serde(default, rename = "ignoreKeys")]
+    pub ignore_keys: Vec<String>,
 }
 
 impl TablePolicy {
@@ -103,6 +119,9 @@ impl TablePolicy {
     fn merge_from(&mut self, other: TablePolicy) {
         if !other.concepts.is_empty() {
             self.concepts = other.concepts;
+        }
+        if !other.ignore_keys.is_empty() {
+            self.ignore_keys = other.ignore_keys;
         }
         if other.ordered.is_some() {
             self.ordered = other.ordered;
@@ -176,6 +195,12 @@ impl Ingestion {
     /// Whether a table's source row order is load-bearing (default `true` — order matters and
     /// rows are read sequentially). `events` is the one BIDS table declared order-insensitive
     /// (rows carry `onset`); see bids-standard/bids-2-devel#98.
+    ///
+    /// This is what decides whether the table **has** a `row_idx` column at all
+    /// (`schema::dynamic`'s `PerRow` arm). Declaring a table unordered buys a concurrent read
+    /// of its files, which fixes no row order — so there is nothing to record, and recording an
+    /// arbitrary label anyway would only invite `ORDER BY row_idx`. Only declare a table
+    /// unordered when its rows are addressed by their own content rather than by position.
     pub fn ordered(&self, table: &str) -> bool {
         self.tables
             .get(table)
@@ -213,11 +238,37 @@ impl Ingestion {
             .unwrap_or_default()
     }
 
+    /// The source keys `table` never stores (see [`TablePolicy::ignore_keys`]). Empty
+    /// for every table by default, so the check is one `is_empty` on the hot path.
+    /// Source keys `table` never stores.
+    ///
+    /// Consulted on the JSON parse path only, which means `sidecars` in practice — the
+    /// metaschema description says so, `ignore_keys_is_honoured_on_sidecars_only` below pins the
+    /// two together, and `tests/test_ignore_keys.rs` asserts the inertness end to end.
+    pub fn ignore_keys(&self, table: &str) -> &[String] {
+        self.tables
+            .get(table)
+            .map(|p| p.ignore_keys.as_slice())
+            .unwrap_or_default()
+    }
+
     /// A table's undeclared-column policy for one specific file: the first matching
     /// `undeclaredWhen` entry, else the static [`Self::undeclared`].
     ///
     /// Returns early for a table with no policy at all — the overwhelmingly common
     /// case — so a plain BIDS ingest evaluates no selectors.
+    /// Whether [`Self::undeclared_for`] will actually consult its `FileContext` for `table`.
+    ///
+    /// It only does so when the table declares `undeclaredWhen`, which no bundled fragment but
+    /// fMRIPrep's does. Callers on a per-row path can check this first and skip building a
+    /// context — parsing the filename, locating the datatype directory and allocating the
+    /// path — that the answer does not depend on.
+    pub fn undeclared_needs_context(&self, table: &str) -> bool {
+        self.tables
+            .get(table)
+            .is_some_and(|p| !p.undeclared_when.is_empty())
+    }
+
     pub fn undeclared_for(&self, table: &str, ctx: &FileContext) -> Undeclared {
         let Some(policy) = self.tables.get(table) else {
             return Undeclared::Store;
@@ -417,5 +468,38 @@ mod tests {
             };
             assert_eq!(ing.undeclared_for("t", &ctx), want, "suffix {suffix}");
         }
+    }
+
+    /// `ignoreKeys` sits on the shared table policy, so a fragment may name it on any table —
+    /// but only the JSON parse path consults it, and `sidecars` is the table fed from parsed
+    /// JSON. That asymmetry is stated in the metaschema description; this pins the two together
+    /// so the description cannot quietly become false.
+    #[test]
+    fn ignore_keys_is_honoured_on_sidecars_only() {
+        let fragment = r#"{
+          "IngestionSchemaVersion": "0.1.0",
+          "tables": {
+            "sidecars": { "ignoreKeys": ["global", "time"] },
+            "events":   { "ignoreKeys": ["onset"] }
+          }
+        }"#;
+        let ing = Ingestion::from_sources(&[fragment]).expect("valid fragment");
+
+        // Both parse and are readable — the policy is generic, as the schema allows. That a
+        // fragment naming a tabular table is *inert* is asserted end to end in
+        // `tests/test_ignore_keys.rs`; here we only pin that the metaschema says so.
+        assert_eq!(ing.ignore_keys("sidecars"), ["global", "time"]);
+        assert_eq!(ing.ignore_keys("events"), ["onset"]);
+
+        // The metaschema must document the restriction.
+        let meta: serde_json::Value =
+            serde_json::from_str(bids_schema::INGESTION_METASCHEMA_JSON).unwrap();
+        let desc = meta["$defs"]["tablePolicy"]["properties"]["ignoreKeys"]["description"]
+            .as_str()
+            .expect("ignoreKeys description");
+        assert!(
+            desc.contains("`sidecars` table only"),
+            "metaschema must state where ignoreKeys applies: {desc}"
+        );
     }
 }

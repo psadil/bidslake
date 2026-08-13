@@ -86,10 +86,15 @@ Some tabular files raised a real gap: `*_desc-confounds_timeseries.tsv` rows are
 positional (row N == volume N), so their order must be preserved. BIDS has no schema
 field to express row-order semantics. We deliberately do **not** invent one, nor
 extend the metaschema in-memory to allow it — that deviation would cause long-term
-headaches. Instead the ordering policy stays **hardcoded** in `bids::is_order_insensitive`
-(only `events` is reorderable; everything else, including positional derivative time
-series and recordings, preserves TSV line order so `row_idx` is a faithful row
-number). A `row_order` schema field is proposed upstream at
+headaches. Instead the ordering policy lives outside the BIDS schema, as a per-table
+`ordered` flag in bidslake's own ingestion schema (ADR 0002; `Ingestion::ordered`,
+which this ADR's original hardcoded predecessor became). Only `events` is declared
+reorderable; everything else, including positional derivative time series and
+recordings, preserves TSV line order so `row_idx` is a faithful row number. The flag also
+decides whether the column exists: a table declared reorderable is read concurrently, which
+fixes no row order, so it carries no `row_idx` at all rather than a column of arbitrary
+labels inviting `ORDER BY row_idx`. `events` therefore has none, and its rows are addressed
+by `onset`. A `row_order` schema field is proposed upstream at
 [bids-standard/bids-2-devel#98](https://github.com/bids-standard/bids-2-devel/issues/98);
 if adopted, the hardcode can be driven from the schema.
 

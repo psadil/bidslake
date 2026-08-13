@@ -3,6 +3,9 @@
   "BIDSMapVersion": "0.1.0",
   "Mappings": [
     {
+      "Template": "(?:fsaverage(?:[0-9]|_sym)?|cvs_avg35(?:_inMNI152)?|[lr]h\\.EC_average|V1_average)/.+"
+    },
+    {
       "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/stats/aseg\\.stats",
       "Entities": { "seg": "aseg" },
       "Concepts": { "datatype": "anat", "suffix": "segstats" }
@@ -17,6 +20,14 @@
       "Concepts": { "datatype": "anat", "suffix": "parcstats" }
     },
     {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/stats/(?P<hemi>[lr]h)\\.[^/]+\\.stats",
+      "Concepts": { "datatype": "anat" }
+    },
+    {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/stats/[^/]+",
+      "Concepts": { "datatype": "anat" }
+    },
+    {
       "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/label/[^/]+\\.ctab",
       "Concepts": { "datatype": "anat", "suffix": "fslabels" }
     },
@@ -25,7 +36,19 @@
       "Concepts": { "datatype": "anat" }
     },
     {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/label/(?P<hemi>[lr]h)\\.[^/]+",
+      "Concepts": { "datatype": "anat" }
+    },
+    {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/label/[^/]+",
+      "Concepts": { "datatype": "anat" }
+    },
+    {
       "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/surf/(?P<hemi>[lr]h)\\.[^/]+",
+      "Concepts": { "datatype": "anat" }
+    },
+    {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/surf/[^/]+",
       "Concepts": { "datatype": "anat" }
     },
     {
@@ -35,6 +58,29 @@
     {
       "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/mri/[^/]+\\.mgz",
       "Concepts": { "datatype": "anat" }
+    },
+    {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/mri/.+",
+      "Concepts": { "datatype": "anat" }
+    },
+    {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/xhemi/(?:mri|surf|label|stats)/.+",
+      "Concepts": { "datatype": "anat" }
+    },
+    {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/xhemi/.+"
+    },
+    {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/scripts/.+"
+    },
+    {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/touch/.+"
+    },
+    {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/(?:tmp|trash)/.+"
+    },
+    {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/[^/]*README[^/]*"
     }
   ]
 }

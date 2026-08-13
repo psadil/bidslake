@@ -28,12 +28,13 @@ use std::time::Duration;
 use anyhow::Result;
 use bids_core::filetree::FileTree;
 use bidslake::{
-    bids::{BidsParser, S3Httpfs},
+    bids::BidsParser,
     db::BidsDb,
     fs::{BidsFileSystem, LocalFileSystem},
-    s3,
     schema::Schema,
 };
+#[cfg(feature = "s3")]
+use bidslake::{bids::S3Httpfs, s3};
 use criterion::{Criterion, criterion_group, criterion_main};
 use futures::future::BoxFuture;
 
@@ -87,6 +88,7 @@ fn bench_ingest(c: &mut Criterion) {
 
 /// Ingest one OpenNeuro dataset from S3 (anonymous), with httpfs on both the
 /// write and preflight connections — mirrors `main`'s S3 path.
+#[cfg(feature = "s3")]
 fn ingest_s3_once(dataset: &str) {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     rt.block_on(async {
@@ -114,6 +116,7 @@ fn ingest_s3_once(dataset: &str) {
 
 /// Opt-in network benchmark: ingest a dataset from S3. Skipped unless
 /// `BIDSLAKE_S3_BENCH` is set, since it hits the network and installs httpfs.
+#[cfg(feature = "s3")]
 fn bench_ingest_s3(c: &mut Criterion) {
     if std::env::var_os("BIDSLAKE_S3_BENCH").is_none() {
         return;
@@ -125,6 +128,12 @@ fn bench_ingest_s3(c: &mut Criterion) {
     group.bench_function(&dataset, |b| b.iter(|| ingest_s3_once(&dataset)));
     group.finish();
 }
+
+/// Without the `s3` feature there is no S3 backend to benchmark. A stand-in keeps
+/// the `criterion_group!` list below one plain declaration rather than two
+/// conditional ones.
+#[cfg(not(feature = "s3"))]
+fn bench_ingest_s3(_c: &mut Criterion) {}
 
 /// A [`LocalFileSystem`] that sleeps `delay` before each Rust-side read
 /// (`read_to_string` / `read_head` — the reads the prefetch parallelizes),

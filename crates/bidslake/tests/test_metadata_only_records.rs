@@ -10,7 +10,7 @@
 mod common;
 
 use bidslake::schema::{AppliedOverlay, Schema};
-use common::{count, ingest, ingest_with_schema};
+use common::{count, count_data_files, ingest, ingest_with_schema};
 use std::fs;
 use std::path::Path;
 
@@ -56,14 +56,18 @@ async fn mriqc_iqm_sidecars_become_records() -> anyhow::Result<()> {
     let schema = Schema::load_with_overlays(None, &[mriqc_overlay()])?;
     let db = ingest_with_schema(dir.path(), schema).await?;
 
-    // Each IQM sidecar is now a record in its own right: a scans row (which the
-    // sidecars FK requires) and a sidecars row carrying its metrics.
-    assert_eq!(count(&db, "scans")?, 2, "both IQM sidecars became records");
+    // Each IQM sidecar is now a record in its own right: a registry row of kind `data`
+    // (which the sidecars FK requires) and a sidecars row carrying its metrics.
+    assert_eq!(
+        count_data_files(&db)?,
+        2,
+        "both IQM sidecars became records"
+    );
     assert_eq!(count(&db, "sidecars")?, 2);
 
     // The overlay's typed IQM columns are populated — this is what was lost before.
     let (cjv, cnr): (f64, f64) = db.conn.query_row(
-        "SELECT cjv, cnr FROM sidecars WHERE file_path LIKE '%T1w.json'",
+        "SELECT cjv, cnr FROM sidecars JOIN all_files USING (file_id) WHERE file_path LIKE '%T1w.json'",
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
@@ -71,7 +75,7 @@ async fn mriqc_iqm_sidecars_become_records() -> anyhow::Result<()> {
     assert_eq!(cnr, 4.42);
 
     let fd_mean: f64 = db.conn.query_row(
-        "SELECT fd_mean FROM sidecars WHERE file_path LIKE '%bold.json'",
+        "SELECT fd_mean FROM sidecars JOIN all_files USING (file_id) WHERE file_path LIKE '%bold.json'",
         [],
         |r| r.get(0),
     )?;
@@ -80,7 +84,7 @@ async fn mriqc_iqm_sidecars_become_records() -> anyhow::Result<()> {
     // The record is queryable by BIDS concept, so a consumer can ask for
     // "the bold IQMs of sub-01" rather than parsing paths.
     let (sub, datatype, suffix, extension): (String, String, String, String) = db.conn.query_row(
-        "SELECT sub, datatype, suffix, extension FROM scans WHERE file_path LIKE '%bold.json'",
+        "SELECT sub, datatype, suffix, extension FROM all_files WHERE kind = 'data' AND file_path LIKE '%bold.json'",
         [],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
@@ -117,7 +121,7 @@ async fn inheritance_templates_are_not_promoted() -> anyhow::Result<()> {
 
     let db = ingest(dir.path()).await?;
     assert_eq!(
-        count(&db, "scans")?,
+        count_data_files(&db)?,
         0,
         "templates describe files elsewhere and must not become records"
     );
@@ -144,10 +148,12 @@ async fn sidecars_with_their_data_file_are_not_promoted() -> anyhow::Result<()> 
     .unwrap();
 
     let db = ingest(dir.path()).await?;
-    assert_eq!(count(&db, "scans")?, 1, "only the .nii.gz is a record");
-    let path: String = db
-        .conn
-        .query_row("SELECT file_path FROM scans", [], |r| r.get(0))?;
+    assert_eq!(count_data_files(&db)?, 1, "only the .nii.gz is a record");
+    let path: String = db.conn.query_row(
+        "SELECT file_path FROM all_files WHERE kind = 'data'",
+        [],
+        |r| r.get(0),
+    )?;
     assert!(path.ends_with(".nii.gz"), "got {path}");
     Ok(())
 }

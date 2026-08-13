@@ -76,6 +76,10 @@ pub struct Schema {
     /// generation of every table that comes from `rules.tabular_data`.
     tabular: Tabular,
     table_definitions: HashMap<String, String>,
+    /// Views over the generated tables, emitted after every table so their bases exist.
+    /// Keyed by view name; `CREATE OR REPLACE`, so a later, wider run redefines rather than
+    /// being refused (docs/adr/0006).
+    view_definitions: HashMap<String, String>,
     table_columns: HashMap<String, Vec<(String, String, String)>>, // table -> [(col_name, col_type, json_key)]
     /// Lowercased `json_key`s of [`Self::table_columns`]: which source fields a table
     /// has a dedicated column for.
@@ -87,12 +91,21 @@ pub struct Schema {
     /// missing from its own column *and* counted as undeclared. The surviving column
     /// absorbs both, as DuckDB does with the identifier itself.
     ///
-    /// Derived, never set directly — see [`Schema::set_table_columns`]. Precomputed
-    /// because the alternative is rebuilding a 449-entry set per `sidecars` row on the
-    /// bulk-insert path.
+    /// Derived, never set directly — see [`Schema::set_table_columns`]. Precomputed because
+    /// the alternative is rebuilding the whole set — one entry per column, and `sidecars` has
+    /// a column per BIDS metadata field — for every row on the bulk-insert path.
     table_keys_lower: HashMap<String, std::collections::HashSet<String>>,
+    /// The same lowercased `json_key`s, kept in column order rather than as a set, so
+    /// the case-insensitive column lookup in [`Schema::row_values`] can fold the
+    /// table's side once at load instead of once per row.
+    ///
+    /// Derived alongside [`Self::table_keys_lower`], from the same single writer.
+    table_json_keys_lower: HashMap<String, Vec<String>>,
     primary_keys: HashMap<String, Vec<String>>, // table -> [pk_col_names]
     insert_sql: HashMap<String, String>,        // table -> prebuilt INSERT statement
+    // table -> the same statement as `INSERT OR REPLACE`, for the writers that must
+    // refresh a row rather than defer to whatever wrote it first.
+    replace_sql: HashMap<String, String>,
     /// The overlays merged into this schema, in application order (empty if none).
     overlays: Vec<AppliedOverlay>,
     /// Ingestion policy (read/catalog/ignore + per-table materialized concepts). Empty for a
@@ -178,8 +191,11 @@ impl Schema {
             table_definitions: HashMap::new(),
             table_columns: HashMap::new(),
             table_keys_lower: HashMap::new(),
+            table_json_keys_lower: HashMap::new(),
             primary_keys: HashMap::new(),
+            view_definitions: HashMap::new(),
             insert_sql: HashMap::new(),
+            replace_sql: HashMap::new(),
             overlays: overlays.to_vec(),
             ingestion,
             projected_concepts: term_maps
@@ -222,7 +238,7 @@ impl Schema {
         let mut names: Vec<String> = self
             .generated_bids_columns(true)
             .into_iter()
-            .map(|(name, _)| name)
+            .map(|c| c.name)
             .collect();
         if !self.projected_concepts.is_empty() {
             names.push("projected".to_string());
@@ -262,8 +278,11 @@ impl Schema {
     fn build_insert_statements(&mut self) {
         let tables: Vec<String> = self.table_columns.keys().cloned().collect();
         for table in tables {
-            if let Some(sql) = self.build_insert_sql(&table) {
-                self.insert_sql.insert(table, sql);
+            if let Some(sql) = self.build_insert_sql(&table, true) {
+                self.insert_sql.insert(table.clone(), sql);
+            }
+            if let Some(sql) = self.build_insert_sql(&table, false) {
+                self.replace_sql.insert(table, sql);
             }
         }
     }
@@ -271,27 +290,40 @@ impl Schema {
     /// Record a table's write columns, keeping the derived lowercase key index in
     /// step. The only way `table_columns` is populated, so the two cannot drift.
     fn set_table_columns(&mut self, table: &str, fields: Vec<(String, String, String)>) {
-        self.table_keys_lower.insert(
-            table.to_string(),
-            fields
-                .iter()
-                .map(|(_, _, json_key)| json_key.to_lowercase())
-                .collect(),
-        );
+        let lower: Vec<String> = fields
+            .iter()
+            .map(|(_, _, json_key)| json_key.to_lowercase())
+            .collect();
+        self.table_keys_lower
+            .insert(table.to_string(), lower.iter().cloned().collect());
+        self.table_json_keys_lower.insert(table.to_string(), lower);
         self.table_columns.insert(table.to_string(), fields);
     }
 
     /// Whether `table` has a dedicated column for the source field `key`, matched
     /// case-insensitively (see `table_keys_lower`).
+    /// The write-path column names of `table`, in the order [`Self::row_values`] returns
+    /// them. Positional, so a caller can line a shaped row up with the columns it fills.
+    pub fn write_columns(&self, table: &str) -> Option<Vec<String>> {
+        self.table_columns
+            .get(table)
+            .map(|fields| fields.iter().map(|(name, _, _)| name.clone()).collect())
+    }
+
     pub fn declares(&self, table: &str, key: &str) -> bool {
         self.table_keys_lower
             .get(table)
             .is_some_and(|keys| keys.contains(&key.to_lowercase()))
     }
 
-    /// Build the `INSERT ... SELECT ... [WHERE NOT EXISTS ...]` statement for a
-    /// table from its column and primary-key metadata.
-    fn build_insert_sql(&self, table_name: &str) -> Option<String> {
+    /// Build the row-at-a-time write statement for a table from its column and
+    /// primary-key metadata.
+    ///
+    /// `guard` picks which of the two a table needs. With it, `INSERT … WHERE NOT EXISTS
+    /// (<pk>)` — first writer wins, which is what makes a walk's stub rows safe to issue
+    /// repeatedly. Without it, `INSERT OR REPLACE` — last writer wins, for a row a
+    /// re-index is meant to *refresh* from its source file rather than leave stale.
+    fn build_insert_sql(&self, table_name: &str, guard: bool) -> Option<String> {
         let fields = self.table_columns.get(table_name)?;
         // Quote every column identifier: tabular headers include DuckDB reserved
         // words (`type`, `index`, `group`, `time`) and case-sensitive names (`HED`).
@@ -314,8 +346,9 @@ impl Schema {
             })
             .collect();
 
+        let verb = if guard { "INSERT" } else { "INSERT OR REPLACE" };
         let mut sql = format!(
-            "INSERT INTO {} ({}) SELECT {}",
+            "{verb} INTO {} ({}) SELECT {}",
             table_name,
             col_names.join(", "),
             selects.join(", ")
@@ -323,7 +356,8 @@ impl Schema {
 
         // Idempotency guard: skip the row if a matching primary key already
         // exists (safe re-indexing). Kept for correctness; made cheap by caching.
-        if let Some(pks) = self.primary_keys.get(table_name)
+        if guard
+            && let Some(pks) = self.primary_keys.get(table_name)
             && !pks.is_empty()
         {
             let where_clauses: Vec<String> = pks
@@ -381,6 +415,97 @@ impl Schema {
 
         // Dataset Description (JSON, not tabular).
         self.generate_dataset_description_def();
+
+        // The file registry and its data-file view (docs/adr/0006). Generated rather than
+        // static DDL because both depend on the schema: the view carries the BIDS-concept
+        // columns, and the `projected` column exists only when a term map is configured.
+        self.generate_file_registry_def();
+    }
+
+    /// Generate `file_registry` — one row per file the walk saw — and the `all_files` view
+    /// over it (docs/adr/0006).
+    ///
+    /// The registry holds identity and classification only. The BIDS-concept columns live on
+    /// the **view**, not here, which is what makes widening the concept set a
+    /// `CREATE OR REPLACE VIEW` rather than a table rebuild — and it leaves the base table free
+    /// of generated columns, so the bulk staged upsert can write it.
+    fn generate_file_registry_def(&mut self) {
+        let table = "file_registry";
+        // `file_id` is a 128-bit hash of the three identity columns (see `bids::file_id`),
+        // so it is stable across runs and machines and needs no second UNIQUE constraint —
+        // which DuckDB would anyway refuse to upsert against.
+        let mut columns = vec![
+            "file_id HUGEINT PRIMARY KEY".to_string(),
+            "dataset_id TEXT".to_string(),
+            "root_uri TEXT".to_string(),
+            "file_path TEXT".to_string(),
+            "kind TEXT".to_string(),
+            // The fate of a file bidslake tried to *read*, absorbed from the former
+            // `tabular_files` table: `ingested` (its rows are in a data table), `on_disk` (a
+            // compressed recording deliberately left as a file), `skipped` (a tabular file
+            // the schema does not describe) or `failed` (a batch insert errored, so this run
+            // stored none of its rows). NULL for a file there was never any reading to
+            // report on — `kind` is what says an image is an image.
+            "status TEXT".to_string(),
+        ];
+        let mut fields: Vec<(String, String, String)> = [
+            ("file_id", "HUGEINT"),
+            ("dataset_id", "TEXT"),
+            ("root_uri", "TEXT"),
+            ("file_path", "TEXT"),
+            ("kind", "TEXT"),
+            ("status", "TEXT"),
+        ]
+        .iter()
+        .map(|(n, t)| (n.to_string(), t.to_string(), n.to_string()))
+        .collect();
+
+        // Same condition as the per-file tables': the stored projection exists only when
+        // some term map can supply a concept, so a plain BIDS catalog keeps a registry with
+        // no `projected` column at all.
+        let project = !self.projected_concepts.is_empty();
+        if project {
+            columns.push("projected JSON".to_string());
+            fields.push((
+                "projected".to_string(),
+                "JSON".to_string(),
+                "projected".to_string(),
+            ));
+        }
+
+        self.table_definitions.insert(
+            table.to_string(),
+            format!(
+                "CREATE TABLE IF NOT EXISTS {table} (\n    {}\n);",
+                columns.join(",\n    ")
+            ),
+        );
+        self.set_table_columns(table, fields);
+        self.primary_keys
+            .insert(table.to_string(), vec!["file_id".to_string()]);
+
+        // `all_files`: the whole registry, widened with the BIDS-concept columns.
+        //
+        // Every kind, not just data files, because the concepts are computed from `file_path`
+        // and are just as meaningful for a `*_events.tsv` or a sidecar as for the image they
+        // sit beside — and because the per-row data tables key on *tabular* files, so this is
+        // the relation they join through to answer "which subject/task is this row from?".
+        // Filtering to data files here would leave that question unanswerable for them.
+        //
+        // The one view. "Just the data files" is `WHERE kind = 'data'`, which is short enough
+        // not to earn a second view that could drift from this one's concept expressions.
+        let concepts: Vec<String> = self
+            .generated_bids_columns(project)
+            .iter()
+            .map(ConceptColumn::as_select_item)
+            .collect();
+        self.view_definitions.insert(
+            "all_files".to_string(),
+            format!(
+                "CREATE OR REPLACE VIEW all_files AS\n  SELECT *,\n         {}\n  FROM {table};",
+                concepts.join(",\n         ")
+            ),
+        );
     }
 
     /// Generate one table from a schema-derived [`TableSpec`]: DDL, the write-path
@@ -405,13 +530,28 @@ impl Schema {
                 columns.push(format!("{} TEXT", name));
                 fields.push((name.to_string(), "TEXT".to_string(), name.to_string()));
             };
+        // The surrogate key every file-keyed table points at (docs/adr/0006). `HUGEINT`
+        // rather than `TEXT`, matching `file_registry.file_id`.
+        let file_key = |columns: &mut Vec<String>, fields: &mut Vec<(String, String, String)>| {
+            columns.push("file_id HUGEINT".to_string());
+            fields.push((
+                "file_id".to_string(),
+                "HUGEINT".to_string(),
+                "file_id".to_string(),
+            ));
+        };
 
         match spec.identity {
+            // `scans` — the BIDS `scans.tsv` table. One row per data file, keyed by the file
+            // rather than by `(dataset_id, file_path)`: identity lives in `file_registry`, and
+            // this table holds only what the TSV says *about* that file (`acq_time`, plus
+            // whatever the schema and overlays declare).
             RowIdentity::PerFile => {
-                base(&mut columns, &mut fields, "dataset_id");
-                base(&mut columns, &mut fields, "file_path");
-                pk = vec!["dataset_id".to_string(), "file_path".to_string()];
-                skip.insert("filename"); // the `filename` column IS file_path
+                file_key(&mut columns, &mut fields);
+                pk = vec!["file_id".to_string()];
+                trailing
+                    .push("FOREIGN KEY (file_id) REFERENCES file_registry(file_id)".to_string());
+                skip.insert("filename"); // the `filename` column IS the registry's file_path
             }
             RowIdentity::PerEntity if spec.table == "participants" => {
                 base(&mut columns, &mut fields, "dataset_id");
@@ -437,14 +577,23 @@ impl Schema {
                 );
             }
             RowIdentity::PerRow => {
-                base(&mut columns, &mut fields, "dataset_id");
-                base(&mut columns, &mut fields, "file_path");
-                columns.push("row_idx BIGINT".to_string());
-                fields.push((
-                    "row_idx".to_string(),
-                    "BIGINT".to_string(),
-                    "row_idx".to_string(),
-                ));
+                // The source file, by key. These tables key on *tabular* files (an
+                // `*_events.tsv`, a `*_channels.tsv`), which are registry rows like any
+                // other — so "which subject/task is this row from?" is answered by joining
+                // `all_files`, not by concept columns of their own.
+                file_key(&mut columns, &mut fields);
+                // `row_idx` exists only where it means something. It carries the one thing a
+                // SQL table cannot hold implicitly — the source file's line order — so a table
+                // whose order is declared not load-bearing has nothing to put in it, and a
+                // column of arbitrary labels would only invite `ORDER BY row_idx`.
+                if self.ingestion.ordered(&spec.table) {
+                    columns.push("row_idx BIGINT".to_string());
+                    fields.push((
+                        "row_idx".to_string(),
+                        "BIGINT".to_string(),
+                        "row_idx".to_string(),
+                    ));
+                }
             }
         }
 
@@ -473,24 +622,21 @@ impl Schema {
             ));
         }
 
-        // Where a table's BIDS-concept columns come from — three cases (ADR 0002 §7):
+        // Where a table's BIDS-concept columns come from — now two cases, not ADR 0002 §7's
+        // three (see docs/adr/0006):
         //
         // - MATERIALIZED (physical `TEXT`, written by a reader) for adapter *data* tables,
         //   whose paths encode no BIDS entities. Marked by the ingestion policy's per-table
-        //   `concepts` list, and exclusive of the virtual form: these tables hold reader
-        //   output only, so a regex over `file_path` would find nothing worth having.
-        // - VIRTUAL (regex over `file_path`) for BIDS-native, file_based tables — cheap and
-        //   correct, because a BIDS filename contains its entities.
-        // - VIRTUAL WITH A PROJECTION FALLBACK for the file *registry* — `scans`, the one
-        //   table holding both BIDS-named and term-mapped files. `generated_bids_columns`
-        //   wraps the projectable concepts in a COALESCE over a stored `projected` column,
-        //   so a term-mapped row reads as what its term map says without blanking BIDS rows.
+        //   `concepts` list. These tables hold reader output only, so there is nothing to
+        //   regex out of a path even if they still carried one.
+        // - NOWHERE, for every other table here. The virtual-regex columns moved to the
+        //   `all_files` view over `file_registry`, because a table keyed by `file_id` has no
+        //   `file_path` to compute them from — and because computing them once, on the one
+        //   relation that holds every file, is what stops 24 tables each carrying their own
+        //   copy of the same 40 expressions. "Which subject is this row from?" is now a join.
         //
-        //   Keyed on `RowIdentity::PerFile` rather than `file_based`, which is also true of
-        //   every per-row tabular table (`events`, `physio`, …). Those are reached by the
-        //   tabular readers, never by `ingest_projected`, so a projection can never land on
-        //   one: emitting the column there would add an always-NULL column to 23 tables and
-        //   charge each of their concept columns a COALESCE for a value that cannot arrive.
+        // The projection fallback moved with them: `projected` is a column of the registry,
+        // so `ingest_projected` writes it in exactly one place.
         let concepts: Vec<String> = self.ingestion.materialized_concepts(&spec.table).to_vec();
         if !concepts.is_empty() {
             let existing: std::collections::HashSet<String> =
@@ -502,29 +648,6 @@ impl Schema {
                 columns.push(format!("{} TEXT", quote_ident(&c)));
                 fields.push((c.clone(), "TEXT".to_string(), c));
             }
-        } else if spec.file_based {
-            // One binding for both halves, so the stored column and the expressions that
-            // read it can never disagree about whether this table has a projection.
-            let project =
-                !self.projected_concepts.is_empty() && spec.identity == RowIdentity::PerFile;
-            // The stored term-map projection the concept columns below fall back *from*.
-            // Physical (a term map has no path to regex it out of), and written only for
-            // files a term map claimed — NULL for every BIDS-named file, which measured
-            // no change in block usage. Omitted entirely when no term map is configured,
-            // so a plain BIDS catalog keeps exactly the DDL it had before.
-            if project {
-                columns.push("projected JSON".to_string());
-                fields.push((
-                    "projected".to_string(),
-                    "JSON".to_string(),
-                    "projected".to_string(),
-                ));
-            }
-            columns.extend(
-                self.generated_bids_columns(project)
-                    .into_iter()
-                    .map(|(_, d)| d),
-            );
         }
 
         if !pk.is_empty() {
@@ -603,11 +726,11 @@ impl Schema {
     /// almost none of them, so without this the projection a term map computed is
     /// discarded and the row reads as `seg`/`datatype`/`suffix` NULL.
     ///
-    /// Only the projectable set is wrapped: every wrapped column pays the COALESCE on
-    /// read, and wrapping all of them measured ~7.6% on the `SELECT *`-plus-filter
-    /// shape `lake.get()` issues, against ~1.8% for the handful a term map can supply.
-    /// With no term maps configured the set is empty and the DDL is byte-identical to
-    /// a plain BIDS catalog's — so BIDS-only ingests pay nothing at all.
+    /// Only the projectable set is wrapped, because every wrapped column pays its COALESCE on
+    /// every read — so the set is kept to the concepts some configured term map can actually
+    /// supply rather than every concept column. With no term maps configured the set is empty
+    /// and the DDL is byte-identical to a plain BIDS catalog's, so BIDS-only ingests pay
+    /// nothing at all.
     fn project_expr(&self, name: &str, expr: &str, project: bool) -> String {
         if !project || !self.projected_concepts.contains(name) {
             return expr.to_string();
@@ -615,8 +738,14 @@ impl Schema {
         format!("COALESCE(json_extract_string(projected, '$.{name}'), {expr})")
     }
 
-    fn generated_bids_columns(&self, project: bool) -> Vec<(String, String)> {
-        let mut cols = Vec::new();
+    /// The BIDS-concept columns derived from `file_path`, as name/type/expression triples.
+    ///
+    /// Returned as expressions rather than finished DDL because they are emitted two ways: as
+    /// `GENERATED ALWAYS AS (…) VIRTUAL` columns on a base table that holds `file_path`, and as
+    /// plain `… AS name` select items in the `all_files` view over `file_registry`. One producer,
+    /// so the two renderings cannot drift.
+    fn generated_bids_columns(&self, project: bool) -> Vec<ConceptColumn> {
+        let mut cols: Vec<ConceptColumn> = Vec::new();
 
         // One column per BIDS entity, keyed by its short `name`. Entity set comes
         // from the shared `bids-schema` owner (already sorted for deterministic
@@ -633,10 +762,7 @@ impl Schema {
                 &format!("NULLIF(regexp_extract(file_path, '(?:^|[_/]){name}-({valpat})', 1), '')"),
                 project,
             );
-            cols.push((
-                name.clone(),
-                format!("\"{name}\" VARCHAR GENERATED ALWAYS AS ({expr}) VIRTUAL"),
-            ));
+            cols.push(ConceptColumn::varchar(name, expr));
         }
 
         // datatype directory (func/anat/dwi/...), from the shared owner.
@@ -648,10 +774,7 @@ impl Schema {
                 &format!("NULLIF(regexp_extract(file_path, '/({alt})/', 1), '')"),
                 project,
             );
-            cols.push((
-                "datatype".to_string(),
-                format!("datatype VARCHAR GENERATED ALWAYS AS ({expr}) VIRTUAL"),
-            ));
+            cols.push(ConceptColumn::varchar("datatype", expr));
         }
 
         // suffix (trailing _<suffix> before the extension) and extension. `extension`
@@ -661,14 +784,10 @@ impl Schema {
             "NULLIF(regexp_extract(file_path, '_([A-Za-z0-9]+)\\.[^/]+$', 1), '')",
             project,
         );
-        cols.push((
-            "suffix".to_string(),
-            format!("suffix VARCHAR GENERATED ALWAYS AS ({suffix_expr}) VIRTUAL"),
-        ));
-        cols.push((
-            "extension".to_string(),
-            "extension VARCHAR GENERATED ALWAYS AS (NULLIF(regexp_extract(file_path, '(\\.[^/]+)$', 1), '')) VIRTUAL"
-                .to_string(),
+        cols.push(ConceptColumn::varchar("suffix", suffix_expr));
+        cols.push(ConceptColumn::varchar(
+            "extension",
+            "NULLIF(regexp_extract(file_path, '(\\.[^/]+)$', 1), '')".to_string(),
         ));
 
         // pseudofile: TRUE when the file is a BIDS "pseudo-file" — an opaque directory (`.ds`,
@@ -682,12 +801,9 @@ impl Schema {
             .map(|e| e.replace('.', "\\."))
             .collect();
         if !pseudo_alt.is_empty() {
-            cols.push((
-                "pseudofile".to_string(),
-                format!(
-                    "pseudofile BOOLEAN GENERATED ALWAYS AS (regexp_matches(file_path, '({})$')) VIRTUAL",
-                    pseudo_alt.join("|")
-                ),
+            cols.push(ConceptColumn::varchar(
+                "pseudofile",
+                format!("regexp_matches(file_path, '({})$')", pseudo_alt.join("|")),
             ));
         }
 
@@ -724,12 +840,9 @@ impl Schema {
             }
         }
         if !whens.is_empty() {
-            cols.push((
-                "modality".to_string(),
-                format!(
-                    "modality VARCHAR GENERATED ALWAYS AS (CASE {} ELSE NULL END) VIRTUAL",
-                    whens.join(" ")
-                ),
+            cols.push(ConceptColumn::varchar(
+                "modality",
+                format!("CASE {} ELSE NULL END", whens.join(" ")),
             ));
         }
 
@@ -747,22 +860,16 @@ impl Schema {
         let mut sidecar_fields = Vec::new();
         let mut seen_lowercase_names = std::collections::HashSet::new();
 
-        // Base columns for sidecars
-        sidecar_columns.push("dataset_id TEXT".to_string());
+        // Keyed by the file its metadata describes. Note *which* file: a sidecar row is the
+        // merged metadata for a **data** file, not for the `.json` it was read from — the
+        // JSON has its own registry row, under its own path (docs/adr/0006).
+        sidecar_columns.push("file_id HUGEINT".to_string());
         sidecar_fields.push((
-            "dataset_id".to_string(),
-            "TEXT".to_string(),
-            "dataset_id".to_string(),
+            "file_id".to_string(),
+            "HUGEINT".to_string(),
+            "file_id".to_string(),
         ));
-        seen_lowercase_names.insert("dataset_id".to_string());
-
-        sidecar_columns.push("file_path TEXT".to_string());
-        sidecar_fields.push((
-            "file_path".to_string(),
-            "TEXT".to_string(),
-            "file_path".to_string(),
-        ));
-        seen_lowercase_names.insert("file_path".to_string());
+        seen_lowercase_names.insert("file_id".to_string());
 
         // Extract ALL metadata fields from objects.metadata
         let metadata_fields = self.extract_metadata_fields();
@@ -793,12 +900,11 @@ impl Schema {
             "other_data".to_string(),
         ));
 
-        // Constraints for sidecars
-        sidecar_columns.push("PRIMARY KEY (dataset_id, file_path)".to_string());
-        sidecar_columns.push(
-            "FOREIGN KEY (dataset_id, file_path) REFERENCES scans(dataset_id, file_path)"
-                .to_string(),
-        );
+        // Constraints for sidecars. The foreign key targets the registry rather than `scans`
+        // because DuckDB refuses one against a view, and because the registry is the one
+        // relation that holds every file.
+        sidecar_columns.push("PRIMARY KEY (file_id)".to_string());
+        sidecar_columns.push("FOREIGN KEY (file_id) REFERENCES file_registry(file_id)".to_string());
 
         let sidecar_sql = format!(
             "CREATE TABLE IF NOT EXISTS sidecars (\n    {}\n);",
@@ -807,33 +913,23 @@ impl Schema {
         self.table_definitions
             .insert("sidecars".to_string(), sidecar_sql);
         self.set_table_columns("sidecars", sidecar_fields);
-        self.primary_keys.insert(
-            "sidecars".to_string(),
-            vec!["dataset_id".to_string(), "file_path".to_string()],
-        );
+        self.primary_keys
+            .insert("sidecars".to_string(), vec!["file_id".to_string()]);
     }
 
     fn generate_dataset_description_def(&mut self) {
         let table_name = "dataset_description";
-        let mut columns = vec![
-            "dataset_id TEXT PRIMARY KEY".to_string(),
-            "root_uri TEXT".to_string(),
-        ];
-        let mut fields = vec![
-            (
-                "dataset_id".to_string(),
-                "TEXT".to_string(),
-                "dataset_id".to_string(),
-            ),
-            (
-                "root_uri".to_string(),
-                "TEXT".to_string(),
-                "root_uri".to_string(),
-            ),
-        ];
+        // No `root_uri` here: a dataset may have been built from several ingest roots, and
+        // one column cannot hold them. `dataset_roots` is the registry, and it is what
+        // resolution joins through (docs/adr/0005).
+        let mut columns = vec!["dataset_id TEXT PRIMARY KEY".to_string()];
+        let mut fields = vec![(
+            "dataset_id".to_string(),
+            "TEXT".to_string(),
+            "dataset_id".to_string(),
+        )];
         let mut seen_lowercase_names = std::collections::HashSet::new();
         seen_lowercase_names.insert("dataset_id".to_lowercase());
-        seen_lowercase_names.insert("root_uri".to_lowercase());
 
         // List of known dataset_description.json fields from BIDS spec
         // These are the fields that typically appear in dataset_description.json
@@ -857,7 +953,7 @@ impl Schema {
 
         // Extract these fields from the metadata object. Keep the verbatim BIDS
         // field name as the column (`Name`, `BIDSVersion`, …); only the
-        // bidslake-internal columns (`dataset_id`, `root_uri`) are snake_case.
+        // bidslake-internal columns (`dataset_id`) are snake_case.
         // Dedup case-insensitively (DuckDB folds identifier case).
         if let Some(metadata) = self.schema["objects"]["metadata"].as_object() {
             for field_name in dataset_description_field_names {
@@ -895,12 +991,18 @@ impl Schema {
     }
 
     pub fn create_tables_sql(&self) -> Vec<String> {
-        // Foreign keys constrain the order: `sessions` references `participants`,
-        // and `sidecars` references `scans`. Everything else is order-free, so
+        // Foreign keys constrain the order: `sessions` references `participants`, and both
+        // `scans` and `sidecars` reference `file_registry`. Everything else is order-free, so
         // emit the FK-constrained tables first, then the rest deterministically.
         let mut order: Vec<String> = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        for t in ["participants", "sessions", "scans", "sidecars"] {
+        for t in [
+            "participants",
+            "sessions",
+            "file_registry",
+            "scans",
+            "sidecars",
+        ] {
             if self.table_definitions.contains_key(t) && seen.insert(t.to_string()) {
                 order.push(t.to_string());
             }
@@ -917,10 +1019,21 @@ impl Schema {
             order.push("dataset_description".to_string());
         }
 
-        order
+        let mut sqls: Vec<String> = order
             .iter()
             .filter_map(|t| self.table_definitions.get(t).cloned())
-            .collect()
+            .collect();
+
+        // Views last: each selects from a table above, which must already exist. Sorted so
+        // the emitted DDL is deterministic.
+        let mut views: Vec<&String> = self.view_definitions.keys().collect();
+        views.sort();
+        sqls.extend(
+            views
+                .into_iter()
+                .filter_map(|v| self.view_definitions.get(v).cloned()),
+        );
+        sqls
     }
 
     #[allow(dead_code)]
@@ -929,8 +1042,35 @@ impl Schema {
     }
 
     pub fn insert(&self, conn: &Connection, table_name: &str, data: &Value) -> Result<()> {
+        self.write_row(conn, table_name, data, &self.insert_sql)
+    }
+
+    /// Like [`Self::insert`], but the row replaces one already under its primary key
+    /// instead of deferring to it.
+    ///
+    /// For a row whose source is a file the ingest re-reads every run, where first-writer-
+    /// wins means a re-index silently keeps a stale copy: `dataset_description`, whose
+    /// `dataset_description.json` may have been added or corrected since. It is *not* the
+    /// default, because the guarded insert is what lets the walk issue stub rows freely —
+    /// an implicit `participants` row must never overwrite one read from `participants.tsv`.
+    pub fn insert_or_replace(
+        &self,
+        conn: &Connection,
+        table_name: &str,
+        data: &Value,
+    ) -> Result<()> {
+        self.write_row(conn, table_name, data, &self.replace_sql)
+    }
+
+    fn write_row(
+        &self,
+        conn: &Connection,
+        table_name: &str,
+        data: &Value,
+        statements: &HashMap<String, String>,
+    ) -> Result<()> {
         // Use the statement built once at load time.
-        let sql = self.insert_sql.get(table_name).ok_or_else(|| {
+        let sql = statements.get(table_name).ok_or_else(|| {
             duckdb::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!("No insert statement for table {}", table_name),
@@ -966,31 +1106,56 @@ impl Schema {
         // Which source keys have a dedicated column. Case-insensitive, and precomputed
         // per table rather than rebuilt per row — see `declares` for why both matter.
         let schema_keys = self.table_keys_lower.get(table_name);
-        let declared =
-            |key: &str| schema_keys.is_some_and(|keys| keys.contains(key.to_lowercase().as_str()));
+        let json_keys_lower = self.table_json_keys_lower.get(table_name);
+
+        // The row's keys, folded to lowercase once, so the last-resort column match below is
+        // a hash lookup. That match runs for every column the row does not carry — for a
+        // table as wide as `sidecars` that is nearly all of them — so folding on the spot
+        // meant rescanning and re-folding the whole row once per column, which made this the
+        // dominant cost of shaping a sidecar row.
+        //
+        // This index is lossy by construction: two keys differing only in case collapse to
+        // one entry. That is harmless for a lookup keyed on a column name, but it is why the
+        // `other_data` overflow below iterates the row itself instead.
+        let obj = data.as_object();
+        let mut lower_keys: HashMap<String, (&String, &Value)> = HashMap::new();
+        if let Some(obj) = obj {
+            for (key, value) in obj {
+                lower_keys.insert(key.to_lowercase(), (key, value));
+            }
+        }
 
         let mut params: Vec<Option<duckdb::types::Value>> = Vec::new();
-        // Owns JSON strings until they're cloned into `Value::Text` just below.
-        let mut string_values: Vec<String> = Vec::new();
 
-        for (col_name, col_type, json_key) in fields {
+        for (idx, (col_name, col_type, json_key)) in fields.iter().enumerate() {
             // Special handling for other_data column
             if col_name == "other_data" {
-                if let Some(obj) = data.as_object() {
+                if let Some(obj) = obj {
                     // Only the keys with no dedicated column reach the overflow.
-                    let mut custom_data = serde_json::Map::new();
+                    //
+                    // Iterated over the row, not over `lower_keys`: that index is keyed on the
+                    // folded spelling, so a row carrying two undeclared keys that differ only
+                    // in case keeps one of them and drops the other's value on the floor —
+                    // silently, and against this module's promise that nothing is dropped. The
+                    // membership test folds with `to_lowercase`, the same rule `declares` and
+                    // `set_table_columns` use, and runs once per row over the row's own keys
+                    // rather than once per column — which is the cost `lower_keys` removed.
+                    //
+                    // Borrowed, not cloned: serializing a map of references produces the same
+                    // JSON without copying the values, and sidecar values are not always small.
+                    // `BTreeMap<&str, _>` orders by key exactly as `serde_json::Map` (a
+                    // `BTreeMap<String, _>` here) does, so the output is byte-identical.
+                    let mut overflow: std::collections::BTreeMap<&str, &Value> =
+                        std::collections::BTreeMap::new();
                     for (key, value) in obj {
-                        if !declared(key) {
-                            custom_data.insert(key.clone(), value.clone());
+                        if !schema_keys.is_some_and(|keys| keys.contains(&key.to_lowercase())) {
+                            overflow.insert(key.as_str(), value);
                         }
                     }
 
-                    if !custom_data.is_empty() {
-                        let json_str = serde_json::to_string(&custom_data).unwrap();
-                        string_values.push(json_str);
-                        params.push(Some(duckdb::types::Value::Text(
-                            string_values.last().unwrap().clone(),
-                        )));
+                    if !overflow.is_empty() {
+                        let json_str = serde_json::to_string(&overflow).unwrap();
+                        params.push(Some(duckdb::types::Value::Text(json_str)));
                     } else {
                         params.push(None);
                     }
@@ -1000,29 +1165,23 @@ impl Schema {
                 continue;
             }
 
-            let val = if let Some(obj) = data.as_object() {
+            let val = obj.and_then(|obj| {
                 obj.get(json_key).or_else(|| obj.get(col_name)).or_else(|| {
                     // Case-insensitive last resort, for the spelling the DDL dropped
-                    // (see `table_keys_lower`). Only reached when both exact lookups
-                    // miss, and scans the *row's* keys — tens, not the table's hundreds.
-                    let want = json_key.to_lowercase();
-                    obj.iter()
-                        .find(|(k, _)| k.to_lowercase() == want)
-                        .map(|(_, v)| v)
+                    // (see `table_keys_lower`). One hash lookup against the row's
+                    // pre-folded keys — this path is taken for every column the row
+                    // does not carry, so it must not scan.
+                    json_keys_lower
+                        .and_then(|lower| lower.get(idx))
+                        .and_then(|want| lower_keys.get(want.as_str()))
+                        .map(|(_, v)| *v)
                 })
-            } else {
-                None
-            };
+            });
 
             if col_type == "JSON" {
-                let s = val.map(|v| v.to_string());
-                if let Some(s_val) = s {
-                    string_values.push(s_val);
-                    params.push(Some(duckdb::types::Value::Text(
-                        string_values.last().unwrap().clone(),
-                    )));
-                } else {
-                    params.push(None);
+                match val.map(|v| v.to_string()) {
+                    Some(s_val) => params.push(Some(duckdb::types::Value::Text(s_val))),
+                    None => params.push(None),
                 }
             } else {
                 // A dedicated column has a fixed scalar type, but BIDS metadata is
@@ -1040,6 +1199,26 @@ impl Schema {
                 match val {
                     // A number can't go into a BOOLEAN column.
                     Some(Value::Number(_)) if is_bool_col => params.push(None),
+                    // A 128-bit column, before the generic numeric arm. An `i64`/`u64`
+                    // literal is exact and widens losslessly; anything larger has ALREADY
+                    // been rounded — `serde_json` parses an integer literal too big for
+                    // `u64` as an `f64`, so the precision is gone before this function sees
+                    // it and no re-parse can recover it. Store NULL rather than a silently
+                    // wrong value: on `file_registry.file_id` that is a NOT NULL primary
+                    // key, so the row fails loudly instead of landing under a corrupted id.
+                    // A caller with a true 128-bit value passes a decimal string; see
+                    // [`crate::bids::file_id`].
+                    Some(Value::Number(n)) if col_type == "HUGEINT" => {
+                        match (n.as_i64(), n.as_u64()) {
+                            (Some(i), _) => {
+                                params.push(Some(duckdb::types::Value::HugeInt(i as i128)))
+                            }
+                            (_, Some(u)) => {
+                                params.push(Some(duckdb::types::Value::HugeInt(u as i128)))
+                            }
+                            _ => params.push(None),
+                        }
+                    }
                     Some(Value::Number(n)) => {
                         if n.is_i64() {
                             params.push(Some(duckdb::types::Value::BigInt(n.as_i64().unwrap())));
@@ -1049,6 +1228,15 @@ impl Schema {
                             params.push(Some(duckdb::types::Value::Text(n.to_string())));
                         }
                     }
+                    // A 128-bit column, before the generic numeric arm below. `file_id` is
+                    // a 128-bit hash and reaches here as a decimal *string*, because
+                    // `serde_json::Number` tops out at 64 bits — and the generic arm would
+                    // fail `parse::<i64>()`, then succeed at `parse::<f64>()`, silently
+                    // rounding a primary key to 53 bits of mantissa.
+                    Some(Value::String(s)) if col_type == "HUGEINT" => match s.parse::<i128>() {
+                        Ok(i) => params.push(Some(duckdb::types::Value::HugeInt(i))),
+                        Err(_) => params.push(None),
+                    },
                     Some(Value::String(s)) if is_numeric_col => {
                         if let Ok(i) = s.parse::<i64>() {
                             params.push(Some(duckdb::types::Value::BigInt(i)));
@@ -1089,10 +1277,7 @@ impl Schema {
                         // Non-numeric column: arrays/objects serialize to JSON text.
                         if v.is_array() || v.is_object() {
                             let json_str = v.to_string();
-                            string_values.push(json_str);
-                            params.push(Some(duckdb::types::Value::Text(
-                                string_values.last().unwrap().clone(),
-                            )));
+                            params.push(Some(duckdb::types::Value::Text(json_str)));
                         } else {
                             params.push(Some(duckdb::types::Value::Text(v.to_string())));
                         }
@@ -1102,6 +1287,33 @@ impl Schema {
         }
 
         Ok(params)
+    }
+}
+
+/// One BIDS-concept column of the `all_files` view: its name and the expression computing it
+/// from `file_path` (optionally falling back from a stored term-map projection).
+///
+/// No SQL type, because these are select items rather than declared columns — DuckDB infers
+/// the type from the expression. They used to be `GENERATED ALWAYS AS (…) VIRTUAL` columns on
+/// every file-keyed table; once those tables key on `file_id` they have no `file_path` to
+/// compute from, so the concepts are computed once, on the one relation that holds every file.
+struct ConceptColumn {
+    name: String,
+    expr: String,
+}
+
+impl ConceptColumn {
+    fn varchar(name: impl Into<String>, expr: String) -> Self {
+        Self {
+            name: name.into(),
+            expr,
+        }
+    }
+
+    /// As a select item in a view. DuckDB resolves a later expression against an earlier
+    /// alias in the same `SELECT`, which is what lets `modality` key off `datatype`.
+    fn as_select_item(&self) -> String {
+        format!("{} AS {}", self.expr, quote_ident(&self.name))
     }
 }
 

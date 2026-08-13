@@ -25,7 +25,19 @@ if TYPE_CHECKING:
 # it in would surface a JSON blob as ``f.entities["projected"]`` on adapter
 # catalogs and nowhere else.
 _NON_CONCEPT = frozenset(
-    {"dataset_id", "file_path", "other_data", "HED", "acq_time", "row_idx", "projected"}
+    {
+        "file_id",
+        "dataset_id",
+        "root_uri",
+        "file_path",
+        "kind",
+        "status",
+        "other_data",
+        "HED",
+        "acq_time",
+        "row_idx",
+        "projected",
+    }
 )
 
 
@@ -40,7 +52,11 @@ class BidsFile:
     """
 
     dataset_id: str
+    #: Which of the dataset's ingest roots ``file_path`` is relative to (docs/adr/0005).
+    root_uri: str
     file_path: str
+    #: The registry key every file-keyed table stores (docs/adr/0006).
+    file_id: int
     uri: str
     entities: dict[str, Any]
     # Back-reference to the opened database, for lazy metadata/events/associated
@@ -90,17 +106,19 @@ class BidsFile:
     def metadata(self) -> dict[str, Any]:
         """The merged JSON-sidecar metadata for this file, keyed by BIDS field
         name (`RepetitionTime`, …). Empty dict if the file has no sidecar."""
-        return self._require_lake()._sidecar_metadata(self.dataset_id, self.file_path)
+        return self._require_lake()._sidecar_metadata(self.file_id)
 
     def get_events(self) -> pl.DataFrame:
         """The task-event rows associated with this file (BIDS inheritance already
         resolved at ingest). Empty frame if there are none."""
-        return self._require_lake()._events_for(self.dataset_id, self.file_path)
+        return self._require_lake()._events_for(self.file_id)
 
     def get_associated(self, kind: str | None = None) -> list[BidsFile]:
         """Files cross-referenced from this one (fieldmaps, events, …) via
         `file_associations`, optionally filtered to one `association_type`."""
-        return self._require_lake()._associated_for(self.dataset_id, self.file_path, kind)
+        return self._require_lake()._associated_for(
+            self.dataset_id, self.root_uri, self.file_id, kind
+        )
 
     def related_datasets(self, relation: Relation | str | None = None) -> list[str]:
         """The dataset ids related to *this file's* dataset by explicit provenance
@@ -119,12 +137,20 @@ class BidsFile:
     def _from_row(
         cls,
         dataset_id: str,
+        root_uri: str,
         file_path: str,
+        file_id: int,
         uri: str,
         row: dict[str, Any],
         lake: BidsLake | None = None,
     ) -> BidsFile:
         entities = {k: v for k, v in row.items() if k not in _NON_CONCEPT and v is not None}
         return cls(
-            dataset_id=dataset_id, file_path=file_path, uri=uri, entities=entities, lake=lake
+            dataset_id=dataset_id,
+            root_uri=root_uri,
+            file_path=file_path,
+            file_id=file_id,
+            uri=uri,
+            entities=entities,
+            lake=lake,
         )

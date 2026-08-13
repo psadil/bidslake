@@ -114,7 +114,6 @@ mod tests {
             name: filename.to_string(),
             path: format!("/{}", filename),
             absolute_path: format!("/dummy/{}", filename).into(),
-            size: 100,
         };
         let mut tree = FileTree {
             name: String::new(),

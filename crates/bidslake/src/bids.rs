@@ -16,13 +16,15 @@
 //!    `.bval`/`.bvec` diffusion arrays, and the `scans` table (every imaging file
 //!    gets a row, whether or not a `*_scans.tsv` listed it).
 //! 5. **Apply BIDS inheritance** to build `sidecars`: for each imaging file, the
-//!    applicable dataset-/subject-level JSON sidecars are merged (more-specific
-//!    wins), indexed by `(dataset_id, suffix)` to keep matching near-linear.
+//!    applicable dataset-/subject-level JSON sidecars are merged (more-specific wins).
+//!    Candidates are found through a `SidecarIndex` keyed by
+//!    `(dataset_id, suffix, directory)`, so a file consults only the sidecars on its own
+//!    ancestor path rather than every sidecar the dataset holds.
 //!
-//! Two performance notes worth knowing: `events` rows (by far the highest row
-//! count) are written with the DuckDB `Appender` (bulk path, bypassing SQL
-//! planning), and the entire parse runs inside a single transaction (opened by
-//! the caller in `main`), so it commits atomically.
+//! Two things about how rows reach the database. Tabular files are deferred and ingested in
+//! header-grouped batches — one `read_csv` over many files — while `scans` and `sidecars` go
+//! through the DuckDB `Appender` (see [`BidsDb::append_rows`]). And the entire parse runs
+//! inside a single transaction (opened by the caller in `main`), so it commits atomically.
 
 use crate::db::{BidsDb, FileAssociation, TabularStatus};
 use crate::fs::BidsFileSystem;
@@ -32,6 +34,7 @@ use crate::schema::Schema;
 use crate::schema::dynamic::{quote_ident, sql_in_list, sql_lit};
 use crate::schema::ingestion::{Disposition, Undeclared};
 use crate::schema::tabular::{ColumnSpec, FileContext, RowIdentity, TableSpec};
+use crate::timing::{self, Counter, Phase};
 use anyhow::{Context, Result};
 use bids_core::entities::read_entities;
 use bids_schema::term_map::{FileFacts, TermMap};
@@ -40,7 +43,6 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::time::{Duration, Instant};
 
 /// The `read_csv` relaxations that make a tabular read non-poisoning: a malformed
 /// row is padded or dropped rather than aborting the ingest transaction (so
@@ -54,42 +56,22 @@ macro_rules! non_poisoning_read_flags {
     };
 }
 
-/// Wall-time accountant for [`BidsParser::parse`], active only when
-/// `BIDSLAKE_TIMING` is set. It isolates the per-file tabular `read_csv` cost
-/// (Lever 1b's target) from the rest of the process pass — a split sampling
-/// can't cleanly recover — and reports a phase breakdown at the end of the run.
-struct PhaseTimer {
-    /// True when `BIDSLAKE_TIMING` is set; skips all clock reads otherwise.
-    enabled: bool,
-    /// Accumulated time inside the tabular `read_csv` ingest, summed across files.
-    tabular: Duration,
-}
-
-impl PhaseTimer {
-    fn new() -> Self {
-        Self {
-            enabled: std::env::var_os("BIDSLAKE_TIMING").is_some(),
-            tabular: Duration::ZERO,
-        }
-    }
-
-    /// Start a phase clock (or `None` when timing is off, so the caller pays
-    /// nothing).
-    fn mark(&self) -> Option<Instant> {
-        self.enabled.then(Instant::now)
-    }
-
-    /// Add the elapsed time since `start` to the tabular accumulator.
-    fn add_tabular(&mut self, start: Option<Instant>) {
-        if let Some(start) = start {
-            self.tabular += start.elapsed();
-        }
-    }
+/// The same relaxations without `all_varchar`, for a read that states its `columns`
+/// outright — the types are in that struct, and asking for both is a conflict.
+macro_rules! non_poisoning_read_flags_typed {
+    () => {
+        "delim='\\t', nullstr='n/a', strict_mode=false, null_padding=true, ignore_errors=true"
+    };
 }
 
 /// S3/httpfs configuration for reading `s3://` tabular data via DuckDB. Passed to
 /// [`BidsParser::new`] so the read-preflight connection is configured as part of
 /// construction — there is no separate must-call-before-`parse` step to forget.
+///
+/// Defined unconditionally, though only a build with the `s3` feature can act on it:
+/// it names two plain values and pulls in no AWS types, and keeping it means
+/// [`BidsParser::new`]'s signature does not change between feature configurations.
+/// Supplying one to a build without the feature is an error, not a silent no-op.
 pub struct S3Httpfs {
     /// The AWS region httpfs should target.
     pub region: String,
@@ -97,9 +79,51 @@ pub struct S3Httpfs {
     pub anonymous: bool,
 }
 
+/// The `dataset_description.json` fields that decide whether two ingest roots are the
+/// same dataset, when the `dataset_id` was inferred rather than asserted
+/// (`BidsParser::resolve_root`, docs/adr/0005).
+///
+/// `Name` and `BIDSVersion` say what the dataset is and which standard it targets;
+/// `GeneratedBy` pins the pipeline and version that wrote it; `SourceDatasets` says what
+/// it was derived from. That last one carries the weight: a pipeline writes its *own*
+/// name into `Name`, identically for every study it ever processes, so `SourceDatasets`
+/// is what separates two studies' fMRIPrep output from two shards of one study's.
+///
+/// Deliberately not the whole file. `GeneratedBy` already varies between shards processed
+/// months apart, and fields like `Authors` or `HowToAcknowledge` drifting between shards
+/// is untidy, not evidence of a different dataset.
+const IDENTITY_FIELDS: [&str; 4] = ["Name", "BIDSVersion", "GeneratedBy", "SourceDatasets"];
+
+/// Whether the text stored in a `dataset_description` column represents `want`.
+///
+/// Mirrors how [`Schema::row_values`](crate::schema::Schema::row_values) writes one: a
+/// string goes in verbatim, anything else as its JSON rendering. Non-scalars are compared
+/// by parsing the stored text back, so key order does not make two equal descriptions
+/// look different.
+fn stored_matches(have: Option<&str>, want: Option<&Value>) -> bool {
+    match (have, want) {
+        (None, None) => true,
+        // A string column holds the string itself, which need not be valid JSON
+        // (`7t_trt`, `fMRIPrep - fMRI PREProcessing workflow`).
+        (Some(have), Some(Value::String(want))) => have == want,
+        // Everything else was written as its JSON rendering, so text that will not parse
+        // cannot be one — report a difference rather than guessing. That is the safe
+        // direction: on the inferred path an unexplained difference refuses the merge.
+        (Some(have), Some(want)) => {
+            serde_json::from_str::<Value>(have).is_ok_and(|parsed| &parsed == want)
+        }
+        _ => false,
+    }
+}
+
 pub struct BidsParser {
     fs: Box<dyn BidsFileSystem>,
     dataset_id: Option<String>,
+    /// This run's ingest root, as the URI every row it writes is resolved against.
+    /// A run walks exactly one root, so this is `self.fs.root()` cached — that call
+    /// allocates, and step-3 write paths need the value once per row. Settled by
+    /// [`Self::resolve_root`]; empty before `parse` reaches that point, never read before.
+    root_uri: String,
     /// S3/httpfs config for the read-preflight connection, applied at the start of
     /// [`Self::parse`]. `None` for local datasets.
     s3_httpfs: Option<S3Httpfs>,
@@ -108,11 +132,27 @@ pub struct BidsParser {
     /// walks and classifies every file, so overlay-described derivative outputs a
     /// pipeline hides (e.g. fMRIPrep's `*_timeseries.tsv`, `*_xfm.*`) are indexed.
     apply_bidsignore: bool,
-    pending_associations: Vec<FileAssociation>,
+    pending_associations: Vec<PendingAssociation>,
     pending_diffusion: HashMap<String, PendingDiffusion>,
     schema: Schema,
     imaging_files: Vec<ImagingFile>,
-    has_scans_tsv: bool,
+    /// Every walked file that is **not** a primary data file, for the file registry
+    /// (docs/adr/0006): sidecars, tabular files, gradients, READMEs — everything an `ignore`
+    /// rule did not claim.
+    ///
+    /// Separate from `imaging_files` rather than one mixed list because
+    /// `promote_orphan_sidecars` builds its `by_dir` index with positions aligned to
+    /// `imaging_files`; a mixed list would put sidecars and READMEs into the orphan check.
+    /// The two are merged at the flush, where a path in both (a promoted metadata-only
+    /// record) resolves to its data-file row.
+    registry_extra: Vec<RegistryEntry>,
+    /// Statuses decided during the **walk**, keyed by dataset-relative path.
+    ///
+    /// The registry is written after the walk, so a `record_file_status` UPDATE issued while
+    /// walking would match no row and be silently lost. These are folded into the rows
+    /// instead; statuses decided later (a batch insert's `ingested`/`failed`) do use the
+    /// UPDATE, by which time the row exists.
+    walk_status: HashMap<String, TabularStatus>,
     /// Whether a `dataset_description.json` was found and inserted. When it wasn't — the
     /// normal case for a dataset ingested through a layout adapter, which by definition
     /// has none — a minimal row is synthesized at the end of the walk so the dataset still
@@ -146,8 +186,6 @@ pub struct BidsParser {
     // per-file loop doesn't re-issue an insert for every file of a subject.
     seen_participants: HashSet<(String, String)>, // (dataset_id, participant_id)
     seen_sessions: HashSet<(String, String, String)>, // (dataset_id, participant_id, session_id)
-    /// Opt-in wall-time accountant (`BIDSLAKE_TIMING`); zero-overhead otherwise.
-    phase_timer: PhaseTimer,
     /// Prefetched file bodies read in Rust (rel path → content): JSON sidecars,
     /// `.bval`/`.bvec`, and adapter `read`-disposition files. Filled concurrently
     /// before the serial passes so each read isn't a separate round-trip on a
@@ -182,6 +220,33 @@ struct ImagingFile {
     /// rule and then thrown away — leaving the row's `datatype`/`suffix`/entity
     /// columns NULL. Lands in the `projected` column that
     /// `Schema::generated_bids_columns` makes the concept columns fall back from.
+    projected: Option<Value>,
+}
+
+/// A cross-reference collected during the walk, still in path form.
+///
+/// Distinct from [`FileAssociation`], the row that reaches the database, because a target is
+/// resolved to a `file_id` only at finalize — that is the first point at which the whole set of
+/// walked paths is known, and an `IntendedFor` may name a file the dataset does not ship.
+struct PendingAssociation {
+    source_file: String,
+    target_file: String,
+    assoc_type: String,
+}
+
+/// A walked file that is not a primary data file, held until the registry is written
+/// (docs/adr/0006).
+///
+/// `dataset_id` and `root_uri` are not on it: a run resolves one of each, so carrying them per
+/// row would clone two strings per file for values the flush already has.
+#[derive(Clone)]
+struct RegistryEntry {
+    /// Relative to this run's ingest root.
+    file_path: String,
+    kind: Kind,
+    /// What a term map projected onto this file, if one claimed it — the same value an
+    /// [`ImagingFile`] carries, kept so a non-data projected file still answers concept
+    /// queries through the registry.
     projected: Option<Value>,
 }
 
@@ -228,34 +293,127 @@ struct SidecarInfo {
     content: Value,
 }
 
-/// What matching a sidecar to a data file needs to know about that file: where it sits,
-/// and what its filename names. Precomputed so the orphan check parses each data file's
-/// entities once rather than once per sidecar.
+/// Collected sidecars indexed by `(dataset_id, suffix, directory)`, for BIDS inheritance.
+///
+/// Inheritance asks, of a given file, which sidecars apply: same dataset and suffix,
+/// directory an ancestor of the file's, entities a subset of the file's. Keying on all
+/// three of those makes the answer a handful of lookups — one per ancestor directory —
+/// where indexing on dataset and suffix alone left the directory test as a scan over
+/// every same-suffix sidecar. In ordinary raw BIDS each run ships its own `_bold.json`,
+/// so that bucket holds one sidecar per data file and the scan was quadratic in dataset
+/// size.
+struct SidecarIndex<'a> {
+    sidecars: &'a [SidecarInfo],
+    by_dir: HashMap<(&'a str, &'a str, &'a Path), Vec<usize>>,
+}
+
+impl<'a> SidecarIndex<'a> {
+    fn new(sidecars: &'a [SidecarInfo]) -> Self {
+        let mut by_dir: HashMap<(&'a str, &'a str, &'a Path), Vec<usize>> = HashMap::new();
+        for (i, s) in sidecars.iter().enumerate() {
+            let dir = Path::new(&s.file_path)
+                .parent()
+                .unwrap_or_else(|| Path::new(""));
+            by_dir
+                .entry((s.dataset_id.as_str(), s.suffix.as_str(), dir))
+                .or_default()
+                .push(i);
+        }
+        Self { sidecars, by_dir }
+    }
+
+    /// The metadata applying to `rel_path`, merged under BIDS inheritance.
+    ///
+    /// The *nearer* sidecar wins. Visiting the file's ancestor directories
+    /// shallowest-first and merging in that order lets a deeper sidecar overwrite a
+    /// shallower one, matching the tree-based reference resolver — and it replaces a
+    /// sort by directory depth, since the visit order *is* depth order. Two sidecars at
+    /// equal depth necessarily share a directory, so that tie is broken within a bucket,
+    /// by entity count (the invalid-BIDS case of two sidecars side by side).
+    fn merged(
+        &self,
+        dataset_id: &str,
+        rel_path: &str,
+        suffix: &str,
+        entities: &HashMap<String, String>,
+        scratch: &mut Vec<usize>,
+    ) -> serde_json::Map<String, Value> {
+        let dir = Path::new(rel_path)
+            .parent()
+            .unwrap_or_else(|| Path::new(""));
+        // `ancestors()` runs deepest-first; collect and reverse.
+        let mut ancestors: Vec<&Path> = dir.ancestors().collect();
+        ancestors.reverse();
+
+        scratch.clear();
+        for ancestor in ancestors {
+            let Some(candidates) = self.by_dir.get(&(dataset_id, suffix, ancestor)) else {
+                continue;
+            };
+            let start = scratch.len();
+            // Dataset, suffix, and directory are all answered by the key; all that is
+            // left is the entity-subset test.
+            scratch.extend(candidates.iter().copied().filter(|&i| {
+                self.sidecars[i]
+                    .entities
+                    .iter()
+                    .all(|(key, value)| entities.get(key) == Some(value))
+            }));
+            scratch[start..].sort_by_key(|&i| self.sidecars[i].entities.len());
+        }
+
+        let mut merged = serde_json::Map::new();
+        for &i in scratch.iter() {
+            if let Value::Object(map) = &self.sidecars[i].content {
+                for (k, v) in map {
+                    merged.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        merged
+    }
+}
+
+/// What matching a sidecar to a data file needs to know about that file: which dataset
+/// and suffix it belongs to, and what its filename names. Precomputed so the orphan
+/// check parses each data file's entities once rather than once per sidecar.
 struct DataFileFacts<'a> {
-    dir: &'a Path,
+    dataset_id: &'a str,
+    suffix: String,
     entities: HashMap<String, String>,
 }
 
+/// Data files indexed by `(dataset_id, suffix, ancestor directory)` — each file
+/// registered under *every* directory it sits at or below.
+///
+/// The orphan check asks "is there a data file at or below this sidecar's directory?",
+/// which the reverse index (file → its own directory) could only answer by scanning
+/// every same-suffix file and testing the prefix — quadratic once a dataset has one
+/// sidecar per run. Registering each file under its ancestors instead costs one entry
+/// per path component and turns the question into a single lookup.
+type DataFilesByDir<'a> = HashMap<(&'a str, &'a str, &'a Path), Vec<usize>>;
+
 /// Whether `sidecar` describes any indexed data file, by the same rule inheritance uses:
-/// same dataset and suffix (already keyed), the data file at or below the sidecar's
-/// directory, and the sidecar's entities a subset of the data file's.
+/// same dataset and suffix, the data file at or below the sidecar's directory (both
+/// already answered by the index key), and the sidecar's entities a subset of the data
+/// file's.
 fn describes_a_data_file(
     sidecar: &SidecarInfo,
-    by_suffix: &HashMap<(&str, String), Vec<DataFileFacts>>,
+    by_dir: &DataFilesByDir,
+    facts: &[DataFileFacts],
 ) -> bool {
-    let Some(candidates) = by_suffix.get(&(sidecar.dataset_id.as_str(), sidecar.suffix.clone()))
-    else {
-        return false;
-    };
     let dir = Path::new(&sidecar.file_path)
         .parent()
         .unwrap_or_else(|| Path::new(""));
-    candidates.iter().any(|f| {
-        f.dir.starts_with(dir)
-            && sidecar
-                .entities
-                .iter()
-                .all(|(key, value)| f.entities.get(key) == Some(value))
+    let key = (sidecar.dataset_id.as_str(), sidecar.suffix.as_str(), dir);
+    let Some(candidates) = by_dir.get(&key) else {
+        return false;
+    };
+    candidates.iter().any(|&i| {
+        sidecar
+            .entities
+            .iter()
+            .all(|(key, value)| facts[i].entities.get(key) == Some(value))
     })
 }
 
@@ -270,26 +428,35 @@ struct PendingRecording {
     entities: HashMap<String, String>,
 }
 
-/// A header-bearing per-row tabular file deferred so it can be ingested in a
-/// **batch** with its siblings (Lever 1b). Files sharing a table and an identical
-/// header signature go into one `read_csv([f1,…,fN])` INSERT, amortizing the
-/// ~4–8 ms of fixed per-file `read_csv` setup (open + dialect sniff + plan +
-/// state-machine build/teardown) that dominates ingest — measured ~7.5× on the
-/// tabular phase. Only `RowIdentity::PerRow` files are deferred; the few
-/// per-entity/per-file tables (`participants`/`sessions`/`scans`) stay on the
-/// per-file path, whose per-file structural derivation doesn't batch cleanly.
+/// A header-bearing tabular file deferred so it can be ingested in a **batch** with its
+/// siblings (Lever 1b). Files sharing a table and an identical header signature go into one
+/// `read_csv([f1,…,fN])` INSERT rather than N, which amortizes the fixed per-file `read_csv`
+/// setup — open, plan, state-machine build and teardown — over the whole group.
+///
+/// **Every** routed tabular file is deferred, whatever its [`RowIdentity`]. The keyed tables
+/// (`participants`/`sessions`/`scans`) need a per-file value the batch cannot derive from the
+/// rows themselves, so it travels with the file in [`Self::aux`]; and because batching moves
+/// their reads to after the walk has synthesized its stub rows, they insert with
+/// `INSERT OR REPLACE` so the file's own row wins (see [`BidsParser::flush_tabular`]).
 struct PendingTabular {
     spec: TableSpec,
     /// Dataset-relative path (→ `file_path`).
     rel_path: String,
-    /// Ready-to-use `read_csv` source (canonical local path or `s3://` URL), passed
-    /// to `read_csv` and joined back to `rel_path` via the emitted `filename` column.
+    /// Ready-to-use `read_csv` source (canonical local path or `s3://` URL), passed to
+    /// `read_csv` and joined back to `rel_path` through the emitted `__src` column — named
+    /// that rather than taking `filename=true`'s default because `scans.tsv` has a literal
+    /// `filename` column of its own (see [`build_tabular_batch_select`]).
     source: String,
     /// Raw header line (see [`read_tsv_header`]). The batch key is
     /// `(table, group_key)`, so every file in a group has byte-identical header
     /// bytes — one `read_csv` dialect, and `other_data` stays exact (no
     /// `union_by_name` NULL fillers).
     group_key: String,
+    /// The per-file value this table's row identity needs, carried into the batch's
+    /// path map: the containing directory for a `PerFile` table (whose `file_path` is
+    /// built from its `filename` column), or the `sub-…` label for a session table.
+    /// Empty when the identity needs neither.
+    aux: String,
     /// Normalized header column names, used to build the batch SQL.
     columns: Vec<String>,
 }
@@ -306,6 +473,7 @@ impl BidsParser {
         Self {
             fs,
             dataset_id,
+            root_uri: String::new(),
             s3_httpfs,
             ignore_set: Gitignore::empty(),
             apply_bidsignore,
@@ -313,7 +481,8 @@ impl BidsParser {
             pending_diffusion: HashMap::new(),
             schema,
             imaging_files: Vec::new(),
-            has_scans_tsv: false,
+            registry_extra: Vec::new(),
+            walk_status: HashMap::new(),
             has_dataset_description: false,
             sidecars: Vec::new(),
             dataset_type: None,
@@ -324,7 +493,6 @@ impl BidsParser {
             validator: Connection::open_in_memory().expect("open in-memory validator connection"),
             seen_participants: HashSet::new(),
             seen_sessions: HashSet::new(),
-            phase_timer: PhaseTimer::new(),
             content_cache: HashMap::new(),
             tabular_header: HashMap::new(),
             term_maps: Vec::new(),
@@ -353,9 +521,27 @@ impl BidsParser {
     /// [`S3Httpfs`] config given to [`Self::new`]) so its `read_csv` sniff can open
     /// `s3://` tabular files, mirroring the write connection. Called once at the
     /// start of [`Self::parse`]; a no-op for local datasets.
+    #[cfg(feature = "s3")]
     fn configure_s3_httpfs(&self) -> Result<()> {
         if let Some(cfg) = &self.s3_httpfs {
             crate::s3::configure_httpfs(&self.validator, &cfg.region, cfg.anonymous)?;
+        }
+        Ok(())
+    }
+
+    /// Without the `s3` feature there is no httpfs configuration to apply.
+    ///
+    /// A caller that supplied an [`S3Httpfs`] asked for something this build cannot
+    /// do, so this refuses rather than proceeding with the preflight connection
+    /// silently unconfigured — which would surface much later as an unexplained
+    /// `read_csv` failure on the first `s3://` tabular file.
+    #[cfg(not(feature = "s3"))]
+    fn configure_s3_httpfs(&self) -> Result<()> {
+        if self.s3_httpfs.is_some() {
+            anyhow::bail!(
+                "an S3 configuration was supplied, but this bidslake was built without \
+                 the `s3` feature; rebuild with `--features s3` (the default)"
+            );
         }
         Ok(())
     }
@@ -371,27 +557,220 @@ impl BidsParser {
             .is_ok_and(|mut stmt| stmt.query([]).is_ok())
     }
 
-    /// Column names of a header-bearing file, sniffed on the validator connection.
-    /// `None` if the file can't be read (so it is skipped, not ingested).
-    fn sniff_columns(&self, read_csv_from: &str) -> Option<Vec<String>> {
-        let sql = format!("DESCRIBE SELECT * FROM {read_csv_from}");
-        let mut stmt = self.validator.prepare(&sql).ok()?;
-        let cols = stmt
-            .query_map([], |r| r.get::<_, String>(0))
-            .ok()?
-            .filter_map(|r| r.ok())
+    /// This run's registry key for a dataset-relative path — the value every satellite table
+    /// stores instead of `(dataset_id, file_path)`.
+    ///
+    /// `root_uri` is the run's, because a run walks exactly one root and every path it hands
+    /// this is relative to that root.
+    fn file_key(&self, dataset_id: &str, rel_path: &str) -> String {
+        file_id(dataset_id, &self.root_uri, rel_path)
+    }
+
+    /// One `file_registry` row (docs/adr/0006).
+    ///
+    /// `root_uri` comes from the run rather than the file: a run walks exactly one root, and
+    /// that root is what this file's `file_path` is relative to. Together with `dataset_id`
+    /// they give `file_id`, which is the key every satellite table points at.
+    fn registry_row(
+        &self,
+        dataset_id: &str,
+        file_path: &str,
+        kind: Kind,
+        projected: Option<&Value>,
+    ) -> Value {
+        let mut row = serde_json::Map::new();
+        row.insert(
+            "file_id".to_string(),
+            Value::String(file_id(dataset_id, &self.root_uri, file_path)),
+        );
+        row.insert(
+            "dataset_id".to_string(),
+            Value::String(dataset_id.to_string()),
+        );
+        row.insert("root_uri".to_string(), Value::String(self.root_uri.clone()));
+        row.insert(
+            "file_path".to_string(),
+            Value::String(file_path.to_string()),
+        );
+        row.insert("kind".to_string(), Value::String(kind.as_str().to_string()));
+        // A status decided during the walk, before this row existed to UPDATE.
+        if let Some(status) = self.walk_status.get(file_path) {
+            row.insert(
+                "status".to_string(),
+                Value::String(status.as_str().to_string()),
+            );
+        }
+        if let Some(projected) = projected {
+            row.insert("projected".to_string(), projected.clone());
+        }
+        Value::Object(row)
+    }
+
+    /// Every dataset-relative path the walk registered, for resolving a reference to a
+    /// `file_id`. A reference to a path not in here names a file this dataset does not ship.
+    fn registered_paths(&self) -> HashSet<&str> {
+        self.registry_extra
+            .iter()
+            .map(|e| e.file_path.as_str())
+            .chain(self.imaging_files.iter().map(|f| f.file_path.as_str()))
+            .collect()
+    }
+
+    /// Every walked file, as registry rows: the non-data files the walk collected, then the
+    /// data files.
+    ///
+    /// A path in both lists is a **promoted** metadata-only record — a sidecar whose data file
+    /// the dataset does not ship (MRIQC), which `promote_orphan_sidecars` turns into a data
+    /// file after the walk already classified it as a sidecar. The data-file row wins, so the
+    /// registry agrees with `scans` about what it is. Filtered rather than left to the upsert
+    /// to resolve, because both rows share a `file_id` and which one landed last would
+    /// otherwise depend on ordering.
+    fn registry_rows(&self, dataset_id: &str) -> Vec<Value> {
+        let data_paths: HashSet<&str> = self
+            .imaging_files
+            .iter()
+            .map(|f| f.file_path.as_str())
             .collect();
-        Some(cols)
+        let mut rows = Vec::with_capacity(self.registry_extra.len() + self.imaging_files.len());
+        rows.extend(
+            self.registry_extra
+                .iter()
+                .filter(|e| !data_paths.contains(e.file_path.as_str()))
+                .map(|e| self.registry_row(dataset_id, &e.file_path, e.kind, e.projected.as_ref())),
+        );
+        rows.extend(self.imaging_files.iter().map(|f| {
+            self.registry_row(
+                &f.dataset_id,
+                &f.file_path,
+                Kind::Data,
+                f.projected.as_ref(),
+            )
+        }));
+        rows
+    }
+
+    /// Bind this run's ingest root to `dataset_id`, and decide whether an existing dataset
+    /// of that name is *this* dataset (docs/adr/0005).
+    ///
+    /// A dataset may have many roots — subject-sharded pipeline output, the normal way
+    /// fMRIPrep and FreeSurfer are run at scale, is one logical dataset with one root per
+    /// subject — so a second root is additive rather than refused. `root_id` is what keeps
+    /// them apart: `file_path` is relative to the root it came from, and resolution joins
+    /// through `dataset_roots`.
+    ///
+    /// Two roots is only unambiguous when the *user* said so. When `--dataset-id` was
+    /// asserted, this trusts it and merely warns if the descriptions disagree. When the id
+    /// was **inferred**, it cannot be trusted on its own: `Name` is not an identity —
+    /// every fMRIPrep output declares `"fMRIPrep - fMRI PREProcessing workflow"`, the
+    /// tool's name — so two unrelated studies infer the same id. There the descriptions
+    /// must agree on [`IDENTITY_FIELDS`] before the roots merge; `SourceDatasets` is what
+    /// actually separates those two studies.
+    ///
+    /// Returns this run's `root_uri`, now registered.
+    fn resolve_root(&self, db: &BidsDb, dataset_id: &str, id_was_asserted: bool) -> Result<String> {
+        let root_uri = self.fs.root();
+        let existing = db.dataset_roots(dataset_id)?;
+
+        // Re-indexing a root already registered: nothing to decide.
+        if existing.iter().any(|uri| uri == &root_uri) {
+            return Ok(root_uri);
+        }
+
+        // A new root joining an existing dataset — the one genuinely ambiguous case.
+        if !existing.is_empty() {
+            let differing = self.description_mismatches(db, dataset_id)?;
+            if !differing.is_empty() {
+                if id_was_asserted {
+                    // The user named the dataset, so the merge stands. Say what disagrees
+                    // anyway: under an asserted id, a differing `Name` is the strongest
+                    // signal available that --dataset-id was mistyped.
+                    eprintln!(
+                        "Warning: adding root {root_uri} to dataset {dataset_id:?}, whose \
+                         dataset_description.json differs from the stored one ({}). \
+                         Proceeding because --dataset-id was given; check it if that is a \
+                         surprise.",
+                        differing.join(", ")
+                    );
+                } else {
+                    let roots = existing
+                        .iter()
+                        .map(|uri| format!("\n  {uri}"))
+                        .collect::<String>();
+                    anyhow::bail!(
+                        "dataset {dataset_id:?} is already in this catalog with {} root(s):{roots}\n\
+                         and its dataset_description.json differs from this run's ({}).\n\n\
+                         The dataset name was inferred from that file, so bidslake cannot tell \
+                         whether {root_uri} is another root of it or a different dataset. Say \
+                         which:\n\n  \
+                         --dataset-id {dataset_id:?}   another root of it\n  \
+                         --dataset-id <other-name>     a different dataset",
+                        existing.len(),
+                        differing.join(", ")
+                    );
+                }
+            }
+        }
+
+        db.register_dataset_root(dataset_id, &root_uri)?;
+        Ok(root_uri)
+    }
+
+    /// Which of [`IDENTITY_FIELDS`] differ between this run's root
+    /// `dataset_description.json` and the row already stored for `dataset_id`. Empty when
+    /// they agree, and empty when there is no stored row yet (nothing to disagree with).
+    ///
+    /// Compared as parsed [`Value`]s rather than as text, so that two files carrying the
+    /// same `SourceDatasets` with their keys in a different order still count as equal.
+    /// The stored side is text because these are `VARCHAR` columns — `row_values` writes an
+    /// array or object into one as compact JSON — so it is parsed back before comparing.
+    fn description_mismatches(&self, db: &BidsDb, dataset_id: &str) -> Result<Vec<&'static str>> {
+        let cols = IDENTITY_FIELDS
+            .iter()
+            .map(|f| quote_ident(f))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut stmt = db.conn.prepare(&format!(
+            "SELECT {cols} FROM dataset_description WHERE dataset_id = ? LIMIT 1"
+        ))?;
+        let stored: Option<Vec<Option<String>>> = stmt
+            .query_map([dataset_id], |r| {
+                (0..IDENTITY_FIELDS.len())
+                    .map(|i| r.get::<_, Option<String>>(i))
+                    .collect()
+            })?
+            .next()
+            .transpose()?;
+        let Some(stored) = stored else {
+            return Ok(Vec::new());
+        };
+
+        let incoming = self.root_description_json.as_ref();
+        Ok(IDENTITY_FIELDS
+            .iter()
+            .zip(stored)
+            .filter(|(field, have)| {
+                let want = incoming
+                    .and_then(|d| d.get(**field))
+                    .filter(|v| !v.is_null());
+                !stored_matches(have.as_deref(), want)
+            })
+            .map(|(field, _)| *field)
+            .collect())
     }
 
     pub async fn parse(&mut self, db: &BidsDb) -> Result<()> {
+        // Whether the caller named the dataset. Captured before the walk resolves an
+        // inferred one, because `resolve_root` treats the two differently: an asserted id
+        // is the user's claim that this root belongs to that dataset, an inferred one is
+        // only a `Name` — which pipelines reuse across every study they process.
+        let id_was_asserted = self.dataset_id.is_some();
+
         // Configure httpfs on the read-preflight connection (if this is an S3
         // ingest) before any `read_csv` sniff runs. No-op for local datasets.
         self.configure_s3_httpfs()?;
 
-        // Opt-in phase timing (`BIDSLAKE_TIMING`). `t_walk` brackets the walk;
-        // later phases are timed against a rolling `phase_start`.
-        let t_walk = self.phase_timer.mark();
+        // Opt-in phase accounting (`BIDSLAKE_TIMING`); see `crate::timing`.
+        let walk_phase = timing::scope(Phase::Walk);
 
         // Load .bidsignore patterns before parsing (unless `--no-bidsignore`, which
         // leaves `ignore_set` empty so nothing is filtered on the parser side either).
@@ -410,6 +789,10 @@ impl BidsParser {
         let pseudo_exts = bids_schema::pseudo_file_extensions(self.schema.raw());
         let files: Vec<std::path::PathBuf> =
             self.fs.walk(&pseudo_exts, self.apply_bidsignore).await?;
+        timing::count(Counter::Files, files.len() as u64);
+        if let Some(tree) = self.fs.file_tree() {
+            timing::count(Counter::Dirs, tree.walk_directories().count() as u64);
+        }
 
         for path in files {
             let file_name = path.file_name().unwrap().to_str().unwrap();
@@ -454,41 +837,58 @@ impl BidsParser {
             }
         }
 
-        let d_walk = t_walk.map(|t| t.elapsed());
-        let t_process = self.phase_timer.mark();
+        drop(walk_phase);
 
         // Concurrently prefetch the file contents the serial passes will read —
         // JSON sidecars (full) and TSV headers (first 64 KiB). On a network
         // filesystem these are per-file round-trips; reading them with bounded
         // concurrency overlaps the latency instead of paying it one file at a time.
         // Warm local disk sees a negligible change.
-        self.prefetch_contents(&dataset_description, &other_files)
-            .await;
+        {
+            let _t = timing::scope(Phase::Prefetch);
+            self.prefetch_contents(&dataset_description, &other_files)
+                .await;
+        }
+
+        // Starts after the prefetch, so `process` is the serial passes alone.
+        let process_phase = timing::scope(Phase::Process);
 
         // Datasets can carry nested dataset_description.json files (e.g. under
         // derivatives/). Sort shallowest-first so the dataset root wins when we
         // resolve the dataset_id and insert the description.
         dataset_description.sort_by_key(|p| p.components().count());
 
-        // Pass 0: Process dataset_description.json first to resolve dataset_id
+        // Pass 0: read the descriptions to resolve the dataset_id, and to capture the
+        // ROOT one — `resolve_root` compares it against what the catalog already holds,
+        // and `record_links` reads its provenance fields at finalize. Captured here rather
+        // than during the walk because `resolve_root` runs before it. The bodies are
+        // already prefetched, and `read_cached` leaves them in place for the second pass.
         for path in &dataset_description {
-            if self.dataset_id.is_none() {
-                let content = self.read_cached(path, &path.to_string_lossy()).await?;
-                match serde_json::from_str::<Value>(&content) {
-                    Ok(dataset_desc) => {
-                        if let Some(name) = dataset_desc.get("Name").and_then(|v| v.as_str()) {
-                            println!("Using dataset name from dataset_description.json: {}", name);
-                            self.dataset_id = Some(name.to_string());
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "Warning: skipping unparseable dataset_description.json at {}: {}",
-                            path.display(),
-                            e
-                        );
-                    }
+            if self.dataset_id.is_some() && self.root_description_json.is_some() {
+                break;
+            }
+            let content = self.read_cached(path, &path.to_string_lossy()).await?;
+            let desc = match serde_json::from_str::<Value>(&content) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!(
+                        "Warning: skipping unparseable dataset_description.json at {}: {}",
+                        path.display(),
+                        e
+                    );
+                    continue;
                 }
+            };
+            // Shallowest-first, so the first parseable one is the dataset's own; a nested
+            // description under `derivatives/` describes a different dataset.
+            if self.root_description_json.is_none() {
+                self.root_description_json = Some(desc.clone());
+            }
+            if self.dataset_id.is_none()
+                && let Some(name) = desc.get("Name").and_then(|v| v.as_str())
+            {
+                println!("Using dataset name from dataset_description.json: {}", name);
+                self.dataset_id = Some(name.to_string());
             }
         }
 
@@ -518,6 +918,11 @@ impl BidsParser {
 
         let dataset_id = self.dataset_id.as_ref().unwrap().clone();
 
+        // The id is settled, so this root can be bound to it — additively, since a dataset
+        // may have many roots. Deliberately here rather than before the walk: an inferred
+        // id does not exist until now, and it is the inferred case that needs deciding.
+        self.root_uri = self.resolve_root(db, &dataset_id, id_was_asserted)?;
+
         // Process dataset_description.json again to insert it
         for path in dataset_description {
             self.process_file(&path, db, &dataset_id).await?;
@@ -538,32 +943,62 @@ impl BidsParser {
             self.process_file(&path, db, &dataset_id).await?;
         }
 
+        // The prefetch caches are dead once the passes are done: every reader of
+        // `content_cache`/`tabular_header` is inside the passes above. Most of those readers
+        // take their entry rather than copying it (see `take_cached`), so the bodies drain as
+        // the passes advance; this drops whatever is left — chiefly the `dataset_description`
+        // entries, which are read twice and so cannot be taken.
+        //
+        // Releasing here matters at scale rather than being tidiness: a derivative dataset's
+        // per-run column dictionaries are hundreds of kilobytes each, so tens of thousands of
+        // them is gigabytes, and they would otherwise stay resident through inheritance, which
+        // is itself the peak (it builds one merged row per data file before appending any).
+        self.content_cache = HashMap::new();
+        self.tabular_header = HashMap::new();
+
+        // A metadata-only derivative (MRIQC's IQM sidecars, …) ships no data file for its
+        // records, so promote those sidecars to data files before anything is written. Runs
+        // here, at the end of the walk, because it changes a file's `kind` and the registry
+        // below must record the outcome rather than the guess.
+        self.promote_orphan_sidecars();
+
+        // The registry, before any table that points at it (docs/adr/0006) — including the
+        // batched tabular flush below, whose `scans.tsv` rows resolve their `file_id` by
+        // joining it. Every accumulator it reads is complete once the walk is done.
+        //
+        // Written through the staged upsert rather than the Appender: the registry has a
+        // primary key and no generated columns, so a re-index replaces a row rather than
+        // colliding with itself.
+        let registry_rows = self.registry_rows(&dataset_id);
+        if let Err(e) = db.upsert_rows(&self.schema, "file_registry", &registry_rows) {
+            eprintln!("Failed to write the file registry: {e}");
+        }
+
         // Lever 1b: ingest the deferred per-row tabular files in header-grouped
         // batches now that all of them are collected.
-        let t = self.phase_timer.mark();
-        self.flush_tabular(db).await?;
-        self.phase_timer.add_tabular(t);
+        {
+            let _t = timing::scope(Phase::TabularReadCsv);
+            self.flush_tabular(db).await?;
+        }
 
-        let d_process = t_process.map(|t| t.elapsed());
-        let t_finalize = self.phase_timer.mark();
+        drop(process_phase);
+        let finalize_phase = timing::scope(Phase::Finalize);
 
-        // Every ingested dataset must record a `root_uri`: it is what turns a stored
-        // dataset-relative `file_path` back into an openable `file://`/`s3://` URI, and it
-        // lives on `dataset_description`. A dataset ingested through a layout adapter
-        // (FreeSurfer `recon-all`, …) has no `dataset_description.json` by definition, so
-        // without this its files could not be resolved by a client at all. Synthesize the
-        // minimal row.
+        // Every ingested dataset gets a `dataset_description` row, even one that has no
+        // `dataset_description.json` — the normal case for a dataset ingested through a
+        // layout adapter (FreeSurfer `recon-all`, …), which by definition has none. The row
+        // holds nothing but the id, and that is the point: `lake.datasets()` reads this
+        // table, and the wide `files` view LEFT JOINs it, so without a row an adapter
+        // dataset would be absent from both. (Resolution does not depend on it — the roots
+        // are in `dataset_roots`, registered before the walk.)
         //
-        // This runs *after* the walk deliberately: the insert carries a `WHERE NOT EXISTS`
-        // primary-key guard, so a bare row written up front would shadow a real
-        // `dataset_description.json` and silently drop its metadata.
+        // Guarded, and after the walk: a bare row must never replace a real description.
         if !self.has_dataset_description {
             let mut row = serde_json::Map::new();
             row.insert(
                 "dataset_id".to_string(),
                 Value::String(dataset_id.to_string()),
             );
-            row.insert("root_uri".to_string(), Value::String(self.fs.root()));
             db.insert(&self.schema, "dataset_description", &Value::Object(row))
                 .with_context(|| {
                     format!("inserting synthesized dataset_description for {dataset_id}")
@@ -578,39 +1013,72 @@ impl BidsParser {
         // structural associations (events↔bold, bval/bvec↔dwi, channels↔eeg, …) resolved via the
         // shared `bids_schema` resolver. Deduped on the `file_associations` primary key (cheaper
         // than a DB `ON CONFLICT`; the table is tiny), then inserted.
-        let mut associations = self.pending_associations.clone();
-        associations.extend(self.resolve_structural_associations(&dataset_id));
+        let mut associations = std::mem::take(&mut self.pending_associations);
+        {
+            let _t = timing::scope(Phase::Associations);
+            associations.extend(self.resolve_structural_associations());
+        }
+        timing::count(Counter::Associations, associations.len() as u64);
 
-        let mut seen: HashSet<(String, String, String, String)> = HashSet::new();
-        for assoc in associations {
-            let key = (
-                assoc.dataset_id.clone(),
-                assoc.source_file.clone(),
-                assoc.target_file.clone(),
-                assoc.assoc_type.clone(),
-            );
-            if seen.insert(key)
-                && let Err(e) = db.insert_file_association(&assoc)
-            {
-                eprintln!("Failed to insert file association {:?}: {}", assoc, e);
-            }
+        // Resolving a target to an id needs the whole set of walked paths, which is why this
+        // happens here rather than where the association was collected: an `IntendedFor` may
+        // name a file the dataset does not ship, and that reference is kept (as a path with a
+        // NULL id) rather than dropped.
+        let registered = self.registered_paths();
+        // Dedup on borrowed keys — cloning the key per candidate allocated far more than the
+        // table itself holds.
+        let mut seen: HashSet<(&str, &str, &str)> = HashSet::new();
+        let deduped: Vec<FileAssociation> = associations
+            .iter()
+            .filter(|a| {
+                seen.insert((
+                    a.source_file.as_str(),
+                    a.target_file.as_str(),
+                    a.assoc_type.as_str(),
+                ))
+            })
+            .map(|a| FileAssociation {
+                source_file_id: self.file_key(&dataset_id, &a.source_file),
+                target_file_id: registered
+                    .contains(a.target_file.as_str())
+                    .then(|| self.file_key(&dataset_id, &a.target_file)),
+                target_file_path: a.target_file.clone(),
+                assoc_type: a.assoc_type.clone(),
+            })
+            .collect();
+        // That dedup is only against this run's own candidates; a row this dataset already has
+        // from a previous run is handled by the insert's own `OR IGNORE` (see
+        // `BidsDb::append_file_associations`), so a re-index refreshes rather than colliding.
+        if let Err(e) = db.append_file_associations(&deduped) {
+            eprintln!("Failed to insert file associations: {e}");
         }
 
-        // Insert pending diffusion data — only when we have both bval and bvec.
+        // Insert pending diffusion data — only when we have both bval and bvec. Upserted for the
+        // same reason.
+        // A `.bval`/`.bvec` names its image by stem, and that image need not exist: BIDS
+        // inheritance lets a dataset ship one `dwi.bval` at its root to apply to every
+        // subject (ds114 does), whose synthesized `dwi.nii.gz` is nothing on disk. Those
+        // gradients belong to no single image, so there is no row to attach them to —
+        // skip rather than key `diffusion` to a file the dataset does not have. (The
+        // gradient files themselves are still in the registry, under their own paths.)
+        let registered = self.registered_paths();
         for (nifti_path, diff) in &self.pending_diffusion {
+            if !registered.contains(nifti_path.as_str()) {
+                continue;
+            }
             if let (Some(bval), Some(bvec_x), Some(bvec_y), Some(bvec_z)) =
                 (&diff.bval, &diff.bvec_x, &diff.bvec_y, &diff.bvec_z)
-                && let Err(e) =
-                    db.insert_diffusion(&diff.dataset_id, nifti_path, bval, bvec_x, bvec_y, bvec_z)
+                && let Err(e) = db.insert_diffusion(
+                    &self.file_key(&diff.dataset_id, nifti_path),
+                    bval,
+                    bvec_x,
+                    bvec_y,
+                    bvec_z,
+                )
             {
                 eprintln!("Failed to insert diffusion data for {}: {}", nifti_path, e);
             }
         }
-
-        // A metadata-only derivative (MRIQC's IQM sidecars, …) ships no data file for its
-        // sidecars to describe. Promote those records to data files first, so the scans
-        // flush below gives them a row and inheritance can attach their metrics.
-        self.promote_orphan_sidecars();
 
         // An empty catalog is almost always a `.bidsignore` that hid the very files the
         // caller wanted. MRIQC, for instance, lists its own `*_T1w.json`/`*_bold.json`
@@ -629,76 +1097,20 @@ impl BidsParser {
             );
         }
 
-        // Ensure every discovered imaging file has a scans row. scans.tsv rows
-        // (inserted earlier, with richer metadata) win via insert-if-not-exists;
-        // this adds any imaging files a scans.tsv omitted (derivatives, files not
-        // listed) so their sidecars/associations have a referent. Running it
-        // unconditionally is what keeps the sidecars FK satisfied.
-        if !self.imaging_files.is_empty() {
-            println!(
-                "Populating scans table with {} imaging files ({}scans.tsv present).",
-                self.imaging_files.len(),
-                if self.has_scans_tsv { "" } else { "no " }
-            );
-            // Rows already in `scans` (e.g. inserted from an explicit `scans.tsv`
-            // with richer metadata) must win; the old per-row insert used an
-            // insert-if-not-exists guard, but the bulk Appender doesn't dedup, so
-            // seed the seen-set from what's there and skip those (and any duplicate
-            // imaging file) before appending.
-            let mut seen: HashSet<(String, String)> = HashSet::new();
-            if let Ok(mut stmt) = db.conn.prepare("SELECT dataset_id, file_path FROM scans")
-                && let Ok(rows) =
-                    stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-            {
-                seen.extend(rows.flatten());
-            }
+        // `scans` is the `scans.tsv` satellite, not a file registry (docs/adr/0006), so it is
+        // filled from that file's contents and nothing else — the way `sessions` is filled from
+        // `sessions.tsv`. A dataset without one simply has no rows here.
+        //
+        // It used to be seeded with a row per discovered data file, so that sidecars and
+        // associations had a referent to point at. That reason is gone: they point at
+        // `file_registry`, which holds every file whether or not a `scans.tsv` mentions it. The
+        // seeding survived the split only as habit, and it made `scans` claim to describe
+        // acquisitions it knew nothing about — 80 all-NULL rows on `ds001`, which ships no
+        // `scans.tsv` at all.
 
-            let mut scan_rows: Vec<Value> = Vec::with_capacity(self.imaging_files.len());
-            for img_file in &self.imaging_files {
-                if !seen.insert((img_file.dataset_id.clone(), img_file.file_path.clone())) {
-                    continue;
-                }
-                let mut scan_data = serde_json::Map::new();
-                scan_data.insert(
-                    "dataset_id".to_string(),
-                    Value::String(img_file.dataset_id.clone()),
-                );
-                // file_path contains the full relative path (e.g., sub-01/anat/sub-01_T1w.nii.gz)
-                scan_data.insert(
-                    "file_path".to_string(),
-                    Value::String(img_file.file_path.clone()),
-                );
+        drop(finalize_phase);
+        let inherit_phase = timing::scope(Phase::Inherit);
 
-                // The term-map projection, for a file whose name does not carry its
-                // concepts. Absent for BIDS-named files, and the column itself only
-                // exists when a term map is configured — `append_rows` writes by
-                // column, so an unset key is simply NULL.
-                if let Some(projected) = &img_file.projected {
-                    scan_data.insert("projected".to_string(), projected.clone());
-                }
-
-                // No `filename` key: it is structural, not data. The `scans.tsv` path
-                // consumes it into `file_path` (see `structural` in
-                // `build_tabular_insert_sql`) rather than storing it, and an
-                // auto-generated row must agree — otherwise every row carries an
-                // `other_data` blob duplicating the tail of `file_path`.
-                scan_rows.push(Value::Object(scan_data));
-            }
-
-            // One bulk Appender insert instead of one prepared INSERT per imaging
-            // file — avoids re-parsing the generated-column regexes per row.
-            if let Err(e) = db.append_rows(&self.schema, "scans", &scan_rows) {
-                eprintln!("Failed to bulk-insert auto-generated scans: {e}");
-            }
-        }
-
-        let d_finalize = t_finalize.map(|t| t.elapsed());
-        let t_inherit = self.phase_timer.mark();
-
-        // Apply BIDS inheritance to populate the `sidecars` table. On local disk we
-        // reuse bids-core's tree-based resolver (nearest-wins, matching the BIDS spec
-        // / reference validator); other backends (S3) fall back to the in-memory
-        // resolver over the sidecars collected during the walk.
         println!(
             "Applying BIDS inheritance for {} imaging files...",
             self.imaging_files.len()
@@ -711,47 +1123,16 @@ impl BidsParser {
         // files inherit it.
         self.apply_inheritance_collected(db);
 
-        let d_inherit = t_inherit.map(|t| t.elapsed());
-        let t_flush = self.phase_timer.mark();
+        drop(inherit_phase);
+        let flush_phase = timing::scope(Phase::Flush);
 
         // Ingest the deferred headerless recordings now that every sidecar and
         // channels file is available (their columns come from those).
         self.flush_recordings(db).await?;
 
-        let d_flush = t_flush.map(|t| t.elapsed());
-        self.report_phase_timing(d_walk, d_process, d_finalize, d_inherit, d_flush);
+        drop(flush_phase);
 
         Ok(())
-    }
-
-    /// Print the phase breakdown to stderr when `BIDSLAKE_TIMING` is set. `tabular`
-    /// is the slice of `process` spent in `read_csv` INSERTs — the Lever 1b target.
-    fn report_phase_timing(
-        &self,
-        walk: Option<Duration>,
-        process: Option<Duration>,
-        finalize: Option<Duration>,
-        inherit: Option<Duration>,
-        flush: Option<Duration>,
-    ) {
-        let (Some(walk), Some(process), Some(finalize), Some(inherit), Some(flush)) =
-            (walk, process, finalize, inherit, flush)
-        else {
-            return;
-        };
-        let total = walk + process + finalize + inherit + flush;
-        let ms = |d: Duration| d.as_secs_f64() * 1e3;
-        eprintln!(
-            "[timing] walk+categorize={:.0}ms  process={:.0}ms (tabular read_csv={:.0}ms)  \
-             finalize={:.0}ms  inherit={:.0}ms  flush={:.0}ms  total={:.0}ms",
-            ms(walk),
-            ms(process),
-            ms(self.phase_timer.tabular),
-            ms(finalize),
-            ms(inherit),
-            ms(flush),
-            ms(total),
-        );
     }
 
     /// Build one merged-sidecar row: the merged metadata as `other_data`, plus each
@@ -779,43 +1160,54 @@ impl BidsParser {
         if merged.is_empty() {
             return None;
         }
-        let mut sidecar_entry = serde_json::Map::new();
-        sidecar_entry.insert(
-            "dataset_id".to_string(),
-            Value::String(dataset_id.to_string()),
-        );
-        sidecar_entry.insert(
-            "file_path".to_string(),
-            Value::String(file_path.to_string()),
-        );
-
-        let (suffix, extension) = split_suffix_ext(file_path);
-        let datatype = self.datatype_dir_in_path(file_path);
-        // BIDS selector paths are dataset-relative with a leading slash.
-        let path_with_slash = format!("/{file_path}");
+        // This runs once per data file, inside the inheritance loop, so the context is built
+        // only when the policy will actually look at it — i.e. when some fragment scopes
+        // `undeclared` with `undeclaredWhen`. Otherwise the answer is a property of the table
+        // alone, and parsing the filename to derive a suffix nothing reads is pure waste.
+        let ingestion = self.schema.ingestion();
         let sidecar = Value::Null;
-        let keep_undeclared = self.schema.ingestion().undeclared_for(
-            "sidecars",
-            &FileContext {
-                path: &path_with_slash,
-                datatype: datatype.as_deref(),
-                suffix: Some(&suffix),
-                extension: Some(&extension),
-                sidecar: &sidecar,
-                dataset_type: self.dataset_type.as_deref(),
-            },
-        ) == Undeclared::Store;
+        let keep_undeclared = if ingestion.undeclared_needs_context("sidecars") {
+            let (suffix, extension) = split_suffix_ext(file_path);
+            let datatype = self.datatype_dir_in_path(file_path);
+            // BIDS selector paths are dataset-relative with a leading slash.
+            let path_with_slash = format!("/{file_path}");
+            ingestion.undeclared_for(
+                "sidecars",
+                &FileContext {
+                    path: &path_with_slash,
+                    datatype: datatype.as_deref(),
+                    suffix: Some(&suffix),
+                    extension: Some(&extension),
+                    sidecar: &sidecar,
+                    dataset_type: self.dataset_type.as_deref(),
+                },
+            )
+        } else {
+            ingestion.undeclared_for("sidecars", &FileContext::default())
+        } == Undeclared::Store;
 
-        // Flatten metadata into top-level fields for known columns (borrowing
-        // `merged`), then move the whole map into `other_data` — no clone.
-        for (k, v) in &merged {
-            if keep_undeclared || self.schema.declares("sidecars", k) {
-                sidecar_entry.insert(k.clone(), v.clone());
-            }
+        // The merged map *is* the row: `Schema::row_values` reads each declared column
+        // from it by key and rebuilds the `other_data` overflow from whatever is left
+        // over, so nothing has to be copied into a fresh map first.
+        //
+        // What this replaces was two full copies of the metadata per row — one from
+        // cloning every entry into a new map, and a second from also storing the whole
+        // map under `other_data`, which `row_values` then ignored in favour of
+        // recomputing the overflow itself. Sidecar values are not reliably small (a real
+        // `_bold.json` can run to megabytes), so those copies dominated inheritance on a
+        // metadata-heavy dataset.
+        let mut sidecar_entry = merged;
+        if !keep_undeclared {
+            sidecar_entry.retain(|k, _| self.schema.declares("sidecars", k));
         }
-        if keep_undeclared {
-            sidecar_entry.insert("other_data".to_string(), Value::Object(merged));
-        }
+        // The structural key, added only if the metadata does not already claim the name.
+        // That is the same precedence as before: it was inserted first and a sidecar key of
+        // the same name overwrote it, so the sidecar's value still wins. Note the key is the
+        // *data file*'s — a sidecars row is metadata about the file described, not about the
+        // `.json` it was read from, which has a registry row of its own.
+        sidecar_entry
+            .entry("file_id".to_string())
+            .or_insert_with(|| Value::String(self.file_key(dataset_id, file_path)));
         Some(Value::Object(sidecar_entry))
     }
 
@@ -851,25 +1243,37 @@ impl BidsParser {
         }
 
         let promoted: Vec<ImagingFile> = {
-            // A sidecar can only describe a data file of the same dataset and suffix, so
-            // index by that pair — the same cost class as inheritance itself.
-            let mut by_suffix: HashMap<(&str, String), Vec<DataFileFacts>> = HashMap::new();
-            for f in &self.imaging_files {
-                let name = f.file_path.split('/').next_back().unwrap_or_default();
-                let parts = read_entities(name);
-                by_suffix
-                    .entry((f.dataset_id.as_str(), parts.suffix))
-                    .or_default()
-                    .push(DataFileFacts {
-                        dir: Path::new(&f.file_path)
-                            .parent()
-                            .unwrap_or_else(|| Path::new("")),
+            // Parse each data file's name once…
+            let facts: Vec<DataFileFacts> = self
+                .imaging_files
+                .iter()
+                .map(|f| {
+                    let name = f.file_path.split('/').next_back().unwrap_or_default();
+                    let parts = read_entities(name);
+                    DataFileFacts {
+                        dataset_id: f.dataset_id.as_str(),
+                        suffix: parts.suffix,
                         entities: parts.entities,
-                    });
+                    }
+                })
+                .collect();
+            // …then register it under every directory it sits at or below, so the
+            // orphan check is a lookup rather than a scan (see `DataFilesByDir`).
+            let mut by_dir: DataFilesByDir = HashMap::new();
+            for (i, f) in facts.iter().enumerate() {
+                let dir = Path::new(&self.imaging_files[i].file_path)
+                    .parent()
+                    .unwrap_or_else(|| Path::new(""));
+                for ancestor in dir.ancestors() {
+                    by_dir
+                        .entry((f.dataset_id, f.suffix.as_str(), ancestor))
+                        .or_default()
+                        .push(i);
+                }
             }
             candidates
                 .into_iter()
-                .filter(|&i| !describes_a_data_file(&self.sidecars[i], &by_suffix))
+                .filter(|&i| !describes_a_data_file(&self.sidecars[i], &by_dir, &facts))
                 .map(|i| ImagingFile {
                     dataset_id: self.sidecars[i].dataset_id.clone(),
                     file_path: self.sidecars[i].file_path.clone(),
@@ -889,87 +1293,37 @@ impl BidsParser {
 
     /// BIDS inheritance for the `sidecars` table, merging the JSON sidecars already
     /// collected in memory during the walk — no disk re-read. Sidecars are keyed by
-    /// `(dataset_id, suffix)` with a directory-prefix + entity-subset match, and
-    /// merged shallowest-first so a nearer (deeper) sidecar overrides. This is the
+    /// `(dataset_id, suffix, directory)` with an entity-subset match, and visited
+    /// ancestor-directory order so a nearer (deeper) sidecar overrides. This is the
     /// sole inheritance path (local and S3); it reproduces the tree-based reference
     /// resolver row-for-row across the corpus.
     fn apply_inheritance_collected(&self, db: &BidsDb) {
-        // A sidecar can only apply to an imaging file of the same dataset and
-        // suffix, so index sidecars by (dataset_id, suffix) and precompute each
-        // one's parent directory. This turns inheritance matching from
-        // O(imaging_files x all_sidecars) into O(imaging_files x same-suffix
-        // sidecars) — the dominant ingestion cost for sidecar-heavy datasets.
-        let sidecar_dirs: Vec<&Path> = self
-            .sidecars
-            .iter()
-            .map(|s| {
-                Path::new(&s.file_path)
-                    .parent()
-                    .unwrap_or_else(|| Path::new(""))
-            })
-            .collect();
-        let mut sidecar_index: HashMap<(&str, &str), Vec<usize>> = HashMap::new();
-        for (i, s) in self.sidecars.iter().enumerate() {
-            sidecar_index
-                .entry((s.dataset_id.as_str(), s.suffix.as_str()))
-                .or_default()
-                .push(i);
-        }
-
+        timing::count(Counter::ImagingFiles, self.imaging_files.len() as u64);
+        timing::count(Counter::Sidecars, self.sidecars.len() as u64);
+        let index = SidecarIndex::new(&self.sidecars);
         let mut rows: Vec<Value> = Vec::new();
+        // Reused across files rather than reallocated per file.
+        let mut scratch: Vec<usize> = Vec::new();
+        // Split from the append below: the two are different kinds of work — merging
+        // and shaping happen in Rust, appending happens inside DuckDB — and which of
+        // them dominates decides where a fix goes.
+        let merge_phase = timing::scope(Phase::InheritMerge);
         for img_file in &self.imaging_files {
-            let mut merged_metadata = serde_json::Map::new();
-
             // Extract entities and suffix from imaging file
             let file_name = img_file.file_path.split('/').next_back().unwrap();
             let img_parts = read_entities(file_name);
-            let img_entities = img_parts.entities;
-            let img_suffix = img_parts.suffix;
 
-            // Candidates already share dataset_id + suffix; keep those whose
-            // directory is a prefix of the image's and whose entities are a
-            // subset of the image's.
-            let img_dir = Path::new(&img_file.file_path)
-                .parent()
-                .unwrap_or_else(|| Path::new(""));
-            let mut applicable: Vec<usize> = Vec::new();
-            if let Some(candidates) =
-                sidecar_index.get(&(img_file.dataset_id.as_str(), img_suffix.as_str()))
-            {
-                for &i in candidates {
-                    if !img_dir.starts_with(sidecar_dirs[i]) {
-                        continue;
-                    }
-                    let entities = &self.sidecars[i].entities;
-                    if entities
-                        .iter()
-                        .all(|(key, value)| img_entities.get(key) == Some(value))
-                    {
-                        applicable.push(i);
-                    }
-                }
-            }
-
-            // BIDS inheritance: the *nearer* sidecar wins, where nearness is
-            // directory depth (a sidecar deeper in the tree overrides a shallower
-            // one), matching the tree-based reference. Merge shallowest-first so
-            // deeper values overwrite; entity count breaks the (invalid-BIDS) tie of
-            // two sidecars at the same depth.
-            applicable.sort_by_key(|&i| {
-                (
-                    sidecar_dirs[i].components().count(),
-                    self.sidecars[i].entities.len(),
-                )
-            });
-
-            // Merge metadata
-            for &i in &applicable {
-                if let Value::Object(map) = &self.sidecars[i].content {
-                    for (k, v) in map {
-                        merged_metadata.insert(k.clone(), v.clone());
-                    }
-                }
-            }
+            let merged_metadata = index.merged(
+                &img_file.dataset_id,
+                &img_file.file_path,
+                &img_parts.suffix,
+                &img_parts.entities,
+                &mut scratch,
+            );
+            // How much metadata inheritance actually moves, which the row count alone
+            // does not say: a dataset whose sidecars carry ten keys and one whose
+            // sidecars carry three hundred look identical by row count.
+            timing::count(Counter::MergedKeys, merged_metadata.len() as u64);
 
             if let Some(row) =
                 self.build_sidecar_row(&img_file.dataset_id, &img_file.file_path, merged_metadata)
@@ -977,7 +1331,13 @@ impl BidsParser {
                 rows.push(row);
             }
         }
-        if let Err(e) = db.append_rows(&self.schema, "sidecars", &rows) {
+        drop(merge_phase);
+        let _append_phase = timing::scope(Phase::InheritAppend);
+        // Upserted, not appended: every row here is rebuilt from the sidecars on disk, so a
+        // re-index rewrites rows it already wrote. It cannot lean on `scans`' read-back `seen`
+        // set either — a file's metadata can change without its path changing, so a row already
+        // present still has to be replaced rather than skipped.
+        if let Err(e) = db.upsert_rows(&self.schema, "sidecars", &rows) {
             eprintln!("Failed to bulk-insert sidecars: {e}");
         }
     }
@@ -1048,10 +1408,12 @@ impl BidsParser {
 
         for (p, c) in body_res {
             if let Some(c) = c {
+                timing::count(Counter::BodiesRead, 1);
                 self.content_cache.insert(p, c);
             }
         }
         for (p, h) in hdr_res {
+            timing::count(Counter::HeadsRead, 1);
             self.tabular_header.insert(p, h);
         }
     }
@@ -1097,11 +1459,97 @@ impl BidsParser {
 
     /// The file's content from the concurrent prefetch, or a direct read if it
     /// wasn't prefetched. `rel` is the dataset-relative key the prefetch used.
+    ///
+    /// Leaves the entry in the cache, so use it only where the body is read more than once
+    /// (`dataset_description.json` is, by the id pass and then by the insert pass). Everywhere
+    /// else prefer [`Self::take_cached`], which does not copy the body.
     async fn read_cached(&self, path: &Path, rel: &str) -> Result<String> {
         match self.content_cache.get(rel) {
             Some(c) => Ok(c.clone()),
             None => Ok(self.fs.read_to_string(path).await?),
         }
+    }
+
+    /// Like [`Self::read_cached`], but *moves* the body out of the cache.
+    ///
+    /// For the single-consumer cases — a JSON sidecar, a `.bval`/`.bvec`, an adapter file — the
+    /// body is parsed once and dropped, so cloning it out of the cache copies a whole file for
+    /// nothing. Sidecars are not always small (a converter can attach megabytes of per-slice
+    /// DICOM metadata to one `_bold.json`), and the copies are live at the same time as the
+    /// originals. Moving also lets the cache drain as the passes advance, rather than every body
+    /// staying resident until the passes finish and the caches are released.
+    async fn take_cached(&mut self, path: &Path, rel: &str) -> Result<String> {
+        match self.content_cache.remove(rel) {
+            Some(c) => Ok(c),
+            None => Ok(self.fs.read_to_string(path).await?),
+        }
+    }
+
+    /// Register the subject (and session) a file belongs to, so `participants`/`sessions`
+    /// list every entity the dataset actually contains rather than only the ones a
+    /// `participants.tsv` happens to name.
+    ///
+    /// `sub`/`ses` are raw entity values (`01`, not `sub-01`); the `sub-`/`ses-` prefixes are
+    /// added here so the one normalization lives in one place. Called with values from a BIDS
+    /// filename, and — for a dataset whose filenames carry no entities at all — with the ones a
+    /// term map projected: a `recon-all` tree's subject is in its *directory*, so gating this on
+    /// filename entities left `participants` empty for every adapter dataset while `scans.sub`
+    /// was populated, and any `participants` ⋈ `scans` join silently dropped them.
+    ///
+    /// Only hits the database the first time each entity is seen; every other file of a subject
+    /// would otherwise re-issue an identical (guarded, no-op) insert.
+    fn record_implicit_entities(
+        &mut self,
+        db: &BidsDb,
+        dataset_id: &str,
+        sub: Option<&str>,
+        ses: Option<&str>,
+    ) -> Result<()> {
+        let Some(sub) = sub else { return Ok(()) };
+        let pid = format!("sub-{sub}");
+
+        if self
+            .seen_participants
+            .insert((dataset_id.to_string(), pid.clone()))
+        {
+            let mut participant_data = serde_json::Map::new();
+            participant_data.insert(
+                "dataset_id".to_string(),
+                Value::String(dataset_id.to_string()),
+            );
+            participant_data.insert("participant_id".to_string(), Value::String(pid.clone()));
+
+            // A duplicate (e.g. from participants.tsv) is a no-op: the insert carries a
+            // `WHERE NOT EXISTS` primary-key guard (see `schema::dynamic`), so `?` only
+            // surfaces real failures.
+            db.insert(
+                &self.schema,
+                "participants",
+                &Value::Object(participant_data),
+            )
+            .with_context(|| format!("inserting implicit participant {pid}"))?;
+        }
+
+        if let Some(ses) = ses {
+            let sid = format!("ses-{ses}");
+            if self
+                .seen_sessions
+                .insert((dataset_id.to_string(), pid.clone(), sid.clone()))
+            {
+                let mut session_data = serde_json::Map::new();
+                session_data.insert(
+                    "dataset_id".to_string(),
+                    Value::String(dataset_id.to_string()),
+                );
+                session_data.insert("session_id".to_string(), Value::String(sid.clone()));
+                session_data.insert("participant_id".to_string(), Value::String(pid.clone()));
+
+                // Duplicate is a no-op via the same guard.
+                db.insert(&self.schema, "sessions", &Value::Object(session_data))
+                    .with_context(|| format!("inserting implicit session {sid} for {pid}"))?;
+            }
+        }
+        Ok(())
     }
 
     async fn process_file(&mut self, path: &Path, db: &BidsDb, dataset_id: &str) -> Result<()> {
@@ -1132,63 +1580,35 @@ impl BidsParser {
         let extension = parts.extension;
         let entities = parts.entities;
 
-        let participant_id = entities.get("sub").map(|s| format!("sub-{}", s));
-        let session_id = entities.get("ses").map(|s| format!("ses-{}", s));
+        self.record_implicit_entities(
+            db,
+            dataset_id,
+            entities.get("sub").map(String::as_str),
+            entities.get("ses").map(String::as_str),
+        )?;
 
-        // Auto-create participant/session if they don't exist (implicit).
-        // Only hit the DB the first time we see each one; every file of a subject
-        // would otherwise re-issue an identical (guarded, no-op) insert.
-        if let Some(ref pid) = participant_id {
-            if self
-                .seen_participants
-                .insert((dataset_id.to_string(), pid.clone()))
-            {
-                let mut participant_data = serde_json::Map::new();
-                participant_data.insert(
-                    "dataset_id".to_string(),
-                    Value::String(dataset_id.to_string()),
-                );
-                participant_data.insert("participant_id".to_string(), Value::String(pid.clone()));
-
-                // A duplicate (e.g. from participants.tsv) is a no-op: the
-                // insert carries a `WHERE NOT EXISTS` primary-key guard
-                // (see `schema::dynamic`), so `?` only surfaces real failures.
-                db.insert(
-                    &self.schema,
-                    "participants",
-                    &Value::Object(participant_data),
-                )
-                .with_context(|| format!("inserting implicit participant {pid}"))?;
-            }
-
-            if let Some(ref sid) = session_id
-                && self
-                    .seen_sessions
-                    .insert((dataset_id.to_string(), pid.clone(), sid.clone()))
-            {
-                let mut session_data = serde_json::Map::new();
-                session_data.insert(
-                    "dataset_id".to_string(),
-                    Value::String(dataset_id.to_string()),
-                );
-                session_data.insert("session_id".to_string(), Value::String(sid.clone()));
-                session_data.insert("participant_id".to_string(), Value::String(pid.clone()));
-
-                // Duplicate is a no-op via the `WHERE NOT EXISTS` guard; `?`
-                // surfaces only real failures.
-                db.insert(&self.schema, "sessions", &Value::Object(session_data))
-                    .with_context(|| format!("inserting implicit session {sid} for {pid}"))?;
-            }
-        }
+        // What this file *is*, for its registry row. A BIDS-named file's datatype is its
+        // immediate parent directory; a term-mapped one never reaches here (it returned
+        // above), so `kind_of` sees `None` for anything outside a datatype directory.
+        let kind = kind_of(
+            rel_path,
+            &extension,
+            parent_datatype(rel_path, &self.datatypes),
+        );
 
         // JSON (sidecars + `dataset_description.json`) is handled directly: it is neither
         // read into a data table nor cataloged, but drives inheritance and associations.
+        // Both still earn a registry row under their own path — which is the whole point of
+        // the registry, since `sidecars` is keyed by the *data file* a sidecar describes and
+        // so leaves the JSON itself unaddressable (docs/adr/0006).
         if file_name == "dataset_description.json" {
+            self.register(rel_path, kind, None);
             self.process_dataset_description(path, db, dataset_id)
                 .await?;
             return Ok(());
         }
         if file_name.ends_with(".json") {
+            self.register(rel_path, kind, None);
             self.process_json_file(path, db, dataset_id, rel_path, &entities)
                 .await?;
             return Ok(());
@@ -1203,7 +1623,10 @@ impl BidsParser {
         // minor saving rather than load-bearing (selector ASTs are cached in
         // `bids_schema::expression`), but imaging files are the bulk of a dataset and match no
         // base ingestion rule, so running classify on them would be waste either way.
-        if is_datafile(rel_path, &extension, self.schema.raw()) {
+        //
+        // A data file's registry row comes from `imaging_files` at the flush, so it is not
+        // registered here.
+        if kind == Kind::Data {
             self.imaging_files.push(ImagingFile {
                 dataset_id: dataset_id.to_string(),
                 file_path: rel_path.to_string(), // Use rel_path not file_name
@@ -1216,7 +1639,7 @@ impl BidsParser {
         // concepts (extension/suffix) and returns the disposition + reader, replacing the
         // former hardcoded `.tsv`/`.bval`/`.bvec` gates. `read` runs the named reader
         // (`csv` = the batched tabular ingest, `diffusion` = the bval/bvec accumulator);
-        // `catalog` records the file in the `tabular_files` registry with its contents
+        // `catalog` records the file in `file_registry` with its contents
         // left on disk (chiefly compressed continuous recordings, read later with tools
         // like polars); `ignore` skips it. `datatype` is intentionally not bound here so a
         // configured adapter's datatype-keyed rules can't claim ordinary BIDS files.
@@ -1236,6 +1659,14 @@ impl BidsParser {
                 .classify(&ctx)
                 .map(|r| (r.disposition, r.reader.clone()))
         };
+        // `ignore` is the one disposition that yields no registry row: its metaschema text is
+        // "neither read nor register it", and a producer uses it to keep files out of the
+        // catalog deliberately (FEAT hides `report.html`/`pyfix.log`). Everything else the
+        // walk saw is in the dataset and so is in the manifest.
+        if !matches!(disposition, Some((Disposition::Ignore, _))) {
+            self.register(rel_path, kind, None);
+        }
+
         match disposition {
             Some((Disposition::Read, reader)) => match reader.as_deref() {
                 Some("diffusion") => {
@@ -1243,7 +1674,7 @@ impl BidsParser {
                         .await?;
                 }
                 Some("csv") => {
-                    self.process_tabular_file(db, rel_path, file_name, dataset_id, &entities)
+                    self.process_tabular_file(rel_path, file_name, dataset_id, &entities)
                         .await?;
                 }
                 other => {
@@ -1253,18 +1684,32 @@ impl BidsParser {
                 }
             },
             Some((Disposition::Catalog, _)) => {
-                // Left on disk, recorded in the tabular registry so queries surface it
+                // Left on disk, its registry row marked `on_disk` so queries surface it
                 // (chiefly compressed continuous recordings `*_physio.tsv.gz`).
-                let table = recording_table_of(&suffix);
-                db.record_tabular_file(dataset_id, rel_path, table, 0, TabularStatus::OnDisk)?;
+                self.walk_status
+                    .insert(rel_path.to_string(), TabularStatus::OnDisk);
             }
             Some((Disposition::Ignore, _)) => {}
             // A non-datafile, non-JSON file with no ingestion rule (READMEs, CHANGES, …):
-            // nothing to ingest.
+            // nothing to *ingest*, but it is still a file the dataset contains, so it has a
+            // registry row from the call above.
             None => {}
         }
 
         Ok(())
+    }
+
+    /// Record a walked file in the registry accumulator (docs/adr/0006).
+    ///
+    /// Data files are not registered here — they go through `imaging_files`, which
+    /// `promote_orphan_sidecars` and the inheritance pass also read, and are folded into the
+    /// registry at the flush by [`Self::registry_rows`].
+    fn register(&mut self, rel_path: &str, kind: Kind, projected: Option<Value>) {
+        self.registry_extra.push(RegistryEntry {
+            file_path: rel_path.to_string(),
+            kind,
+            projected,
+        });
     }
 
     /// Ingest a file recognized by a term map: project → build the routing context → let the
@@ -1280,6 +1725,11 @@ impl BidsParser {
         path: &Path,
         facts: FileFacts,
     ) -> Result<()> {
+        // Register the subject/session the projection found, before the disposition is decided:
+        // if a term map recognized a path and read a subject out of it, that subject is in the
+        // tree whether or not this particular file earns a `scans` row.
+        self.record_implicit_entities(db, dataset_id, facts.get("sub"), facts.get("ses"))?;
+
         // The ingestion selectors run over the projected concepts. `path` is dataset-relative
         // with a leading slash, matching the tabular selector convention.
         let leading = format!("/{rel_path}");
@@ -1294,23 +1744,47 @@ impl BidsParser {
                 dataset_type: dataset_type.as_deref(),
             };
             match self.schema.ingestion().classify(&ctx) {
-                Some(rule) => (rule.disposition, rule.reader.clone()),
-                None => return Ok(()), // recognized but no ingestion rule -> leave it alone
+                Some(rule) => (Some(rule.disposition), rule.reader.clone()),
+                // Recognized by a term map but claimed by no ingestion rule — a `recon-all`
+                // bookkeeping file, say. Nothing to read or catalog, but it is still a file
+                // the dataset contains, so it earns a registry row like any other.
+                None => (None, None),
             }
         };
+
+        // What the projection says this file is. A term-mapped path is a data file when the
+        // mapping gave it a datatype (`mri/wmparc.mgz` → `anat`) and something else when it
+        // did not (`scripts/recon-all.log` → `other`), which is the same rule the BIDS path
+        // uses — `kind_of` takes the datatype rather than deriving it precisely so both
+        // paths can share it.
+        let kind = kind_of(
+            rel_path,
+            facts.extension.as_deref().unwrap_or(""),
+            facts.datatype.as_deref(),
+        );
 
         // `read` and `catalog` both register the file in the standard `scans` registry,
         // carrying the projection so the registry row answers "what is this file?" the
         // way the term map said it would. Without it a cataloged projected file reaches
         // `scans` as a bare path and reads back with every concept NULL — including the
         // `datatype` its term map states outright.
-        if matches!(disposition, Disposition::Read | Disposition::Catalog) {
-            self.imaging_files.push(ImagingFile {
-                dataset_id: dataset_id.to_string(),
-                file_path: rel_path.to_string(),
-                projected: projected_json(&facts),
-            });
+        match disposition {
+            Some(Disposition::Read | Disposition::Catalog) => {
+                self.imaging_files.push(ImagingFile {
+                    dataset_id: dataset_id.to_string(),
+                    file_path: rel_path.to_string(),
+                    projected: projected_json(&facts),
+                });
+            }
+            // `ignore` is the deliberate opt-out and gets no row at all; a file no rule
+            // claimed still belongs in the manifest.
+            Some(Disposition::Ignore) => {}
+            None => self.register(rel_path, kind, projected_json(&facts)),
         }
+
+        let Some(disposition) = disposition else {
+            return Ok(());
+        };
 
         if disposition != Disposition::Read {
             return Ok(());
@@ -1320,7 +1794,7 @@ impl BidsParser {
             eprintln!("Warning: `read` rule for {rel_path} has no reader; skipping");
             return Ok(());
         };
-        let content = match self.read_cached(path, rel_path).await {
+        let content = match self.take_cached(path, rel_path).await {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("Warning: cannot read {rel_path}: {e}");
@@ -1331,16 +1805,24 @@ impl BidsParser {
             eprintln!("Warning: reader `{reader_name}` is not registered; skipping {rel_path}");
             return Ok(());
         };
-        match rdr.read(dataset_id, rel_path, &content, &facts) {
+        match rdr.read(&self.file_key(dataset_id, rel_path), &content, &facts) {
             Ok(batches) => {
-                let mut total = 0i64;
-                let mut primary: Option<String> = None;
                 for batch in &batches {
+                    // Clear this file's prior rows before re-inserting them. These tables are
+                    // per-row and so carry no primary key — nothing for an upsert to conflict
+                    // on — which means a re-index does not *fail*: it silently doubles the
+                    // table. Scoped per file, exactly as the batched tabular path scopes its own
+                    // pre-`DELETE` for the same class of table.
+                    if let Err(e) =
+                        db.clear_file_rows(&batch.table, &self.file_key(dataset_id, rel_path))
+                    {
+                        eprintln!(
+                            "Warning: clearing previous {} rows for {rel_path}: {e}",
+                            batch.table
+                        );
+                    }
                     match db.append_rows(&self.schema, &batch.table, &batch.rows) {
-                        Ok(()) => {
-                            total += batch.rows.len() as i64;
-                            primary.get_or_insert_with(|| batch.table.clone());
-                        }
+                        Ok(()) => {}
                         Err(e) => {
                             eprintln!(
                                 "Warning: insert into {} failed for {rel_path}: {e}",
@@ -1349,13 +1831,8 @@ impl BidsParser {
                         }
                     }
                 }
-                let _ = db.record_tabular_file(
-                    dataset_id,
-                    rel_path,
-                    primary.as_deref(),
-                    total,
-                    TabularStatus::Ingested,
-                );
+                self.walk_status
+                    .insert(rel_path.to_string(), TabularStatus::Ingested);
             }
             Err(e) => eprintln!("Warning: reader `{reader_name}` failed on {rel_path}: {e}"),
         }
@@ -1370,8 +1847,21 @@ impl BidsParser {
         rel_path: &str,
         entities: &HashMap<String, String>,
     ) -> Result<()> {
-        let content = self.read_cached(path, rel_path).await?;
-        let json_value: Value = serde_json::from_str(&content).unwrap_or(Value::Null);
+        let content = self.take_cached(path, rel_path).await?;
+        let mut json_value: Value = serde_json::from_str(&content).unwrap_or(Value::Null);
+
+        // Drop the keys the ingestion policy says `sidecars` never stores, here at the
+        // parse rather than at the insert. A key dropped now is never merged for the
+        // files that inherit it, never copied into a row, and never held in memory for
+        // the rest of the run — which is the whole point, since what motivates the
+        // policy is single keys of a few megabytes.
+        let ignore = self.schema.ingestion().ignore_keys("sidecars");
+        if !ignore.is_empty()
+            && let Some(obj) = json_value.as_object_mut()
+        {
+            obj.retain(|k, _| !ignore.iter().any(|i| i == k));
+        }
+        let json_value = json_value;
 
         // Extract the BIDS suffix from the filename via the shared bids-core parser.
         let file_name = path.file_name().unwrap().to_str().unwrap();
@@ -1379,7 +1869,7 @@ impl BidsParser {
 
         // Check for IntendedFor field to create associations (borrows the parsed
         // value before it is moved into the sidecar store below).
-        self.process_intended_for(rel_path, &json_value, dataset_id)?;
+        self.process_intended_for(rel_path, &json_value)?;
 
         // Store sidecar info for later inheritance processing.
         self.sidecars.push(SidecarInfo {
@@ -1421,11 +1911,15 @@ impl BidsParser {
             self.dataset_type = Some(dt.to_string());
         }
 
-        // Capture the ROOT description (shallowest, processed first) for `record_links` at
-        // finalize — its SourceDatasets/DatasetLinks/DatasetDOI declare *this* dataset's
-        // provenance. Captured before the dataset_id/root_uri splice below to stay pristine.
-        if !self.has_dataset_description {
-            self.root_description_json = Some(json_value.clone());
+        // Only the dataset's OWN description is stored — the shallowest, which this pass
+        // reaches first. A nested one under `derivatives/` describes a *different* dataset,
+        // and the write below replaces rather than defers, so letting one through here
+        // would overwrite this dataset's row with a derivative's.
+        //
+        // (`root_description_json`, which `record_links` reads at finalize, is captured in
+        // `parse`'s pass 0 instead: `resolve_root` needs it before the walk gets here.)
+        if self.has_dataset_description {
+            return Ok(());
         }
 
         if let Value::Object(ref mut map) = json_value {
@@ -1433,10 +1927,14 @@ impl BidsParser {
                 "dataset_id".to_string(),
                 Value::String(dataset_id.to_string()),
             );
-            map.insert("root_uri".to_string(), Value::String(self.fs.root()));
         }
 
-        db.insert(&self.schema, "dataset_description", &json_value)
+        // Replace rather than defer to whatever is stored (the `eh-04` follow-up). A
+        // dataset's description is re-read on every index run, so first-writer-wins meant a
+        // re-index kept a stale row: a `dataset_description.json` added or corrected since
+        // the first run never reached the catalog. It matters more now that a dataset can
+        // have several roots, since every one of them re-states this row.
+        db.insert_or_replace(&self.schema, "dataset_description", &json_value)
             .with_context(|| format!("inserting dataset_description for {dataset_id}"))?;
         self.has_dataset_description = true;
         Ok(())
@@ -1452,17 +1950,19 @@ impl BidsParser {
     fn record_links(&self, db: &BidsDb, dataset_id: &str) -> Result<()> {
         db.clear_derived_links(dataset_id)?;
 
-        // What this dataset IS: its own id, and its root_uri.
+        // What this dataset IS: its own id, and each of its roots.
         db.record_dataset_identity(
             dataset_id,
             &links::canonicalize(&format!("dataset:{dataset_id}")),
             "self",
         )?;
-        db.record_dataset_identity(
-            dataset_id,
-            &links::canonicalize(&self.fs.root()),
-            "root_uri",
-        )?;
+        // Every root, read back from `dataset_roots` rather than just this run's — because
+        // `clear_derived_links` above dropped *all* of this dataset's identities, so
+        // re-recording only `self.fs.root()` would leave a multi-root dataset having
+        // silently forgotten the roots this run did not walk.
+        for root in db.dataset_roots(dataset_id)? {
+            db.record_dataset_identity(dataset_id, &links::canonicalize(&root), "root_uri")?;
+        }
 
         if let Some(desc) = &self.root_description_json {
             if let Some(doi) = desc.get("DatasetDOI").and_then(Value::as_str) {
@@ -1524,7 +2024,7 @@ impl BidsParser {
         dataset_id: &str,
     ) -> Result<()> {
         // Read the bval or bvec file (from the concurrent prefetch when available).
-        let content = self.read_cached(path, rel_path).await?;
+        let content = self.take_cached(path, rel_path).await?;
 
         // Find the base name (both ".bval" and ".bvec" are 5 chars).
         let base_name = &rel_path[..rel_path.len() - 5];
@@ -1621,19 +2121,15 @@ impl BidsParser {
     /// The file's `(path, suffix, extension, datatype, dataset_type)` are matched against
     /// `rules.tabular_data`. Uncompressed headerless recordings (`*_motion`, …) are
     /// deferred to the recordings flush; every other tabular file — ingested, deferred,
-    /// or unmatched — is recorded in `tabular_files` so nothing is silently dropped.
+    /// or unmatched — records a `status` on its registry row so nothing is silently dropped.
     async fn process_tabular_file(
         &mut self,
-        db: &BidsDb,
         rel_path: &str,
         file_name: &str,
         dataset_id: &str,
         entities: &HashMap<String, String>,
     ) -> Result<()> {
         let (suffix, extension) = split_suffix_ext(file_name);
-        if suffix == "scans" {
-            self.has_scans_tsv = true;
-        }
 
         // Uncompressed headerless recordings — chiefly the motion time-series —
         // are still ingested. They have no header row; their column names come from
@@ -1668,61 +2164,64 @@ impl BidsParser {
 
         let table = self.schema.tabular().route(&ctx).cloned();
         match table {
-            Some(spec) if spec.identity == RowIdentity::PerRow => {
-                // Lever 1b: defer per-row files so siblings sharing a header can be
-                // ingested in one batched `read_csv`. The header is read in Rust
-                // (no per-file DuckDB sniff — that fixed cost is what batching
-                // exists to remove) purely to group by signature; the batch's
-                // dry-run rebinds these names authoritatively before any write, so
-                // a Rust/DuckDB header mismatch can only trigger a per-file
-                // fallback, never wrong data.
-                let t = self.phase_timer.mark();
-                // A ready-to-use `read_csv` source (canonical local path or `s3://`
-                // URL); the backend has already resolved the scheme.
-                let source = self.fs.read_csv_source(Path::new(rel_path)).await?;
-                // Header from the concurrent prefetch; fall back to a direct read
-                // if it wasn't prefetched (shouldn't happen for a per-row `.tsv`).
-                let header = match self.tabular_header.get(rel_path) {
-                    Some(h) => h.clone(),
-                    None => self
-                        .fs
-                        .read_head(Path::new(rel_path), 64 * 1024)
-                        .await
-                        .ok()
-                        .and_then(|c| tsv_header_from_line(c.split('\n').next().unwrap_or(""))),
+            Some(spec) => {
+                // Defer every tabular file, whatever its identity, so siblings sharing a
+                // header are ingested in one batched `read_csv`. The header is read here in
+                // Rust purely to group by signature; the batch declares it to `read_csv`
+                // outright, so no file pays for a dialect sniff.
+                //
+                // Statement-per-file is what this replaces, and the cost it avoided grows
+                // with the width of the target table: a keyed table like `scans` carries a
+                // generated concept column per BIDS entity, and a row-at-a-time INSERT
+                // re-binds every one of them.
+                //
+                // Scoped so the timer covers only the reads, not the routing and bookkeeping
+                // in the match below.
+                let (source, header) = {
+                    let _t = timing::scope(Phase::TabularReadCsv);
+                    // A ready-to-use `read_csv` source (absolute local path or `s3://`
+                    // URL); the backend has already resolved the scheme.
+                    let source = self.fs.read_csv_source(Path::new(rel_path)).await?;
+                    // Header from the concurrent prefetch; fall back to a direct read
+                    // if it wasn't prefetched (shouldn't happen for a per-row `.tsv`).
+                    let header = match self.tabular_header.get(rel_path) {
+                        Some(h) => h.clone(),
+                        None => self
+                            .fs
+                            .read_head(Path::new(rel_path), 64 * 1024)
+                            .await
+                            .ok()
+                            .and_then(|c| tsv_header_from_line(c.split('\n').next().unwrap_or(""))),
+                    };
+                    (source, header)
                 };
-                self.phase_timer.add_tabular(t);
 
                 match header {
                     None => {
                         // Unreadable or column-less: contributes no rows, but is
                         // still recorded so the tabular-coverage invariant holds.
-                        db.record_tabular_file(
-                            dataset_id,
-                            rel_path,
-                            Some(&spec.table),
-                            0,
-                            TabularStatus::Ingested,
-                        )?;
-                    }
-                    Some((_, columns)) if columns.iter().any(|c| c == "filename") => {
-                        // A real `filename` column would collide with `read_csv`'s
-                        // `filename=true`; such files fall back to the per-file path.
-                        let t = self.phase_timer.mark();
-                        let n = self
-                            .ingest_tabular(db, &spec, rel_path, dataset_id, entities)
-                            .await?;
-                        self.phase_timer.add_tabular(t);
-                        db.record_tabular_file(
-                            dataset_id,
-                            rel_path,
-                            Some(&spec.table),
-                            n,
-                            TabularStatus::Ingested,
-                        )?;
+                        self.walk_status
+                            .insert(rel_path.to_string(), TabularStatus::Ingested);
                     }
                     Some((group_key, columns)) => {
+                        // `scans.tsv` builds its `file_path` from its own `filename`
+                        // column relative to the directory it sits in; a session table
+                        // stamps the subject it belongs to. Both vary per file, so they
+                        // travel with it into the batch's path map.
+                        let aux = match spec.identity {
+                            RowIdentity::PerFile => rel_path
+                                .rsplit_once('/')
+                                .map(|(dir, _)| dir)
+                                .unwrap_or("")
+                                .to_string(),
+                            RowIdentity::PerEntity if spec.table != "participants" => entities
+                                .get("sub")
+                                .map(|s| format!("sub-{s}"))
+                                .unwrap_or_default(),
+                            _ => String::new(),
+                        };
                         self.pending_tabular.push(PendingTabular {
+                            aux,
                             spec,
                             rel_path: rel_path.to_string(),
                             source,
@@ -1732,113 +2231,37 @@ impl BidsParser {
                     }
                 }
             }
-            Some(spec) => {
-                let t = self.phase_timer.mark();
-                let n = self
-                    .ingest_tabular(db, &spec, rel_path, dataset_id, entities)
-                    .await?;
-                self.phase_timer.add_tabular(t);
-                db.record_tabular_file(
-                    dataset_id,
-                    rel_path,
-                    Some(&spec.table),
-                    n,
-                    TabularStatus::Ingested,
-                )?;
-            }
             None => {
                 // A validated dataset should not reach here (all its tabular files
                 // are schema-described). Warn rather than fail so a newer BIDS
                 // extension than the vendored schema doesn't abort ingest.
                 eprintln!("Warning: no tabular_data rule for {rel_path}; skipping");
-                db.record_tabular_file(dataset_id, rel_path, None, 0, TabularStatus::Skipped)?;
+                self.walk_status
+                    .insert(rel_path.to_string(), TabularStatus::Skipped);
             }
         }
         Ok(())
     }
 
-    /// Ingest a header-bearing tabular file into `spec`'s table via a single
-    /// `read_csv` INSERT. Returns the number of rows written.
-    async fn ingest_tabular(
-        &self,
-        db: &BidsDb,
-        spec: &TableSpec,
-        rel_path: &str,
-        dataset_id: &str,
-        entities: &HashMap<String, String>,
-    ) -> Result<i64> {
-        let source = self.fs.read_csv_source(Path::new(rel_path)).await?;
-
-        // Sniff the actual headers on the validator connection (so a parse error
-        // can't poison the ingest transaction). An unreadable or column-less file
-        // is classified but contributes no rows.
-        let read_from = format!("read_csv({}, {HEADER_READ_OPTS})", sql_lit(&source));
-        let sniffed = self.sniff_columns(&read_from).unwrap_or_default();
-        if sniffed.is_empty() {
-            return Ok(0);
-        }
-
-        // Re-index idempotency for keyless row tables: clear this file's prior rows
-        // before re-inserting. (PK tables dedup via INSERT OR IGNORE.)
-        if matches!(spec.identity, RowIdentity::PerRow) {
-            let del = format!(
-                "DELETE FROM {} WHERE dataset_id = {} AND file_path = {}",
-                spec.table,
-                sql_lit(dataset_id),
-                sql_lit(rel_path)
-            );
-            db.conn.execute(&del, [])?;
-        }
-
-        let sub = entities.get("sub").map(|s| s.as_str());
-        // Positional per-row tables (`*timeseries.tsv` &c., reached here when the file
-        // has a literal `filename` column) must keep TSV line order so `row_idx` is a
-        // faithful row number; the ordering policy lives in the ingestion schema
-        // (`Ingestion::ordered`); see bids-2-devel#98.
-        let preserve_order = self.schema.ingestion().ordered(&spec.table);
-        let store_undeclared = self.schema.ingestion().undeclared(&spec.table) == Undeclared::Store;
-        let (sql, undeclared) = build_tabular_insert_sql(
-            spec,
-            &source,
-            rel_path,
-            dataset_id,
-            sub,
-            &sniffed,
-            HEADER_READ_OPTS,
-            preserve_order,
-            store_undeclared,
-        );
-        if !store_undeclared {
-            db.record_undeclared_columns(&spec.table, &undeclared)?;
-        }
-        // A single malformed TSV must not abort the whole dataset's ingest — log
-        // and move on (the file is still recorded in `tabular_files`, with 0 rows).
-        match db.conn.execute(&sql, []) {
-            Ok(n) => Ok(n as i64),
-            Err(e) => {
-                eprintln!("Warning: failed to ingest tabular file {rel_path}: {e}");
-                Ok(0)
-            }
-        }
-    }
-
-    /// Ingest every deferred per-row tabular file (Lever 1b), grouped by
-    /// `(table, header signature)` so each group is one `read_csv([f1,…,fN])`
-    /// INSERT instead of N. Grouping by exact header keeps `other_data` precise
-    /// (no `union_by_name` NULL fillers); `row_idx` reproduces TSV line order for
-    /// positional tables and is an arbitrary unique key for order-insensitive ones
-    /// (see [`build_tabular_batch_select`]).
+    /// Ingest every deferred tabular file (Lever 1b), grouped by
+    /// `(table, header signature)` so each group is one `read_csv([f1,…,fN])` INSERT
+    /// instead of N. Grouping by exact header keeps `other_data` precise (no
+    /// `union_by_name` NULL fillers); `row_idx` reproduces TSV line order for positional
+    /// tables and is an arbitrary unique key for order-insensitive ones (see
+    /// [`build_tabular_batch_select`]).
     ///
     /// Malformed rows can't poison the ingest transaction: `read_csv` uses the
     /// non-erroring relaxations in [`HEADER_READ_OPTS`] (`ignore_errors` /
     /// `null_padding` / `strict_mode=false`), so a bad row is padded or dropped
     /// rather than aborting the statement — `bids-validator-rs`, not bidslake, is
-    /// the authority on tabular malformation. There is **no** dry-run and no
-    /// per-file fallback (both were removed once the reads became non-poisoning).
-    /// Trade-off: each group is one pre-`DELETE` + one batch `INSERT`, so if that
-    /// `INSERT` itself errors (e.g. an IO/read failure) the group's rows are
-    /// dropped for this run with no per-file isolation, and the affected files are
-    /// recorded with `status = "failed"` (see below) rather than `"ingested"`.
+    /// the authority on tabular malformation. Because a read cannot error, there is no
+    /// dry-run and no per-file fallback.
+    ///
+    /// The trade-off that buys: each group is one pre-`DELETE` plus one batch `INSERT`, so if
+    /// the `INSERT` itself fails (an IO or read error, say) the whole group's rows are dropped
+    /// for this run with no per-file isolation. The affected files are recorded with
+    /// `status = "failed"` rather than `"ingested"` on their registry rows, so the loss is
+    /// visible instead of looking like an empty-but-successful ingest.
     async fn flush_tabular(&mut self, db: &BidsDb) -> Result<()> {
         if self.pending_tabular.is_empty() {
             return Ok(());
@@ -1858,107 +2281,122 @@ impl BidsParser {
                 .push(i);
         }
 
+        // Undeclared column names already recorded this run. An undeclared name is a
+        // property of the *table*, not of the file it was seen in, and a wide derivative
+        // table repeats the same names in every one of its files — so recording each name
+        // once per run yields the same catalog as recording it once per file.
+        let mut recorded_undeclared: HashSet<(String, String)> = HashSet::new();
+
+        timing::count(Counter::PendingTabular, pending.len() as u64);
+        timing::count(Counter::TabularGroups, groups.len() as u64);
+        timing::count_max(
+            Counter::TabularGroupMax,
+            groups.values().map(Vec::len).max().unwrap_or(0) as u64,
+        );
+
+        // Each group is ingested in windows rather than one statement, to bound the size of
+        // the SQL text: every member's path is embedded more than once — in the DELETE, in
+        // the `read_csv` list, and in the `__src` join map — so a group of tens of thousands
+        // of files would otherwise be a statement tens of megabytes long.
+        //
+        // Safe to split because nothing in the body is group-wide: `row_idx` is partitioned
+        // by `__src`, so it is already per file, and the DELETE and the count-back are both
+        // scoped to the window's own paths.
         for idxs in groups.values() {
-            let members: Vec<&PendingTabular> = idxs.iter().map(|&i| &pending[i]).collect();
-            let spec = &members[0].spec;
-            let columns = &members[0].columns;
-            let files: Vec<(&str, &str)> = members
-                .iter()
-                .map(|m| (m.source.as_str(), m.rel_path.as_str()))
-                .collect();
+            for window in idxs.chunks(BATCH_WINDOW_FILES) {
+                let members: Vec<&PendingTabular> = window.iter().map(|&i| &pending[i]).collect();
+                let spec = &members[0].spec;
+                let columns = &members[0].columns;
+                let files: Vec<(&str, &str, &str)> = members
+                    .iter()
+                    .map(|m| (m.source.as_str(), m.rel_path.as_str(), m.aux.as_str()))
+                    .collect();
 
-            // Re-index idempotency (per-row tables have no PK): clear these files'
-            // prior rows in one DELETE before re-inserting.
-            let rel_list = sql_in_list(members.iter().map(|m| m.rel_path.as_str()));
-            let del = format!(
-                "DELETE FROM {} WHERE dataset_id = {} AND file_path IN ({rel_list})",
-                spec.table,
-                sql_lit(&dataset_id),
-            );
-            db.conn.execute(&del, [])?;
+                // Re-index idempotency for keyless row tables: clear these files' prior rows
+                // in one DELETE before re-inserting. Keyed tables (participants, sessions,
+                // scans) have a primary key to collide on instead, and resolve it on insert
+                // with `INSERT OR REPLACE` — see the verb below.
+                if matches!(spec.identity, RowIdentity::PerRow) {
+                    // Scoped by `file_id`, which already carries the dataset and the root —
+                    // so a re-index of one root of a multi-root dataset cannot reach another
+                    // root's rows, even where the two hold the same relative path.
+                    let keys: Vec<String> = members
+                        .iter()
+                        .map(|m| self.file_key(&dataset_id, &m.rel_path))
+                        .collect();
+                    let id_list = sql_in_list(keys.iter().map(String::as_str));
+                    let del = format!("DELETE FROM {} WHERE file_id IN ({id_list})", spec.table);
+                    db.conn.execute(&del, [])?;
+                }
 
-            // Write the batch directly — no dry-run. `read_csv`'s non-erroring
-            // relaxations (see `HEADER_READ_OPTS`) mean a malformed row is
-            // padded/dropped rather than aborting, so it can't poison the ingest
-            // transaction; dropping the old dry-run halves the reads (the dominant
-            // cost on a network filesystem).
-            //
-            // Row order matters for positional tabular files — notably derivative
-            // `*timeseries.tsv` (e.g. fMRIPrep confounds), where row N aligns with
-            // volume N of the associated 4D image — so their line order is preserved
-            // and `row_idx` records the row number. The ordering policy lives in the
-            // ingestion schema (`Ingestion::ordered`);
-            // see https://github.com/bids-standard/bids-2-devel/issues/98.
-            let preserve_order = self.schema.ingestion().ordered(&spec.table);
-            let store_undeclared =
-                self.schema.ingestion().undeclared(&spec.table) == Undeclared::Store;
-            let (select, undeclared) = build_tabular_batch_select(
-                spec,
-                &dataset_id,
-                &files,
-                columns,
-                preserve_order,
-                store_undeclared,
-            );
-            if !store_undeclared
-                && let Err(e) = db.record_undeclared_columns(&spec.table, &undeclared)
-            {
-                eprintln!(
-                    "Warning: recording undeclared columns for {}: {e}",
-                    spec.table
+                // Write the batch directly — no dry-run. `read_csv`'s non-erroring relaxations
+                // (see `HEADER_READ_OPTS`) mean a malformed row is padded or dropped rather
+                // than aborting, so it cannot poison the ingest transaction, which is what
+                // made the dry-run's second read of every file unnecessary.
+                //
+                // Row order matters for positional tabular files — notably derivative
+                // `*timeseries.tsv` (e.g. fMRIPrep confounds), where row N aligns with
+                // volume N of the associated 4D image — so their line order is preserved
+                // and `row_idx` records the row number. The ordering policy lives in the
+                // ingestion schema (`Ingestion::ordered`);
+                // see https://github.com/bids-standard/bids-2-devel/issues/98.
+                let preserve_order = self.schema.ingestion().ordered(&spec.table);
+                let store_undeclared =
+                    self.schema.ingestion().undeclared(&spec.table) == Undeclared::Store;
+                let (select, undeclared) = build_tabular_batch_select(
+                    spec,
+                    &dataset_id,
+                    &self.root_uri,
+                    &files,
+                    columns,
+                    preserve_order,
+                    store_undeclared,
                 );
-            }
-            let sql = format!("INSERT INTO {} BY NAME {select}", spec.table);
-            // A batch-INSERT execution failure (e.g. an IO/read error) drops this
-            // group's rows for the run — record its members as `failed` so the
-            // `tabular_files` catalog can distinguish that from an empty-but-
-            // successful ingest, rather than claiming `ingested` with 0 rows.
-            let status = if let Err(e) = db.conn.execute(&sql, []) {
-                eprintln!(
-                    "Warning: batched tabular insert into {} failed: {e}",
-                    spec.table
-                );
-                TabularStatus::Failed
-            } else {
-                TabularStatus::Ingested
-            };
-            // Counts come from the table itself (a cheap local query, not a re-read
-            // of the source files), so `tabular_files` reflects exactly what landed
-            // — including any rows `ignore_errors` dropped.
-            let counts = self.table_row_counts(db, spec, &dataset_id, &members);
-            for m in &members {
-                let n = counts.get(&m.rel_path).copied().unwrap_or(0);
-                db.record_tabular_file(&dataset_id, &m.rel_path, Some(&spec.table), n, status)?;
+                let fresh: Vec<String> = if store_undeclared {
+                    Vec::new()
+                } else {
+                    undeclared
+                        .into_iter()
+                        .filter(|n| recorded_undeclared.insert((spec.table.clone(), n.clone())))
+                        .collect()
+                };
+                if !fresh.is_empty()
+                    && let Err(e) = db.record_undeclared_columns(&spec.table, &fresh)
+                {
+                    eprintln!(
+                        "Warning: recording undeclared columns for {}: {e}",
+                        spec.table
+                    );
+                }
+                // Keyed tables take the TSV's row over the stub the walk synthesized. Both
+                // always exist by now — the walk creates a stub for every subject and session
+                // it sees, and this flush runs after it — so the two do collide on the primary
+                // key, and the verb is what decides the winner. `OR REPLACE` states that
+                // precedence outright rather than leaving it to whichever row is written first.
+                let verb = match spec.identity {
+                    RowIdentity::PerRow => "INSERT",
+                    _ => "INSERT OR REPLACE",
+                };
+                let sql = format!("{verb} INTO {} BY NAME {select}", spec.table);
+                // A batch-INSERT execution failure (e.g. an IO/read error) drops this
+                // group's rows for the run — record its members as `failed` so the
+                // registry can distinguish that from an empty-but-successful ingest,
+                // rather than claiming `ingested` with 0 rows.
+                let status = if let Err(e) = db.conn.execute(&sql, []) {
+                    eprintln!(
+                        "Warning: batched tabular insert into {} failed: {e}",
+                        spec.table
+                    );
+                    TabularStatus::Failed
+                } else {
+                    TabularStatus::Ingested
+                };
+                for m in &members {
+                    db.record_file_status(&self.file_key(&dataset_id, &m.rel_path), status)?;
+                }
             }
         }
         Ok(())
-    }
-
-    /// Per-file row counts for a just-inserted batch, read back from the table (a
-    /// cheap local query — not a re-read of the source files). Keyed by
-    /// dataset-relative path; a file that landed no rows is absent (recorded as 0).
-    fn table_row_counts(
-        &self,
-        db: &BidsDb,
-        spec: &TableSpec,
-        dataset_id: &str,
-        members: &[&PendingTabular],
-    ) -> HashMap<String, i64> {
-        let rel_list = sql_in_list(members.iter().map(|m| m.rel_path.as_str()));
-        let sql = format!(
-            "SELECT file_path, count(*) FROM {} WHERE dataset_id = {} AND file_path IN ({rel_list}) \
-             GROUP BY file_path",
-            spec.table,
-            sql_lit(dataset_id),
-        );
-        let mut counts = HashMap::new();
-        if let Ok(mut stmt) = db.conn.prepare(&sql)
-            && let Ok(rows) =
-                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
-        {
-            counts.extend(rows.flatten());
-        }
-        counts
     }
 
     /// The BIDS datatype for a file, taken from *any* datatype directory in its
@@ -2031,20 +2469,26 @@ impl BidsParser {
             "Ingesting {} continuous recordings (physio/stim/motion)...",
             self.pending_recordings.len()
         );
+        // Built once for the whole flush: every recording asks the same index which
+        // sidecars apply to it.
+        let index = SidecarIndex::new(&self.sidecars);
         for rec in &self.pending_recordings {
-            let (table, n) = self.ingest_recording(db, rec).await.unwrap_or_else(|e| {
-                eprintln!(
-                    "Warning: failed to ingest recording {}: {}",
-                    rec.rel_path, e
-                );
-                (None, 0)
-            });
+            let table = self
+                .ingest_recording(db, rec, &index)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!(
+                        "Warning: failed to ingest recording {}: {}",
+                        rec.rel_path, e
+                    );
+                    None
+                });
             let status = if table.is_some() {
                 TabularStatus::Ingested
             } else {
                 TabularStatus::Skipped
             };
-            db.record_tabular_file(&rec.dataset_id, &rec.rel_path, table.as_deref(), n, status)?;
+            db.record_file_status(&self.file_key(&rec.dataset_id, &rec.rel_path), status)?;
         }
         Ok(())
     }
@@ -2055,10 +2499,11 @@ impl BidsParser {
         &self,
         db: &BidsDb,
         rec: &PendingRecording,
-    ) -> Result<(Option<String>, i64)> {
+        index: &SidecarIndex<'_>,
+    ) -> Result<Option<String>> {
         // Map suffix → target table + column strategy via the single descriptor table.
         let Some(kind) = recording_kind(rec.suffix.as_str()) else {
-            return Ok((None, 0));
+            return Ok(None);
         };
         let table = kind.table;
         let columns: Vec<ColumnSpec> = if kind.schema_columns {
@@ -2072,10 +2517,10 @@ impl BidsParser {
         let colnames = if kind.colnames_from_channels {
             self.motion_columns(db, rec)?
         } else {
-            self.sidecar_columns(rec)
+            self.sidecar_columns(rec, index)
         };
         if colnames.is_empty() {
-            return Ok((None, 0)); // headerless file with no column names → skip
+            return Ok(None); // headerless file with no column names → skip
         }
 
         let source = self.fs.read_csv_source(Path::new(&rec.rel_path)).await?;
@@ -2111,28 +2556,24 @@ impl BidsParser {
         // transaction. A readable-but-empty file passes and simply yields 0 rows.
         let read_from = format!("read_csv({}, {read_opts})", sql_lit(&source));
         if !self.read_csv_ok(&read_from) {
-            return Ok((Some(table.to_string()), 0));
+            return Ok(Some(table.to_string()));
         }
 
         // Re-index idempotency.
         let del = format!(
-            "DELETE FROM {} WHERE dataset_id = {} AND file_path = {}",
+            "DELETE FROM {} WHERE file_id = {}",
             table,
-            sql_lit(&rec.dataset_id),
-            sql_lit(&rec.rel_path)
+            sql_lit(&self.file_key(&rec.dataset_id, &rec.rel_path))
         );
         db.conn.execute(&del, [])?;
 
-        let sub = rec.entities.get("sub").map(|s| s.as_str());
         // Recordings are positional (row N is sample N), so preserve line order.
         let preserve_order = self.schema.ingestion().ordered(&spec.table);
         let store_undeclared = self.schema.ingestion().undeclared(&spec.table) == Undeclared::Store;
         let (sql, undeclared) = build_tabular_insert_sql(
             &spec,
             &source,
-            &rec.rel_path,
-            &rec.dataset_id,
-            sub,
+            &self.file_key(&rec.dataset_id, &rec.rel_path),
             &colnames,
             &read_opts,
             preserve_order,
@@ -2142,13 +2583,13 @@ impl BidsParser {
             db.record_undeclared_columns(&spec.table, &undeclared)?;
         }
         match db.conn.execute(&sql, []) {
-            Ok(n) => Ok((Some(table.to_string()), n as i64)),
+            Ok(_) => Ok(Some(table.to_string())),
             Err(e) => {
                 eprintln!(
                     "Warning: failed to ingest recording {}: {}",
                     rec.rel_path, e
                 );
-                Ok((Some(table.to_string()), 0))
+                Ok(Some(table.to_string()))
             }
         }
     }
@@ -2168,9 +2609,14 @@ impl BidsParser {
     /// Column names for a physio/stim/physioevents recording, from the merged sidecar's
     /// `Columns` array (BIDS requires it for these files). Merged from the sidecars
     /// collected in memory during the walk — no disk re-read.
-    fn sidecar_columns(&self, rec: &PendingRecording) -> Vec<String> {
-        let merged =
-            self.merged_sidecar_map(&rec.dataset_id, &rec.rel_path, &rec.suffix, &rec.entities);
+    fn sidecar_columns(&self, rec: &PendingRecording, index: &SidecarIndex) -> Vec<String> {
+        let merged = index.merged(
+            &rec.dataset_id,
+            &rec.rel_path,
+            &rec.suffix,
+            &rec.entities,
+            &mut Vec::new(),
+        );
         merged
             .get("Columns")
             .and_then(|v| v.as_array())
@@ -2190,10 +2636,12 @@ impl BidsParser {
             return Ok(Vec::new());
         };
         let channels_path = format!("{base}_channels.tsv");
+        // Keyed by the channels file's own `file_id`, not its path: the per-row tables carry
+        // only `file_id` now (docs/adr/0006). `row_idx` is what makes this correct — a
+        // `_channels.tsv`'s line order maps onto the columns of the recording beside it.
         let sql = format!(
-            "SELECT name FROM motion_channels WHERE dataset_id = {} AND file_path = {} ORDER BY row_idx",
-            sql_lit(&rec.dataset_id),
-            sql_lit(&channels_path)
+            "SELECT name FROM motion_channels WHERE file_id = {} ORDER BY row_idx",
+            sql_lit(&self.file_key(&rec.dataset_id, &channels_path))
         );
         let mut stmt = db.conn.prepare(&sql)?;
         let names = stmt
@@ -2201,52 +2649,6 @@ impl BidsParser {
             .filter_map(|r| r.ok().flatten())
             .collect();
         Ok(names)
-    }
-
-    /// The merged sidecar for a file via BIDS inheritance: every collected `*.json`
-    /// sidecar of the same dataset and suffix whose directory is a prefix of the
-    /// file's and whose entities are a subset, merged least-specific-first.
-    fn merged_sidecar_map(
-        &self,
-        dataset_id: &str,
-        rel_path: &str,
-        suffix: &str,
-        entities: &HashMap<String, String>,
-    ) -> serde_json::Map<String, Value> {
-        let file_dir = Path::new(rel_path)
-            .parent()
-            .unwrap_or_else(|| Path::new(""));
-        let mut applicable: Vec<&SidecarInfo> = self
-            .sidecars
-            .iter()
-            .filter(|s| s.dataset_id == dataset_id && s.suffix == suffix)
-            .filter(|s| {
-                let sdir = Path::new(&s.file_path)
-                    .parent()
-                    .unwrap_or_else(|| Path::new(""));
-                file_dir.starts_with(sdir)
-                    && s.entities.iter().all(|(k, v)| entities.get(k) == Some(v))
-            })
-            .collect();
-        // Depth-first (shallowest merged first, deeper overrides), matching the
-        // tree-based reference; entity count breaks same-depth ties.
-        applicable.sort_by_key(|s| {
-            (
-                Path::new(&s.file_path)
-                    .parent()
-                    .map_or(0, |p| p.components().count()),
-                s.entities.len(),
-            )
-        });
-        let mut merged = serde_json::Map::new();
-        for s in applicable {
-            if let Value::Object(m) = &s.content {
-                for (k, v) in m {
-                    merged.insert(k.clone(), v.clone());
-                }
-            }
-        }
-        merged
     }
 
     /// Load the dataset-root `.bidsignore` and compile it with full gitignore
@@ -2272,12 +2674,7 @@ impl BidsParser {
 
     /// Process IntendedFor field in sidecar to create file associations. Takes
     /// the already-parsed sidecar value so the JSON isn't re-parsed here.
-    fn process_intended_for(
-        &mut self,
-        source_file: &str,
-        sidecar: &Value,
-        dataset_id: &str,
-    ) -> Result<()> {
+    fn process_intended_for(&mut self, source_file: &str, sidecar: &Value) -> Result<()> {
         if let Some(intended_for) = sidecar.get("IntendedFor") {
             // Association type = the source file's BIDS datatype (fmap → "fieldmap"), derived from
             // the schema rather than guessed from path substrings.
@@ -2292,8 +2689,7 @@ impl BidsParser {
                 Value::String(target) => {
                     // Single target — skipped if it names another dataset (unresolved).
                     if let Some(normalized_target) = Self::normalize_path(target, source_file) {
-                        self.pending_associations.push(FileAssociation {
-                            dataset_id: dataset_id.to_string(),
+                        self.pending_associations.push(PendingAssociation {
                             source_file: source_file.to_string(),
                             target_file: normalized_target,
                             assoc_type: assoc_type.clone(),
@@ -2307,8 +2703,7 @@ impl BidsParser {
                             && let Some(normalized_target) =
                                 Self::normalize_path(target_str, source_file)
                         {
-                            self.pending_associations.push(FileAssociation {
-                                dataset_id: dataset_id.to_string(),
+                            self.pending_associations.push(PendingAssociation {
                                 source_file: source_file.to_string(),
                                 target_file: normalized_target,
                                 assoc_type: assoc_type.clone(),
@@ -2371,7 +2766,7 @@ impl BidsParser {
     /// into `(source data file → discovered associated file)` rows — events↔bold, bval/bvec↔dwi,
     /// channels/electrodes/coordsystem↔electrophysiology, physio, … Local backend only (needs the
     /// in-memory `FileTree`; the S3 path has none — the same limitation as sidecar inheritance).
-    fn resolve_structural_associations(&self, dataset_id: &str) -> Vec<FileAssociation> {
+    fn resolve_structural_associations(&self) -> Vec<PendingAssociation> {
         let Some(tree) = self.fs.file_tree() else {
             return Vec::new();
         };
@@ -2392,8 +2787,7 @@ impl BidsParser {
             for h in
                 bids_schema::associations::resolve_associations(meta_assoc, file, &tree, &file_ctx)
             {
-                out.push(FileAssociation {
-                    dataset_id: dataset_id.to_string(),
+                out.push(PendingAssociation {
                     source_file: file.path.trim_start_matches('/').to_string(),
                     target_file: h.target_file.path.trim_start_matches('/').to_string(),
                     assoc_type: h.name,
@@ -2403,6 +2797,14 @@ impl BidsParser {
         out
     }
 }
+
+/// Files per batched-tabular window (see the loop in [`BidsParser::flush_tabular`]).
+///
+/// Not calibrated: the window exists to bound the length of the generated SQL, and any value
+/// that keeps a statement to a few megabytes serves. Note the tradeoff runs both ways, so
+/// smaller is not safer — the batch also declares the file's full column list once per window,
+/// which for a table hundreds of columns wide is itself a large share of the statement.
+const BATCH_WINDOW_FILES: usize = 512;
 
 /// How one headerless continuous-recording suffix maps to a table and how its
 /// columns are built. Single source of truth for the recording suffix set, the
@@ -2460,12 +2862,6 @@ fn is_recording_suffix(suffix: &str) -> bool {
     recording_kind(suffix).is_some()
 }
 
-/// The table a recording suffix maps to (for provenance), or `None` for suffixes
-/// with no dedicated table.
-fn recording_table_of(suffix: &str) -> Option<&'static str> {
-    recording_kind(suffix).map(|k| k.table)
-}
-
 /// Split a tabular filename into its BIDS `(suffix, extension)` via the shared
 /// bids-core parser. The suffix is the trailing token (or the stem for
 /// `participants.tsv` / `samples.tsv`); the extension is `.tsv` or `.tsv.gz`.
@@ -2492,95 +2888,55 @@ fn needs_try_cast(sql_type: &str) -> bool {
     )
 }
 
-/// Build the `INSERT … SELECT … FROM read_csv(…)` that ingests one tabular file
-/// into its table. DuckDB does the parsing (gzip, `n/a`→NULL, typing); we shape
-/// the SELECT so that:
-/// - structural columns are filled from the file's location/identity (`dataset_id`
-///   constant; `scans.file_path` from the `filename` column + directory prefix;
-///   `participant_id`/`session_id` normalized; `row_idx` an ordinal for row tables);
+/// Build the `INSERT … SELECT … FROM read_csv(…)` that ingests **one** tabular file into its
+/// table. DuckDB does the parsing (gzip, `n/a`→NULL, typing); we shape the SELECT so that:
+/// - structural columns are filled from the file's location (`dataset_id` constant,
+///   `file_path` the file's own path, `row_idx` an ordinal);
 /// - each schema-declared column present in the file is `TRY_CAST` to its type;
 /// - every other column is folded into `other_data` as JSON.
 ///
-/// `sniffed` is the file's column names — from a `DESCRIBE` for a header-bearing
-/// file, or the sidecar `Columns` / associated channels for a headerless one.
-/// Columns the schema declares but the file lacks are simply omitted — `INSERT …
-/// BY NAME` leaves them NULL. `read_opts` is the `read_csv` argument list after the
-/// path (it differs only by `header=`/`columns=` between the two cases).
+/// This is the **headerless continuous-recording** path, and its only caller is
+/// [`BidsParser::ingest_recording`] — every header-bearing file is deferred and written by
+/// [`build_tabular_batch_select`] instead, so nothing keyed (`participants`/`sessions`/`scans`)
+/// reaches here. Hence the plain `RowIdentity::PerRow` shape: a recording is one row per
+/// sample, keyed by nothing.
+///
+/// `colnames` is the file's column names, from the sidecar `Columns` or the associated
+/// channels table (a headerless file has no header to read them from). Columns the schema
+/// declares but the file lacks are simply omitted — `INSERT … BY NAME` leaves them NULL.
+/// `read_opts` is the `read_csv` argument list after the path.
 // A SQL builder with many distinct inputs; grouping them into a struct would add
 // indirection without clarity, and `preserve_order` mirrors `build_tabular_batch_select`.
 #[allow(clippy::too_many_arguments)]
 fn build_tabular_insert_sql(
     spec: &TableSpec,
     source: &str,
-    rel_path: &str,
-    dataset_id: &str,
-    sub: Option<&str>,
-    sniffed: &[String],
+    file_id: &str,
+    colnames: &[String],
     read_opts: &str,
     preserve_order: bool,
     store_undeclared: bool,
 ) -> (String, Vec<String>) {
-    let present: HashSet<&str> = sniffed.iter().map(|s| s.as_str()).collect();
-    let mut selects: Vec<String> = vec![format!("{} AS dataset_id", sql_lit(dataset_id))];
-    // TSV headers consumed structurally (become a key/path, not a data column and
-    // not `other_data`).
-    let mut structural: HashSet<&str> = HashSet::new();
+    debug_assert!(
+        matches!(spec.identity, RowIdentity::PerRow),
+        "only the headerless-recording path reaches here, and a recording is per-row; \
+         a keyed table must go through build_tabular_batch_select"
+    );
+    let present: HashSet<&str> = colnames.iter().map(|s| s.as_str()).collect();
+    let mut selects: Vec<String> = Vec::new();
 
-    match spec.identity {
-        RowIdentity::PerFile => {
-            structural.insert("filename");
-            if present.contains("filename") {
-                // scans.tsv `filename` is relative to the file's directory.
-                let prefix = rel_path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
-                let expr = if prefix.is_empty() {
-                    "filename".to_string()
-                } else {
-                    format!("{} || '/' || filename", sql_lit(prefix))
-                };
-                selects.push(format!("{expr} AS file_path"));
-            }
-        }
-        RowIdentity::PerEntity if spec.table == "participants" => {
-            structural.insert("participant_id");
-            if present.contains("participant_id") {
-                selects.push(
-                    "CASE WHEN participant_id LIKE 'sub-%' THEN participant_id ELSE 'sub-' || participant_id END AS participant_id"
-                        .to_string(),
-                );
-            }
-        }
-        RowIdentity::PerEntity => {
-            // sessions: session_id from the file, participant_id from its location.
-            structural.insert("session_id");
-            if present.contains("session_id") {
-                selects.push(
-                    "CASE WHEN session_id LIKE 'ses-%' THEN session_id ELSE 'ses-' || session_id END AS session_id"
-                        .to_string(),
-                );
-            }
-            if let Some(s) = sub {
-                selects.push(format!(
-                    "{} AS participant_id",
-                    sql_lit(&format!("sub-{s}"))
-                ));
-            }
-        }
-        RowIdentity::PerRow => {
-            selects.push(format!("{} AS file_path", sql_lit(rel_path)));
-            // `row_number() OVER ()` numbers rows in physical read order; under the
-            // `parallel=false` read forced below for order-sensitive tables, that is
-            // TSV line order. For order-insensitive tables it is an arbitrary but
-            // unique 0-based key (order doesn't matter — e.g. `events` sorts by onset).
-            selects.push("(row_number() OVER () - 1)::BIGINT AS row_idx".to_string());
-        }
+    selects.push(format!("{}::HUGEINT AS file_id", sql_lit(file_id)));
+    // `row_number() OVER ()` numbers rows in physical read order; under the `parallel=false`
+    // read forced below, that is file line order — which for a recording is sample order, so it
+    // is load-bearing rather than cosmetic. Gated on the same flag as the column's existence in
+    // the DDL: a table whose order is not load-bearing has no `row_idx` to write to.
+    if preserve_order {
+        selects.push("(row_number() OVER () - 1)::BIGINT AS row_idx".to_string());
     }
 
     // Schema-declared data columns present in the file, TRY_CAST to their type.
     let mut known: HashSet<&str> = HashSet::new();
     for c in &spec.columns {
-        if structural.contains(c.name.as_str()) {
-            continue;
-        }
         known.insert(c.name.as_str());
         if !present.contains(c.name.as_str()) {
             continue; // omitted → BY NAME leaves it NULL
@@ -2593,16 +2949,15 @@ fn build_tabular_insert_sql(
         }
     }
 
-    // Everything else → other_data JSON (in file order). An empty name (a trailing
-    // tab in the header) is dropped: it would emit `json_object('', "")`, whose
-    // zero-length delimited identifier is a parser error that drops the whole file.
-    // Under `undeclared: catalog` the table has no `other_data` column, so these are
-    // not projected — the file on disk is the record of them — but they are still
-    // computed, so the caller can record their names (see `build_tabular_batch_select`).
-    let extras: Vec<&str> = sniffed
+    // Everything else → other_data JSON (in file order). An empty name is dropped: it would
+    // emit `json_object('', "")`, whose zero-length delimited identifier is a parser error
+    // that drops the whole file. Under `undeclared: catalog` the table has no `other_data`
+    // column, so these are not projected — the file on disk is the record of them — but they
+    // are still computed, so the caller can record their names.
+    let extras: Vec<&str> = colnames
         .iter()
         .map(|s| s.as_str())
-        .filter(|c| !c.is_empty() && !structural.contains(c) && !known.contains(c))
+        .filter(|c| !c.is_empty() && !known.contains(c))
         .collect();
     if store_undeclared && !extras.is_empty() {
         let pairs: Vec<String> = extras
@@ -2612,24 +2967,19 @@ fn build_tabular_insert_sql(
         selects.push(format!("json_object({}) AS other_data", pairs.join(", ")));
     }
 
-    // PK tables (participants/sessions/scans) dedup by key so an explicit TSV row
-    // and an implicit one don't collide; row tables have no key (re-index dedup is
-    // a DELETE by file_path in the caller).
-    let verb = match spec.identity {
-        RowIdentity::PerRow => "INSERT",
-        _ => "INSERT OR IGNORE",
-    };
-    // Order-sensitive per-row tables (positional `*timeseries.tsv`, `*_physio`,
-    // recordings, …) must be read sequentially so `row_number()` above reproduces TSV
-    // line order; a parallel read would scramble `row_idx`. PK tables carry no
-    // `row_idx`, so the flag is a no-op for them. See bids-standard/bids-2-devel#98.
-    let sequential = if preserve_order && matches!(spec.identity, RowIdentity::PerRow) {
+    // Re-index dedup for these tables is a DELETE by `file_path` in the caller, so the insert
+    // itself needs no conflict clause.
+    //
+    // Order matters here: a recording is positional, so the read must be sequential for the
+    // `row_number()` above to reproduce file line order — a parallel read would scramble
+    // `row_idx` and with it the sample order. See bids-standard/bids-2-devel#98.
+    let sequential = if preserve_order {
         ", parallel=false"
     } else {
         ""
     };
     let sql = format!(
-        "{verb} INTO {} BY NAME SELECT {} FROM read_csv({}, {read_opts}{sequential})",
+        "INSERT INTO {} BY NAME SELECT {} FROM read_csv({}, {read_opts}{sequential})",
         spec.table,
         selects.join(", "),
         sql_lit(source),
@@ -2658,36 +3008,113 @@ fn build_tabular_insert_sql(
 ///   folds into `other_data`. Because the group shares one header, `other_data`
 ///   carries exactly each file's real columns — no `union_by_name` NULL fillers.
 ///
-/// Callers must exclude files whose header contains a literal `filename` column
-/// (it would clash with `filename=true`); such files take the per-file path.
+/// `files` is `(read_csv source, dataset-relative path, aux)`, where `aux` is the
+/// per-file value the identity needs — see [`PendingTabular::aux`].
+///
+/// The source column is named `__src` rather than taking `filename=true`'s default,
+/// because `scans.tsv` has a column called `filename` of its own. Naming it out of the
+/// way is what lets a per-file table batch at all; the collision previously sent those
+/// files down a statement-per-file path.
 fn build_tabular_batch_select(
     spec: &TableSpec,
     dataset_id: &str,
-    files: &[(&str, &str)],
+    root_uri: &str,
+    files: &[(&str, &str, &str)],
     columns: &[String],
     preserve_order: bool,
     store_undeclared: bool,
 ) -> (String, Vec<String>) {
+    // Only a per-row table has a `row_idx` for an order to be recorded in, so only a per-row
+    // table can want an order-preserving read. That matters rather than being tidy: preserving
+    // order costs a sequential scan *and* an unpartitioned `row_number()` window that buffers
+    // the whole input, and `Ingestion::ordered` defaults to true — so without this the keyed
+    // tables (`scans`, `sessions`, `participants`) would pay both to compute a `__grn` their
+    // arms never select.
+    let preserve_order = preserve_order && matches!(spec.identity, RowIdentity::PerRow);
+
     let present: HashSet<&str> = columns.iter().map(|s| s.as_str()).collect();
 
-    let row_idx = if preserve_order {
-        "(raw.__grn - MIN(raw.__grn) OVER (PARTITION BY raw.filename))::BIGINT AS row_idx"
-    } else {
-        "(row_number() OVER (PARTITION BY raw.filename) - 1)::BIGINT AS row_idx"
-    };
-    let mut selects: Vec<String> = vec![
-        format!("{} AS dataset_id", sql_lit(dataset_id)),
-        "m.rel AS file_path".to_string(),
-        row_idx.to_string(),
-    ];
+    let mut selects: Vec<String> = Vec::new();
+    // Which of the file's own columns the identity consumes structurally rather than
+    // storing as data.
+    let mut structural: HashSet<&str> = HashSet::new();
+    // The file's own columns this select reads. Collected so the order-preserving
+    // subquery below can project just these — see the comment there.
+    let mut referenced: Vec<&str> = Vec::new();
 
-    // Schema-declared data columns present in the file, TRY_CAST to their type.
+    match spec.identity {
+        // One row per data file, named by the table's own `filename` column, relative
+        // to the directory the `scans.tsv` sits in — which is `m.aux`.
+        RowIdentity::PerFile => {
+            structural.insert("filename");
+            if present.contains("filename") {
+                referenced.push("filename");
+                // Unlike every other arm, the key cannot come from the map: a `scans.tsv`
+                // lists *other* files, one per row, so the row's own `filename` decides which
+                // registry entry it is about. Resolved by joining the registry on the path
+                // the row constructs (relative to the TSV's own directory, `m.aux`).
+                //
+                // An inner join, so a `scans.tsv` naming a file the walk never saw
+                // contributes no row — which is what the foreign key would enforce anyway,
+                // and better than a row pointing at nothing.
+                selects.push("fr.file_id AS file_id".to_string());
+            }
+        }
+        RowIdentity::PerEntity if spec.table == "participants" => {
+            // Entity tables are dataset-keyed, not file-keyed: a participant is a property of
+            // the dataset, and lives on whether or not any one file mentions them.
+            selects.push(format!("{} AS dataset_id", sql_lit(dataset_id)));
+            structural.insert("participant_id");
+            if present.contains("participant_id") {
+                referenced.push("participant_id");
+                selects.push(
+                    "CASE WHEN raw.participant_id LIKE 'sub-%' THEN raw.participant_id                      ELSE 'sub-' || raw.participant_id END AS participant_id"
+                        .to_string(),
+                );
+            }
+        }
+        RowIdentity::PerEntity => {
+            selects.push(format!("{} AS dataset_id", sql_lit(dataset_id)));
+            structural.insert("session_id");
+            if present.contains("session_id") {
+                referenced.push("session_id");
+                selects.push(
+                    "CASE WHEN raw.session_id LIKE 'ses-%' THEN raw.session_id                      ELSE 'ses-' || raw.session_id END AS session_id"
+                        .to_string(),
+                );
+            }
+            // The subject the sessions file belongs to, from its filename.
+            selects.push("NULLIF(m.aux, '') AS participant_id".to_string());
+        }
+        RowIdentity::PerRow => {
+            selects.push("m.fid AS file_id".to_string());
+            // `row_idx` only when the table has the column, which is only when its order is
+            // load-bearing — the same condition, so the two cannot disagree. The global
+            // `__grn` minus each file's first gives the per-file line index; the sequential
+            // read below is what makes it line order rather than arrival order.
+            if preserve_order {
+                selects.push(
+                    "(raw.__grn - MIN(raw.__grn) OVER (PARTITION BY raw.__src))::BIGINT AS row_idx"
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    // Schema-declared data columns present in the file, TRY_CAST to their type. A
+    // column the identity already consumed above is skipped: emitting it again would
+    // give the SELECT two outputs of the same name, which `INSERT ... BY NAME` sees as
+    // a column the table does not have.
     let mut known: HashSet<&str> = HashSet::new();
     for c in &spec.columns {
+        if structural.contains(c.name.as_str()) {
+            continue;
+        }
         known.insert(c.name.as_str());
         if !present.contains(c.name.as_str()) {
             continue; // omitted → BY NAME leaves it NULL
         }
+        referenced.push(c.name.as_str());
         let q = quote_ident(&c.name);
         if needs_try_cast(&c.sql_type) {
             selects.push(format!("TRY_CAST(raw.{q} AS {}) AS {q}", c.sql_type));
@@ -2705,7 +3132,7 @@ fn build_tabular_batch_select(
     let extras: Vec<&str> = columns
         .iter()
         .map(|s| s.as_str())
-        .filter(|c| !c.is_empty() && !known.contains(c) && *c != "filename")
+        .filter(|c| !c.is_empty() && !known.contains(c) && !structural.contains(c))
         .collect();
     if store_undeclared && !extras.is_empty() {
         let pairs: Vec<String> = extras
@@ -2713,16 +3140,51 @@ fn build_tabular_batch_select(
             .map(|c| format!("{}, raw.{}", sql_lit(c), quote_ident(c)))
             .collect();
         selects.push(format!("json_object({}) AS other_data", pairs.join(", ")));
+        referenced.extend(extras.iter().copied());
     }
+
+    // Hand DuckDB the schema instead of letting it sniff one. The header is already known
+    // here — it is what the group was formed by, and every member shares it byte-for-byte —
+    // so the sniffer would only be re-deriving what we can state. The sniff is paid per
+    // *file*, not per group, and its cost scales with the header's width, so on a wide
+    // derivative table it dominates the read: measured 2026-08 on a 387-file fMRIPrep
+    // confounds tree (1,852 columns, ~451 rows, ~4.1 GB), 0.67 s per file sniffing against
+    // 0.03 s with the columns declared.
+    //
+    // Every physical column must be listed, so a file whose header carries an empty
+    // name (a trailing tab) falls back to sniffing rather than being described wrongly.
+    let read_opts = if columns.iter().any(|c| c.is_empty()) {
+        HEADER_READ_OPTS.to_string()
+    } else {
+        let spec = columns
+            .iter()
+            .map(|c| format!("{}: 'VARCHAR'", sql_lit(c)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "header=true, auto_detect=false, columns={{{spec}}}, {}",
+            non_poisoning_read_flags_typed!()
+        )
+    };
 
     let locals = files
         .iter()
-        .map(|(l, _)| sql_lit(l))
+        .map(|(l, _, _)| sql_lit(l))
         .collect::<Vec<_>>()
         .join(", ");
+    // `fid` is each source file's registry key, computed in Rust and carried into the SQL as
+    // a literal: `file_id` is a SHA-256 (see [`file_id`]) and DuckDB cannot reproduce it.
     let map_values = files
         .iter()
-        .map(|(l, r)| format!("({}, {})", sql_lit(l), sql_lit(r)))
+        .map(|(l, r, aux)| {
+            format!(
+                "({}, {}, {}, {}::HUGEINT)",
+                sql_lit(l),
+                sql_lit(r),
+                sql_lit(aux),
+                sql_lit(&file_id(dataset_id, root_uri, r))
+            )
+        })
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -2730,26 +3192,56 @@ fn build_tabular_batch_select(
     // global row number; the order-insensitive read drops both so DuckDB can read
     // files concurrently.
     let from = if preserve_order {
+        // Project inside the subquery rather than `SELECT *`. The window has no
+        // `PARTITION BY` — a global row number is the whole point — so the operator buffers
+        // its entire input, and `*` makes that every column of every row where the outer
+        // select reads a handful. On a table hundreds of columns wide that is the difference
+        // between buffering what the insert needs and buffering the whole file. The unordered
+        // branch needs no such care: with no subquery, DuckDB pushes the outer projection
+        // into `read_csv`.
+        let mut projected: Vec<String> = vec!["__src".to_string()];
+        projected.extend(referenced.iter().map(|c| quote_ident(c)));
+        projected.dedup();
+        let projected = projected.join(", ");
         format!(
-            "(SELECT *, row_number() OVER () AS __grn \
-             FROM read_csv([{locals}], {HEADER_READ_OPTS}, filename=true, parallel=false)) AS raw"
+            "(SELECT {projected}, row_number() OVER () AS __grn \
+             FROM read_csv([{locals}], {read_opts}, filename='__src', parallel=false)) AS raw"
         )
     } else {
-        format!("read_csv([{locals}], {HEADER_READ_OPTS}, filename=true) AS raw")
+        format!("read_csv([{locals}], {read_opts}, filename='__src') AS raw")
+    };
+
+    // A `scans.tsv` names a different file on every row, so its key is resolved against the
+    // registry by the path the row builds rather than carried in the map. Every other identity
+    // is about the source file itself, whose key `m.fid` already holds.
+    let registry_join = if spec.identity == RowIdentity::PerFile {
+        format!(
+            " JOIN file_registry fr ON fr.dataset_id = {ds} AND fr.root_uri = {root} \
+             AND fr.file_path = CASE WHEN m.aux = '' THEN raw.filename \
+             ELSE m.aux || '/' || raw.filename END",
+            ds = sql_lit(dataset_id),
+            root = sql_lit(root_uri),
+        )
+    } else {
+        String::new()
     };
 
     let sql = format!(
         "SELECT {selects} FROM {from} \
-         JOIN (VALUES {map_values}) AS m(abs, rel) ON raw.filename = m.abs",
+         JOIN (VALUES {map_values}) AS m(abs, rel, aux, fid) ON raw.__src = m.abs{registry_join}",
         selects = selects.join(", "),
     );
     (sql, extras.into_iter().map(str::to_string).collect())
 }
 
-/// Parse a TSV file's header from its first line — read in Rust (via
-/// [`BidsFileSystem::read_head`]) instead of a per-file DuckDB `read_csv` sniff,
-/// whose ~4 ms fixed cost is what Lever 1b's batching removes. Returns
-/// `(group_key, column_names)`:
+/// Parse a TSV file's header from its first line, read in Rust (via
+/// [`BidsFileSystem::read_head`]).
+///
+/// Read here rather than asked of DuckDB because the header is what files are *grouped by*,
+/// so it is needed before any `read_csv` runs — and once known it is declared to `read_csv`
+/// outright, which is what lets the batch skip the dialect sniffer entirely.
+///
+/// Returns `(group_key, column_names)`:
 ///
 /// - `group_key` is the raw header line with only the trailing `\n` removed, so a
 ///   `\r` (CRLF) or a UTF-8 BOM is **kept**. Batches key on it, which quarantines
@@ -2774,7 +3266,11 @@ fn tsv_header_from_line(line: &str) -> Option<(String, Vec<String>)> {
     Some((group_key, names))
 }
 
-/// The `read_csv` options for a header-bearing tabular file.
+/// The `read_csv` options for a header-bearing tabular file whose columns are *not* declared
+/// to `read_csv` — so the dialect is sniffed. The batched read declares its columns instead
+/// and uses [`non_poisoning_read_flags_typed`]; this remains the fallback for a header that
+/// cannot be declared, namely one carrying an empty column name (see
+/// [`build_tabular_batch_select`]).
 ///
 /// Three relaxations make `read_csv` **non-erroring** on real-world-but-imperfect
 /// TSVs, so a bad file can never abort (poison) the ingest transaction:
@@ -2791,26 +3287,136 @@ fn tsv_header_from_line(line: &str) -> Option<(String, Vec<String>)> {
 /// ingests every good row and **relies on `bids-validator-rs` — not itself — to
 /// be the authority on tabular malformation**: a genuinely malformed row is
 /// padded/dropped rather than refusing the dataset. It's a catalog, not a
-/// validator. The `tabular_files` row count reflects exactly what landed, so a
+/// validator. A file's rows in its data table reflect exactly what landed, so a
 /// file that lost rows is still observable; DuckDB's reject-table can surface the
-/// specifics if a hard accounting is ever needed. Not erroring is also what lets
-/// the batched flush skip its validator dry-run — halving the reads over a
-/// network filesystem.
+/// specifics if a hard accounting is ever needed. Not erroring is also what lets the batched
+/// flush skip its validator dry-run, so each file is read once rather than twice.
 const HEADER_READ_OPTS: &str = concat!("header=true, ", non_poisoning_read_flags!());
 
-/// Determine if a file is an imaging data file that should go in scans table
-/// Whether a file is a primary BIDS **data file** (→ one `scans` row): it sits in a datatype
-/// directory and is not a sidecar/tabular/gradient companion (`.json` / `.tsv` / `.tsv.gz` /
-/// `.bval` / `.bvec`). Covers NIfTI plus electrophysiology (`.edf`/`.vhdr`/`.set`/…), MEG
-/// (`.ds`/`.fif`/…), NIRS (`.snirf`), microscopy, etc., so every modality's datafiles are
-/// queryable by concept. Datatype is derived from the path via the schema.
+/// What a file *is* — the `kind` column of the file registry, and what a consumer filters
+/// `all_files` on (docs/adr/0006).
+///
+/// Deliberately coarse. BIDS has no data/metadata/table axis to borrow: `rules.files` bundles a
+/// data file and its sidecar into one rule (149 of its 169 extension-bearing rules list `.json`
+/// beside a non-JSON extension), `objects.extensions` is a glossary, and upstream itself defines
+/// "is a sidecar" as `extension == ".json"` plus a hand-written exception. So this is bidslake's
+/// own vocabulary, in the sense ADR 0002 §4 established for read-vs-catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// A primary data file — an image, a recording, a surface. `all_files WHERE kind = 'data'`
+    /// is exactly these rows.
+    Data,
+    /// A JSON metadata file. Its *contents* reach `sidecars` under the path of the data file
+    /// it describes; its registry row is the sidecar file itself, under its own path.
+    Sidecar,
+    /// A table of rows (`.tsv`, `.tsv.gz`), whose rows reach a data table.
+    Tabular,
+    /// A diffusion companion (`.bval`/`.bvec`), whose values reach `diffusion`.
+    Gradient,
+    /// `dataset_description.json` — dataset metadata rather than file metadata.
+    Description,
+    /// Everything else the walk saw and no `ignore` rule claimed: READMEs, CHANGES, code,
+    /// stimuli. Recorded so the registry is a manifest of the dataset rather than of the files
+    /// bidslake happened to understand.
+    Other,
+}
+
+impl Kind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Kind::Data => "data",
+            Kind::Sidecar => "sidecar",
+            Kind::Tabular => "tabular",
+            Kind::Gradient => "gradient",
+            Kind::Description => "description",
+            Kind::Other => "other",
+        }
+    }
+}
+
+/// The stable identity of one file in the catalog: the first 128 bits of
+/// `SHA-256(dataset_id \x1f root_uri \x1f file_path)`, as a decimal string.
+///
+/// This is a **stored** primary key that every satellite table foreign-keys to, so it must be
+/// reproducible from the three identity columns alone — across runs, machines, ingest orders and
+/// bidslake versions. Hence SHA-256, which is fixed by specification, rather than DuckDB's
+/// `hash()` (an implementation detail with no cross-version guarantee) or Rust's `DefaultHasher`
+/// (explicitly not stable across releases). An id that shifted would make every re-index insert
+/// duplicates instead of matching.
+///
+/// `\x1f` (ASCII unit separator) delimits the parts because it cannot occur in a path or URI, so
+/// no combination of the three can be confused for another.
+///
+/// Returned as a decimal string rather than an integer because `serde_json::Number` tops out at
+/// 64 bits, and the row travels to the writer as JSON. [`Schema::row_values`] parses it back for
+/// the `HUGEINT` column.
+pub(crate) fn file_id(dataset_id: &str, root_uri: &str, file_path: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(dataset_id.as_bytes());
+    hasher.update(b"\x1f");
+    hasher.update(root_uri.as_bytes());
+    hasher.update(b"\x1f");
+    hasher.update(file_path.as_bytes());
+    let digest = hasher.finalize();
+    let bytes: [u8; 16] = digest[..16].try_into().expect("sha256 yields 32 bytes");
+    // As `i128` to match DuckDB's signed `HUGEINT`; the sign carries no meaning, and the
+    // mapping is still injective on the 128 bits.
+    i128::from_be_bytes(bytes).to_string()
+}
+
+/// Classify a walked file.
+///
+/// `datatype` is the file's datatype however it was arrived at — the immediate parent directory
+/// for a BIDS-named file, or the projection for a term-mapped one. Taking it as an argument is
+/// what lets one function serve both paths: a FreeSurfer `mri/wmparc.mgz` sits under no datatype
+/// directory, but its term map states `datatype: anat`, and it is a data file either way.
+///
+/// The order matters and encodes the companion rule: the four companion extensions are claimed
+/// before `datatype.is_some()` is consulted, so a `.json` beside a `.nii.gz` is a sidecar rather
+/// than a second data file.
 ///
 /// Note: for multi-file recordings (e.g. BrainVision `.vhdr`+`.vmrk`+`.eeg`) each component is a
-/// separate data file and gets its own `scans` row; filter by extension for the primary header.
-fn is_datafile(rel_path: &str, extension: &str, schema: &Value) -> bool {
+/// separate data file and gets its own row; filter by extension for the primary header.
+fn kind_of(rel_path: &str, extension: &str, datatype: Option<&str>) -> Kind {
+    if rel_path == "dataset_description.json" {
+        return Kind::Description;
+    }
+    match extension {
+        ".json" => Kind::Sidecar,
+        ".tsv" | ".tsv.gz" => Kind::Tabular,
+        ".bval" | ".bvec" => Kind::Gradient,
+        _ if datatype.is_some() => Kind::Data,
+        _ => Kind::Other,
+    }
+}
+
+/// The datatype a BIDS-named file gets from its position: its **immediate** parent directory.
+///
+/// Deliberately narrower than [`BidsParser::datatype_dir_in_path`], which accepts a datatype
+/// anywhere in the path — `sub-01/anat/extra/nested.nii.gz` is not a data file. Matches
+/// [`bids_schema::datatypes::find_datatype`]'s rule. `datatypes` is the schema's datatype set,
+/// cached once per parser rather than re-walked out of the schema JSON for every file.
+fn parent_datatype<'a>(rel_path: &'a str, datatypes: &HashSet<String>) -> Option<&'a str> {
+    let mut components = rel_path.rsplit('/').filter(|s| !s.is_empty());
+    components.next(); // the file itself
+    components
+        .next()
+        .filter(|parent| datatypes.contains(*parent))
+}
+
+/// Whether a file is a primary BIDS **data file**.
+///
+/// Superseded by [`kind_of`], and kept as its executable specification: the test
+/// `kind_of_agrees_with_is_datafile` asserts the two agree over every path in the corpus, the
+/// same device as `is_datafile_agrees_with_find_datatype`. Do not call from ingest.
+#[cfg(test)]
+fn is_datafile(rel_path: &str, extension: &str, datatypes: &HashSet<String>) -> bool {
     const COMPANION_EXTS: &[&str] = &[".json", ".tsv", ".tsv.gz", ".bval", ".bvec"];
-    bids_schema::datatypes::find_datatype(rel_path, schema).is_some()
-        && !COMPANION_EXTS.contains(&extension)
+    if COMPANION_EXTS.contains(&extension) {
+        return false;
+    }
+    parent_datatype(rel_path, datatypes).is_some()
 }
 
 /// Compile `.bidsignore` file content into a [`Gitignore`] matcher.
@@ -2919,13 +3525,12 @@ mod tests {
         assert!(!ignored(content, "sub-01/keep.tsv"));
     }
 
-    /// The single-file tabular/recording path must force `parallel=false` for
-    /// order-sensitive per-row tables so `row_idx` reproduces TSV line order — the
-    /// gap that positional `*timeseries.tsv`/recordings would otherwise hit (the
-    /// batched path already does this). See bids-standard/bids-2-devel#98.
+    /// Both writers must force `parallel=false` when order matters, so `row_idx` reproduces
+    /// file line order — the gap positional `*timeseries.tsv` and recordings would otherwise
+    /// hit. See bids-standard/bids-2-devel#98.
     #[test]
     fn order_sensitive_per_row_reads_sequentially() {
-        use super::{HEADER_READ_OPTS, build_tabular_insert_sql};
+        use super::{HEADER_READ_OPTS, build_tabular_batch_select, build_tabular_insert_sql};
         use crate::schema::tabular::{RowIdentity, TableSpec};
 
         let spec = |table: &str, identity| TableSpec {
@@ -2935,13 +3540,13 @@ mod tests {
             file_based: true,
             rule_ids: Vec::new(),
         };
-        let sql = |spec: &TableSpec, preserve| {
+
+        // The single-file (headerless recording) writer.
+        let single = |spec: &TableSpec, preserve| {
             build_tabular_insert_sql(
                 spec,
                 "/t/f.tsv",
-                "sub-01/func/f.tsv",
-                "ds",
-                None,
+                "12345",
                 &[],
                 HEADER_READ_OPTS,
                 preserve,
@@ -2949,19 +3554,39 @@ mod tests {
             )
             .0
         };
-
-        // Positional per-row table → sequential read + a row_idx.
-        let ordered = sql(&spec("fmriprep_confounds", RowIdentity::PerRow), true);
+        let ordered = single(&spec("physio", RowIdentity::PerRow), true);
         assert!(ordered.contains("parallel=false"), "{ordered}");
-        assert!(ordered.contains("AS row_idx"));
-
-        // Order-insensitive per-row (e.g. events) → no forced sequential read.
-        let unordered = sql(&spec("events", RowIdentity::PerRow), false);
+        assert!(ordered.contains("AS row_idx"), "{ordered}");
+        let unordered = single(&spec("physio", RowIdentity::PerRow), false);
         assert!(!unordered.contains("parallel=false"), "{unordered}");
 
-        // PK tables carry no row_idx → never forced sequential, even with preserve_order.
-        let pk = sql(&spec("participants", RowIdentity::PerEntity), true);
+        // The batched writer, which is what every header-bearing file goes through — including
+        // the keyed tables, whose identities used to have their own arms in the single-file
+        // builder.
+        let batched = |spec: &TableSpec, preserve| {
+            build_tabular_batch_select(
+                spec,
+                "ds",
+                "file:///r",
+                &[("/t/f.tsv", "sub-01/func/f.tsv", "")],
+                &[],
+                preserve,
+                true,
+            )
+            .0
+        };
+        let ordered = batched(&spec("fmriprep_confounds", RowIdentity::PerRow), true);
+        assert!(ordered.contains("parallel=false"), "{ordered}");
+        assert!(ordered.contains("AS row_idx"), "{ordered}");
+
+        // Order-insensitive per-row (e.g. events) → no forced sequential read.
+        let unordered = batched(&spec("events", RowIdentity::PerRow), false);
+        assert!(!unordered.contains("parallel=false"), "{unordered}");
+
+        // Keyed tables carry no row_idx → never forced sequential, even with preserve_order.
+        let pk = batched(&spec("participants", RowIdentity::PerEntity), true);
         assert!(!pk.contains("parallel=false"), "{pk}");
+        assert!(!pk.contains("row_idx"), "{pk}");
     }
 
     /// `store_undeclared` gates the `other_data` projection in *both* builders. The
@@ -2992,9 +3617,7 @@ mod tests {
             let (single, dropped_single) = build_tabular_insert_sql(
                 &spec,
                 "/t/f.tsv",
-                "sub-01/func/f.tsv",
-                "ds",
-                None,
+                "12345",
                 &header,
                 HEADER_READ_OPTS,
                 true,
@@ -3003,7 +3626,8 @@ mod tests {
             let (batched, dropped_batched) = build_tabular_batch_select(
                 &spec,
                 "ds",
-                &[("/t/f.tsv", "sub-01/func/f.tsv")],
+                "file:///r",
+                &[("/t/f.tsv", "sub-01/func/f.tsv", "")],
                 &header,
                 true,
                 store,
@@ -3019,16 +3643,237 @@ mod tests {
                     store,
                     "{which} builder with store_undeclared={store}: {sql}"
                 );
+                // Checked against the projection rather than the whole statement: the
+                // batched builder now declares the file's full schema to `read_csv`
+                // (which is what lets it skip the sniffer), so an undeclared column is
+                // *named* either way. What the policy governs is whether its value is
+                // carried into `other_data`.
                 assert_eq!(
-                    sql.contains("a_comp_cor_00"),
+                    sql.contains("json_object("),
                     store,
-                    "{which}: the undeclared column itself must only appear when stored"
+                    "{which}: the undeclared column is only projected when stored"
                 );
+                if store {
+                    let payload = &sql[sql.find("json_object(").unwrap()..];
+                    assert!(
+                        payload.contains("a_comp_cor_00"),
+                        "{which}: a stored undeclared column belongs in the overflow"
+                    );
+                }
                 assert!(
                     sql.contains("trans_x"),
                     "{which}: declared columns are unaffected by the policy"
                 );
             }
+        }
+    }
+
+    /// `is_datafile` consults a cached datatype set rather than re-walking the schema JSON per
+    /// file, so it reimplements `find_datatype`'s parent-directory rule. Pin the two together:
+    /// a divergence would silently change which files earn a `scans` row.
+    #[test]
+    fn is_datafile_agrees_with_find_datatype() {
+        use super::is_datafile;
+        let schema: serde_json::Value = serde_json::from_str(bids_schema::SCHEMA_JSON).unwrap();
+        let datatypes: std::collections::HashSet<String> = schema["objects"]["datatypes"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+
+        for path in [
+            "sub-01/anat/sub-01_T1w.nii.gz",
+            "sub-01/func/sub-01_task-rest_bold.nii.gz",
+            "sub-01/ses-1/eeg/sub-01_ses-1_task-x_eeg.vhdr",
+            "sub-01/meg/sub-01_task-x_meg.ds",
+            "derivatives/fmriprep/sub-01/anat/sub-01_desc-preproc_T1w.nii.gz",
+            // Not a datatype directory, or the datatype is not the *parent*.
+            "sub-01/sub-01_scans.tsv",
+            "dataset_description.json",
+            "README",
+            "sub-01/anat/extra/nested.nii.gz",
+            "anat/loose.nii.gz",
+        ] {
+            let ext = match path.rfind('.') {
+                Some(_) if path.ends_with(".nii.gz") => ".nii.gz",
+                Some(i) => &path[i..],
+                None => "",
+            };
+            let by_schema = bids_schema::datatypes::find_datatype(path, &schema).is_some()
+                && ext != ".json"
+                && ext != ".tsv"
+                && ext != ".tsv.gz"
+                && ext != ".bval"
+                && ext != ".bvec";
+            assert_eq!(
+                is_datafile(path, ext, &datatypes),
+                by_schema,
+                "disagreement on {path}"
+            );
+        }
+    }
+
+    /// `kind_of` replaced `is_datafile` plus the two hardcoded JSON arms of `process_file`.
+    /// `is_datafile` is kept as its executable specification: `Kind::Data` must hold exactly
+    /// where it was true, over every path in the vendored corpus rather than a sample. A
+    /// divergence would silently change which files count as data files.
+    #[test]
+    fn kind_of_agrees_with_is_datafile() {
+        use super::{Kind, is_datafile, kind_of, parent_datatype};
+        let schema: serde_json::Value = serde_json::from_str(bids_schema::SCHEMA_JSON).unwrap();
+        let datatypes: std::collections::HashSet<String> = schema["objects"]["datatypes"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+
+        let check = |rel: &str| {
+            let name = rel.rsplit('/').next().unwrap_or(rel);
+            let ext = bids_core::entities::read_entities(name).extension;
+            let kind = kind_of(rel, &ext, parent_datatype(rel, &datatypes));
+            assert_eq!(
+                kind == Kind::Data,
+                is_datafile(rel, &ext, &datatypes),
+                "disagreement on {rel} (kind = {kind:?})"
+            );
+        };
+
+        let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/bids-examples");
+        let mut seen = 0usize;
+        if corpus.is_dir() {
+            let mut stack = vec![corpus.clone()];
+            while let Some(dir) = stack.pop() {
+                let Ok(entries) = std::fs::read_dir(&dir) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let name = entry.file_name();
+                    if name.to_string_lossy().starts_with('.') {
+                        continue;
+                    }
+                    if path.is_dir() {
+                        stack.push(path);
+                    } else if let Ok(rel) = path.strip_prefix(&corpus) {
+                        // Strip the dataset directory so paths are dataset-relative, the
+                        // frame `process_file` works in.
+                        let rel = rel.to_string_lossy();
+                        if let Some((_, inner)) = rel.split_once('/') {
+                            check(inner);
+                            seen += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            seen > 1000,
+            "expected a substantial corpus walk, saw {seen} files — run \
+             `git submodule update --init`"
+        );
+    }
+
+    /// `file_id` is a *stored* primary key that every satellite foreign-keys to, so it must
+    /// be reproducible from the three identity columns and nothing else. Pin the exact value:
+    /// a change to the hash, the separator, or the byte order would make every re-index
+    /// insert duplicates rather than match, and no other test would notice.
+    #[test]
+    fn file_id_is_stable_and_separator_safe() {
+        use super::file_id;
+        // Cross-checked against an independent implementation:
+        //   int.from_bytes(sha256(b"ds001\x1ffile:///data/ds001\x1fsub-01/anat/sub-01_T1w.nii.gz")
+        //                  .digest()[:16], "big", signed=True)
+        assert_eq!(
+            file_id(
+                "ds001",
+                "file:///data/ds001",
+                "sub-01/anat/sub-01_T1w.nii.gz"
+            ),
+            "75622530741324318000087019144433844903"
+        );
+
+        // Same three parts, same id — whatever else is in the catalog.
+        assert_eq!(
+            file_id("ds", "file:///r", "a/b.nii.gz"),
+            file_id("ds", "file:///r", "a/b.nii.gz")
+        );
+
+        // The unit separator is what stops the parts running together: without it,
+        // ("ab", "c", …) and ("a", "bc", …) would hash identically.
+        assert_ne!(file_id("ab", "c", "p"), file_id("a", "bc", "p"));
+        assert_ne!(file_id("a", "bc", "p"), file_id("a", "b", "cp"));
+
+        // Each part is load-bearing — a dataset's two roots holding the same relative path
+        // is the case the whole registry exists to keep apart.
+        assert_ne!(
+            file_id("ds", "file:///r1", "desc-aseg_dseg.tsv"),
+            file_id("ds", "file:///r2", "desc-aseg_dseg.tsv")
+        );
+    }
+
+    /// The case `is_datafile` cannot express, and the reason `kind_of` takes `datatype` as an
+    /// argument rather than deriving it: a FreeSurfer tree has no datatype *directories*, so a
+    /// term-mapped path is a data file only by virtue of what the projection says it is.
+    #[test]
+    fn kind_of_reads_a_projected_datatype() {
+        use super::{Kind, kind_of};
+        // What `data/term-maps/freesurfer.json` projects for this path.
+        assert_eq!(
+            kind_of("sub-01/mri/wmparc.mgz", ".mgz", Some("anat")),
+            Kind::Data
+        );
+        // Without the projection the same path is not a data file — `mri` is not a BIDS
+        // datatype directory, which is exactly what `is_datafile` could only answer "no" to.
+        assert_eq!(kind_of("sub-01/mri/wmparc.mgz", ".mgz", None), Kind::Other);
+    }
+
+    /// The non-`Data` kinds, including the ordering that makes a sidecar beside a data file a
+    /// sidecar rather than a second data file.
+    #[test]
+    fn kind_of_classifies_companions_and_documentation() {
+        use super::{Kind, kind_of};
+        let cases = [
+            ("dataset_description.json", ".json", None, Kind::Description),
+            // A companion wins over the datatype it sits beside.
+            (
+                "sub-01/anat/sub-01_T1w.json",
+                ".json",
+                Some("anat"),
+                Kind::Sidecar,
+            ),
+            (
+                "sub-01/func/sub-01_task-x_events.tsv",
+                ".tsv",
+                Some("func"),
+                Kind::Tabular,
+            ),
+            (
+                "sub-01/func/sub-01_task-x_physio.tsv.gz",
+                ".tsv.gz",
+                Some("func"),
+                Kind::Tabular,
+            ),
+            (
+                "sub-01/dwi/sub-01_dwi.bval",
+                ".bval",
+                Some("dwi"),
+                Kind::Gradient,
+            ),
+            ("participants.tsv", ".tsv", None, Kind::Tabular),
+            ("README", "", None, Kind::Other),
+            ("CHANGES", "", None, Kind::Other),
+            // A nested description is NOT the dataset's own; only the exact root path is.
+            (
+                "derivatives/fmriprep/dataset_description.json",
+                ".json",
+                None,
+                Kind::Sidecar,
+            ),
+        ];
+        for (path, ext, datatype, want) in cases {
+            assert_eq!(kind_of(path, ext, datatype), want, "on {path}");
         }
     }
 }

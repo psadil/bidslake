@@ -27,8 +27,6 @@ pub struct BidsFile {
     pub path: String,
     /// Absolute path on disk.
     pub absolute_path: PathBuf,
-    /// File size in bytes.
-    pub size: u64,
 }
 
 /// Directories that should always be ignored during BIDS validation.
@@ -94,7 +92,15 @@ pub fn read_file_tree(
     let mut builder = ignore::WalkBuilder::new(root);
     builder
         .standard_filters(false)
-        .hidden(false)
+        // Prune dot-directories at the walker instead of dropping their entries
+        // after the fact (below). Same outcome — a file under a hidden directory
+        // never reached the tree anyway, because no directory node was created for
+        // its parent — but the walker stops *descending*, so a `.snakemake` or
+        // `.heudiconv` subtree costs one `readdir` rather than thousands. The test
+        // is a plain filename check made before any filesystem call, and it does
+        // not affect `.bidsignore`, which the walker collects from directory
+        // listings rather than from the entries it yields.
+        .hidden(true)
         .git_global(false)
         .git_ignore(false)
         .git_exclude(false)
@@ -136,21 +142,28 @@ pub fn read_file_tree(
             }
         };
 
-        if entry.path().is_file()
-            || entry.path().is_symlink()
-            || (entry.path().is_dir() && is_pseudo_file(&entry_name, pseudo_exts))
+        // Classify from the type `readdir` already reported — walkdir caches it on the
+        // entry — rather than asking the path. Each of `Path::is_file`, `is_symlink` and
+        // `is_dir` is a fresh `stat`, and on a network filesystem every one is a serialized
+        // round trip for something already in hand.
+        //
+        // The walker runs with `follow_links(false)`, so `file_type()` reports a symlink as
+        // a symlink; symlinks are bucketed with files, which is why the test order below
+        // checks `is_symlink()` before `is_dir()`.
+        let Some(file_type) = entry.file_type() else {
+            // Only `None` for stdin, which a directory walk never yields.
+            continue;
+        };
+        if file_type.is_file()
+            || file_type.is_symlink()
+            || (file_type.is_dir() && is_pseudo_file(&entry_name, pseudo_exts))
         {
-            let size = match std::fs::metadata(entry.path()) {
-                Ok(metadata) => metadata.len(),
-                Err(_) => 0, // Default to 0 for broken symlinks
-            };
             parent_tree.files.push(BidsFile {
                 name: entry_name,
                 path: rel_path,
                 absolute_path: entry.path().to_path_buf(),
-                size,
             });
-        } else if entry.path().is_dir() {
+        } else if file_type.is_dir() {
             parent_tree.directories.push(FileTree {
                 name: entry_name,
                 path: rel_path,
@@ -163,8 +176,13 @@ pub fn read_file_tree(
     Ok(root_tree)
 }
 
-// Check if directory matches a pseudo-file extension (e.g. ".ds/")
-fn is_pseudo_file(entry_name: &str, pseudo_exts: &[String]) -> bool {
+/// Whether an entry name matches a pseudo-file extension (e.g. `.ds/`, `.ome.zarr/`) — a
+/// *directory* the schema treats as one opaque data file.
+///
+/// Public because it is the rule by which the walk decides a directory belongs in `files`, so
+/// a consumer asking "is this walked entry a directory datafile?" should ask the same question
+/// of the name rather than `stat`ing the path again.
+pub fn is_pseudo_file(entry_name: &str, pseudo_exts: &[String]) -> bool {
     let mut pseudo_file = false;
     for ext in pseudo_exts {
         let ext_trimmed = ext.strip_suffix('/').unwrap_or(ext);
@@ -296,6 +314,22 @@ impl<'a> Iterator for WalkDirectories<'a> {
 }
 
 impl BidsFile {
+    /// The file's size in bytes, `stat`-ed on demand.
+    ///
+    /// Deliberately not a field: filling one would mean a `stat` on every entry of
+    /// the walk, and only the validator ever asks — once per file, while building a
+    /// `BidsContext`. Ingestion never reads it, so paying for it during the walk
+    /// charged every consumer for one consumer's need.
+    ///
+    /// Follows symlinks (a symlink reports its target's size) and yields 0 for
+    /// anything that cannot be stat-ed, matching what the field held for a broken
+    /// symlink.
+    pub fn size_bytes(&self) -> u64 {
+        std::fs::metadata(&self.absolute_path)
+            .map(|m| m.len())
+            .unwrap_or(0)
+    }
+
     /// Read the full contents of this file as bytes.
     pub async fn read_bytes(&self) -> Result<Vec<u8>, std::io::Error> {
         return tokio::fs::read(&self.absolute_path).await;
@@ -315,6 +349,46 @@ impl BidsFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pseudo-file rule is now public, because consumers decide "is this walked entry a
+    /// directory datafile?" from the name rather than by `stat`ing the path — so what it
+    /// accepts is a contract, not an implementation detail. Notably it keys on the *name*:
+    /// a symlink to an ordinary directory is not a pseudo-file, and a schema extension is
+    /// matched with or without its trailing slash.
+    #[test]
+    fn pseudo_file_is_decided_by_name() {
+        // Exactly what BIDS 1.11.1 yields for `pseudo_file_extensions`, bare `/` included:
+        // it strips to the empty string, which must not then match every name.
+        let exts: Vec<String> = [".ds/", ".mefd/", ".ome.zarr/", "/"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        for name in [
+            "sub-01_task-x_meg.ds",
+            "sub-01_sample-a_image.ome.zarr",
+            "sub-01_ieeg.mefd",
+        ] {
+            assert!(
+                is_pseudo_file(name, &exts),
+                "{name} should be a pseudo-file"
+            );
+        }
+        for name in [
+            "sub-01_T1w.nii.gz",
+            "anat",
+            "some_linked_directory",
+            "meg", // the datatype directory itself, not a `.ds` bundle
+            "",
+        ] {
+            assert!(!is_pseudo_file(name, &exts), "{name} should not be");
+        }
+        // An empty extension must never match everything.
+        assert!(!is_pseudo_file(
+            "anything",
+            &["".to_string(), "/".to_string()]
+        ));
+    }
 
     #[test]
     fn test_make_relative_path() {
@@ -338,7 +412,6 @@ mod tests {
             name: "sub-01_T1w.nii.gz".into(),
             path: "/sub-01/anat/sub-01_T1w.nii.gz".into(),
             absolute_path: PathBuf::from("/data/mybids/sub-01/anat/sub-01_T1w.nii.gz"),
-            size: 1000,
         };
         assert_eq!(f.parent_path(), "/sub-01/anat");
     }

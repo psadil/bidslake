@@ -28,10 +28,10 @@ async fn nested_bidsignore_excludes_subtree_files() -> anyhow::Result<()> {
 
     let db = ingest(root).await?;
 
-    // Every tabular file the walk saw is recorded in `tabular_files` (whatever its
+    // Every tabular file the walk saw is recorded in `file_registry` (whatever its
     // status). The nested-ignored file must be absent; its sibling must be present.
     let ignored: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM tabular_files WHERE file_path LIKE '%_ignored.tsv'",
+        "SELECT COUNT(*) FROM file_registry WHERE file_path LIKE '%_ignored.tsv'",
         [],
         |r| r.get(0),
     )?;
@@ -41,7 +41,7 @@ async fn nested_bidsignore_excludes_subtree_files() -> anyhow::Result<()> {
     );
 
     let kept: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM tabular_files WHERE file_path LIKE '%_kept.tsv'",
+        "SELECT COUNT(*) FROM file_registry WHERE file_path LIKE '%_kept.tsv'",
         [],
         |r| r.get(0),
     )?;
@@ -51,6 +51,6 @@ async fn nested_bidsignore_excludes_subtree_files() -> anyhow::Result<()> {
     );
 
     // Sanity: the walk did record something.
-    assert!(count(&db, "tabular_files")? >= 1);
+    assert!(count(&db, "file_registry")? >= 1);
     Ok(())
 }

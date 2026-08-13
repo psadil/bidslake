@@ -16,6 +16,14 @@ def test_metadata_is_bids_cased(lake):
     )
 
 
+def test_metadata_excludes_the_join_key(lake):
+    # `sidecars` keys on `file_id` now (docs/adr/0006). The key is plumbing, not a BIDS
+    # metadata field, and it leaked into every `metadata` dict as a `Decimal` when this
+    # skipped the `(dataset_id, file_path)` pair it replaced.
+    md = next(lake.get(task="rest", suffix="bold", dataset_id="ds210")).metadata
+    assert not {"file_id", "dataset_id", "file_path", "other_data"} & set(md)
+
+
 def test_metadata_empty_without_sidecar(lake):
     files = list(lake.get(suffix="bold", dataset_id="ds210"))
     assert all(isinstance(f.metadata, dict) for f in files[:5])
@@ -47,7 +55,14 @@ def test_get_associated(lake):
 
 def test_metadata_requires_lake():
     # A hand-built BidsFile without a lake reference errors clearly.
-    f = BidsFile(dataset_id="d", file_path="x", uri="file:///x", entities={})
+    f = BidsFile(
+        dataset_id="d",
+        root_uri="file:///d",
+        file_path="x",
+        file_id=0,
+        uri="file:///x",
+        entities={},
+    )
     with pytest.raises(RuntimeError):
         _ = f.metadata
 

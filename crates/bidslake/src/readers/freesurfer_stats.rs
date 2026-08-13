@@ -17,8 +17,7 @@ pub struct FreeSurferStats;
 impl ContentReader for FreeSurferStats {
     fn read(
         &self,
-        dataset_id: &str,
-        file_path: &str,
+        file_id: &str,
         content: &str,
         facts: &FileFacts,
     ) -> anyhow::Result<Vec<ReaderRows>> {
@@ -63,7 +62,7 @@ impl ContentReader for FreeSurferStats {
                 if col_headers.is_empty() || tokens.len() != col_headers.len() {
                     continue; // schema-on-read: skip malformed/short rows
                 }
-                let mut obj = seed_row(dataset_id, file_path, facts);
+                let mut obj = seed_row(file_id, facts);
                 obj.insert("row_idx".to_string(), Value::from(row_idx as i64));
                 for (header, token) in col_headers.iter().zip(&tokens) {
                     obj.insert(header.clone(), Value::String((*token).to_string()));
@@ -80,7 +79,7 @@ impl ContentReader for FreeSurferStats {
 
         // `# Measure` scalars -> one row in freesurfer_measures for this file.
         if !measures.is_empty() {
-            let mut obj = seed_row(dataset_id, file_path, facts);
+            let mut obj = seed_row(file_id, facts);
             obj.insert("row_idx".to_string(), Value::from(0i64));
             for (short_name, value) in &measures {
                 obj.insert(short_name.clone(), Value::String(value.clone()));

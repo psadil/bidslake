@@ -33,6 +33,47 @@ pub async fn ingest(dataset_path: impl AsRef<Path>) -> Result<BidsDb> {
     Ok(db)
 }
 
+/// Ingest into an existing catalog under an explicit `dataset_id`, as
+/// `bidslake index --dataset-id` does — for tests about accumulating datasets across
+/// runs, where the id and the root are asserted rather than inferred.
+pub async fn ingest_into(
+    db: &BidsDb,
+    dataset_path: impl AsRef<Path>,
+    dataset_id: &str,
+) -> Result<()> {
+    let schema = Schema::load(None).unwrap();
+    db.create_tables(&schema)?;
+    let fs = Box::new(LocalFileSystem::new(dataset_path.as_ref().to_path_buf()));
+    let mut parser = BidsParser::new(fs, Some(dataset_id.to_string()), schema, None, true);
+    let txn = db.conn.unchecked_transaction()?;
+    parser.parse(db).await?;
+    txn.commit()?;
+    Ok(())
+}
+
+/// Ingest into an existing catalog with **no** `--dataset-id`, so the id is inferred from
+/// `dataset_description.json`'s `Name` (or the directory basename). The distinction from
+/// [`ingest_into`] is load-bearing for a second root: an asserted id is the user's claim
+/// that this root belongs to that dataset, an inferred one is only a `Name`, which
+/// pipelines reuse across every study they process (docs/adr/0005).
+pub async fn ingest_inferred_into(db: &BidsDb, dataset_path: impl AsRef<Path>) -> Result<()> {
+    let schema = Schema::load(None).unwrap();
+    db.create_tables(&schema)?;
+    let fs = Box::new(LocalFileSystem::new(dataset_path.as_ref().to_path_buf()));
+    let mut parser = BidsParser::new(fs, None, schema, None, true);
+    let txn = db.conn.unchecked_transaction()?;
+    parser.parse(db).await?;
+    txn.commit()?;
+    Ok(())
+}
+
+/// A fresh catalog holding one dataset, ingested under an explicit `dataset_id`.
+pub async fn ingest_as(dataset_path: impl AsRef<Path>, dataset_id: &str) -> Result<BidsDb> {
+    let db = BidsDb::new(":memory:")?;
+    ingest_into(&db, dataset_path, dataset_id).await?;
+    Ok(db)
+}
+
 /// Like [`ingest`], but with a caller-provided schema — e.g. one built via
 /// `Schema::load_with_overlays` so tests can exercise overlay-augmented indexing.
 pub async fn ingest_with_schema(dataset_path: impl AsRef<Path>, schema: Schema) -> Result<BidsDb> {
@@ -55,7 +96,29 @@ pub async fn ingest_with_adapters(
     adapter_names: &[&str],
 ) -> Result<BidsDb> {
     let db = BidsDb::new(":memory:")?;
+    ingest_with_adapters_into(&db, dataset_path, adapter_names, None).await?;
+    Ok(db)
+}
 
+/// A fresh adapter catalog holding one dataset under an explicit `dataset_id`.
+pub async fn ingest_with_adapters_as(
+    dataset_path: impl AsRef<Path>,
+    adapter_names: &[&str],
+    dataset_id: &str,
+) -> Result<BidsDb> {
+    let db = BidsDb::new(":memory:")?;
+    ingest_with_adapters_into(&db, dataset_path, adapter_names, Some(dataset_id)).await?;
+    Ok(db)
+}
+
+/// Ingest with adapters into an *existing* catalog — for tests about re-indexing, where the
+/// second run must rebuild what the first wrote rather than append to it.
+pub async fn ingest_with_adapters_into(
+    db: &BidsDb,
+    dataset_path: impl AsRef<Path>,
+    adapter_names: &[&str],
+    dataset_id: Option<&str>,
+) -> Result<()> {
     let mut overlays: Vec<AppliedOverlay> = Vec::new();
     let mut term_maps: Vec<TermMap> = Vec::new();
     let mut ingestion_sources: Vec<String> = vec![
@@ -92,11 +155,12 @@ pub async fn ingest_with_adapters(
     db.stamp_ingestion(&ingestion_prov)?;
 
     let fs = Box::new(LocalFileSystem::new(dataset_path.as_ref().to_path_buf()));
-    let mut parser = BidsParser::new(fs, None, schema, None, true).with_term_maps(term_maps);
+    let mut parser = BidsParser::new(fs, dataset_id.map(str::to_string), schema, None, true)
+        .with_term_maps(term_maps);
     let txn = db.conn.unchecked_transaction()?;
-    parser.parse(&db).await?;
+    parser.parse(db).await?;
     txn.commit()?;
-    Ok(db)
+    Ok(())
 }
 
 /// `COUNT(*)` for a table.
@@ -105,12 +169,44 @@ pub fn count(db: &BidsDb, table: &str) -> Result<i64> {
     Ok(db.conn.query_row(&sql, [], |r| r.get(0))?)
 }
 
+/// How many primary **data files** the catalog holds.
+///
+/// The thing tests used to spell `count(db, "scans")`. Since docs/adr/0006 that is the wrong
+/// relation twice over: the registry holds every *kind* of file, and `scans` holds only the
+/// data files a `scans.tsv` describes — none at all for a dataset that ships no `scans.tsv`,
+/// which is most fixtures.
+#[allow(dead_code)]
+pub fn count_data_files(db: &BidsDb) -> Result<i64> {
+    Ok(db.conn.query_row(
+        "SELECT COUNT(*) FROM file_registry WHERE kind = 'data'",
+        [],
+        |r| r.get(0),
+    )?)
+}
+
+/// Every file under `root` that ingest would *see* — the set the file registry is meant to
+/// mirror (docs/adr/0006).
+///
+/// Uses the very same `bids_core::filetree::read_file_tree` walker as ingestion, so the
+/// expected set applies dotfile, `.bidsignore` (including nested ones) and always-ignore
+/// rules exactly as the walk does and cannot drift from it. Paths are dataset-relative,
+/// matching `file_registry.file_path`.
+pub fn walk_all(root: &Path) -> Vec<String> {
+    let schema: serde_json::Value = serde_json::from_str(bids_schema::SCHEMA_JSON).unwrap();
+    let pseudo_exts = bids_schema::pseudo_file_extensions(&schema);
+    let tree = bids_core::filetree::read_file_tree(root, &pseudo_exts, true)
+        .unwrap_or_else(|e| panic!("read_file_tree({}) failed: {e}", root.display()));
+    tree.walk_files()
+        .map(|f| f.path.trim_start_matches('/').to_string())
+        .collect()
+}
+
 /// Every tabular file (`.tsv`/`.tsv.gz`) under `root` that ingest would *see*.
 /// Uses the very same `bids_core::filetree::read_file_tree` walker as ingestion —
 /// which applies dotfile, `.bidsignore` (including nested ones), and always-ignore
 /// (`.git`/`.datalad`/…) rules during the walk — so this expected set cannot drift
-/// from what ingest actually walks. Paths are dataset-relative, matching
-/// `tabular_files.file_path`.
+/// from what ingest actually walks. Paths are root-relative, matching
+/// `file_registry.file_path`.
 pub fn walk_tabular(root: &Path) -> Vec<String> {
     let schema: serde_json::Value = serde_json::from_str(bids_schema::SCHEMA_JSON).unwrap();
     let pseudo_exts = bids_schema::pseudo_file_extensions(&schema);

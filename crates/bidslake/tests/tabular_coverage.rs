@@ -2,7 +2,7 @@
 //! contents in the database, and nothing is silently dropped.**
 //!
 //! For every dataset in the corpus this checks two things against the
-//! `tabular_files` provenance table:
+//! `file_registry` (docs/adr/0006, which absorbed the former `tabular_files`):
 //!
 //! 1. Every tabular file ingest sees (a `.tsv`/`.tsv.gz`, not a dotfile, not
 //!    `.bidsignore`d) is *recorded* — ingested, left on disk, or explicitly
@@ -72,10 +72,17 @@ async fn all_tabular_data_is_in_the_database() {
             .await
             .unwrap_or_else(|e| panic!("{name}: ingest failed: {e}"));
 
-        // Everything recorded in tabular_files, and the subset marked skipped.
+        // Everything ingest *routed*, and the subset marked skipped.
+        //
+        // `status IS NOT NULL` is what keeps this check meaningful. The registry records every
+        // file the walk saw, so an unqualified `SELECT file_path FROM file_registry` would be
+        // compared against a set derived from the very same walk, and could only fail if
+        // registration itself broke — which `test_file_registry.rs` already covers. A `.tsv`
+        // that reached no reader at all still gets a registry row, with `kind = 'tabular'` and
+        // a NULL status; that is exactly the silent drop this test exists to catch.
         let recorded: HashSet<String> = db
             .conn
-            .prepare("SELECT file_path FROM tabular_files")
+            .prepare("SELECT file_path FROM file_registry WHERE status IS NOT NULL")
             .unwrap()
             .query_map([], |r| r.get::<_, String>(0))
             .unwrap()
@@ -83,7 +90,7 @@ async fn all_tabular_data_is_in_the_database() {
             .collect();
         let skipped: Vec<String> = db
             .conn
-            .prepare("SELECT file_path FROM tabular_files WHERE status = 'skipped'")
+            .prepare("SELECT file_path FROM file_registry WHERE status = 'skipped'")
             .unwrap()
             .query_map([], |r| r.get::<_, String>(0))
             .unwrap()
@@ -115,7 +122,7 @@ async fn all_tabular_data_is_in_the_database() {
 
     assert!(
         dropped.is_empty(),
-        "tabular files silently dropped (not in tabular_files):\n{}",
+        "tabular files silently dropped (not in file_registry):\n{}",
         dropped.join("\n")
     );
     assert!(

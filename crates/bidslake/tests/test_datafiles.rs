@@ -11,8 +11,8 @@ use common::{bids_example, ingest};
 async fn scans_includes_non_nifti_and_pseudo_datafiles() -> anyhow::Result<()> {
     let eeg = ingest(bids_example("eeg_matchingpennies")).await?;
     let n_eeg: i64 = eeg.conn.query_row(
-        "SELECT COUNT(*) FROM scans \
-         WHERE datatype = 'eeg' AND suffix = 'eeg' AND file_path LIKE '%_eeg.vhdr'",
+        "SELECT COUNT(*) FROM all_files \
+         WHERE kind = 'data' AND datatype = 'eeg' AND suffix = 'eeg' AND file_path LIKE '%_eeg.vhdr'",
         [],
         |r| r.get(0),
     )?;
@@ -23,8 +23,8 @@ async fn scans_includes_non_nifti_and_pseudo_datafiles() -> anyhow::Result<()> {
 
     let meg = ingest(bids_example("ds000246")).await?;
     let n_meg: i64 = meg.conn.query_row(
-        "SELECT COUNT(*) FROM scans \
-         WHERE datatype = 'meg' AND suffix = 'meg' AND file_path LIKE '%_meg.ds'",
+        "SELECT COUNT(*) FROM all_files \
+         WHERE kind = 'data' AND datatype = 'meg' AND suffix = 'meg' AND file_path LIKE '%_meg.ds'",
         [],
         |r| r.get(0),
     )?;
@@ -43,7 +43,7 @@ async fn pseudofile_column_and_no_components() -> anyhow::Result<()> {
 
     // The `.ds` MEG directory is one scan, marked `pseudofile = true`.
     let ds_pseudo: i64 = meg.conn.query_row(
-        "SELECT COUNT(*) FROM scans WHERE file_path LIKE '%_meg.ds' AND pseudofile",
+        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND file_path LIKE '%_meg.ds' AND pseudofile",
         [],
         |r| r.get(0),
     )?;
@@ -54,7 +54,7 @@ async fn pseudofile_column_and_no_components() -> anyhow::Result<()> {
 
     // No component *inside* a `.ds` directory is indexed.
     let components: i64 = meg.conn.query_row(
-        "SELECT COUNT(*) FROM scans WHERE file_path LIKE '%.ds/%'",
+        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND file_path LIKE '%.ds/%'",
         [],
         |r| r.get(0),
     )?;
@@ -66,7 +66,7 @@ async fn pseudofile_column_and_no_components() -> anyhow::Result<()> {
     // A regular NIfTI scan is not a pseudo-file.
     let mri = ingest(bids_example("ds001")).await?;
     let nii_pseudo: i64 = mri.conn.query_row(
-        "SELECT COUNT(*) FROM scans WHERE suffix = 'bold' AND pseudofile",
+        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND suffix = 'bold' AND pseudofile",
         [],
         |r| r.get(0),
     )?;

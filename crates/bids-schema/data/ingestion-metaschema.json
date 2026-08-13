@@ -2,24 +2,36 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://bidslake.dev/schemas/ingestion-metaschema.json",
   "title": "bidslake ingestion schema",
-  "description": "A bidslake-specific (not BIDS) schema that decides, for files already projected onto BIDS concepts, what bidslake does with each: read its contents into a data table, catalog it in the file registry, or ignore it. It selects with the BIDS selector-expression language over projected concepts (datatype/suffix/extension/…), and declares per-table policy for the data tables that readers populate. It replaces bidslake's previously-hardcoded read-vs-catalog logic (the `.tsv` gate, `.bval`/`.bvec` handling, recording/ordering rules).",
+  "description": "A bidslake-specific (not BIDS) schema that decides, for files already projected onto BIDS concepts, what bidslake does with each: read its contents into a data table, catalog it (registry row only), or ignore it \u2014 keeping it out of the registry entirely. It selects with the BIDS selector-expression language over projected concepts (datatype/suffix/extension/\u2026), and declares per-table policy for the data tables that readers populate. It replaces bidslake's previously-hardcoded read-vs-catalog logic (the `.tsv` gate, `.bval`/`.bvec` handling, recording/ordering rules).",
   "type": "object",
   "properties": {
-    "IngestionSchemaVersion": { "type": "string" },
+    "IngestionSchemaVersion": {
+      "type": "string"
+    },
     "rules": {
       "type": "array",
       "description": "Ordered file-disposition rules; the first whose selectors all pass decides the file.",
-      "items": { "$ref": "#/$defs/rule" }
+      "items": {
+        "$ref": "#/$defs/rule"
+      }
     },
     "tables": {
       "type": "object",
-      "description": "Per-data-table policy (materialized concepts, row ordering), keyed by table name. Only tables that a reader populates need an entry; the file registry (`scans`) and BIDS entity tables are not configured here.",
-      "patternProperties": { "^[a-zA-Z0-9_]+$": { "$ref": "#/$defs/tablePolicy" } },
+      "description": "Per-data-table policy (materialized concepts, row ordering), keyed by table name. Only tables that a reader populates need an entry; the file registry (`file_registry`, surfaced as the `all_files` view) and BIDS entity tables are not configured here.",
+      "patternProperties": {
+        "^[a-zA-Z0-9_]+$": {
+          "$ref": "#/$defs/tablePolicy"
+        }
+      },
       "additionalProperties": false
     }
   },
-  "required": ["IngestionSchemaVersion"],
-  "patternProperties": { "^x_": {} },
+  "required": [
+    "IngestionSchemaVersion"
+  ],
+  "patternProperties": {
+    "^x_": {}
+  },
   "unevaluatedProperties": false,
   "$defs": {
     "rule": {
@@ -27,7 +39,9 @@
       "properties": {
         "selectors": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "description": "BIDS selector expressions over the file's projected concepts; all must pass for the rule to apply."
         },
         "disposition": {
@@ -39,17 +53,23 @@
             },
             {
               "const": "catalog",
-              "description": "Record the file as one row — its path plus projected BIDS concepts — in the standard file registry (`scans`, surfaced as the `files` view): the same registry populated for ordinary BIDS files, created even when no adapter is used. Contents are NOT parsed; the file stays on disk. This is how non-tabular data files (images, surfaces, `recon-all.log`) become discoverable."
+              "description": "Record the file as one row \u2014 its identity plus what a term map projected \u2014 in the file registry (`file_registry`, surfaced with its BIDS concepts as the `all_files` view): the same registry populated for ordinary BIDS files, created even when no adapter is used. Contents are NOT parsed; the file stays on disk. This is how non-tabular data files (images, surfaces, `recon-all.log`) become discoverable."
             },
             {
               "const": "ignore",
-              "description": "Recognize the file but do nothing with it — neither read nor register it. The declarative way to exclude files (the role `.bidsignore` plays for BIDS tools): bidslake walks files a pipeline's `.bidsignore` hid, and `ignore` rules skip the ones that should stay out of the catalog."
+              "description": "Recognize the file but do nothing with it \u2014 neither read nor register it. The declarative way to exclude files (the role `.bidsignore` plays for BIDS tools): bidslake walks files a pipeline's `.bidsignore` hid, and `ignore` rules skip the ones that should stay out of the catalog."
             }
           ]
         },
-        "reader": { "type": "string", "description": "Reader name (required when disposition is `read`); validated against the compiled-in reader registry." }
+        "reader": {
+          "type": "string",
+          "description": "Reader name (required when disposition is `read`); validated against the compiled-in reader registry."
+        }
       },
-      "required": ["selectors", "disposition"],
+      "required": [
+        "selectors",
+        "disposition"
+      ],
       "additionalProperties": false
     },
     "tablePolicy": {
@@ -57,12 +77,14 @@
       "properties": {
         "concepts": {
           "type": "array",
-          "items": { "type": "string" },
-          "description": "BIDS concept names materialized as physical columns on this data table, populated from the projection (e.g. `sub`, `ses`, `hemi`, `parc`). Presence marks the table as materialized-concept rather than the virtual-regex-over-path columns used by registry/BIDS-native tables — required because a non-BIDS path doesn't encode entities in its name."
+          "items": {
+            "type": "string"
+          },
+          "description": "BIDS concept names materialized as physical columns on this data table, populated from the projection (e.g. `sub`, `ses`, `hemi`, `parc`). Presence marks the table as materialized-concept rather than the virtual-regex-over-path columns used by registry/BIDS-native tables \u2014 required because a non-BIDS path doesn't encode entities in its name."
         },
         "ordered": {
           "type": "boolean",
-          "description": "Whether the source row order is load-bearing and must be preserved (rows read sequentially). When false, rows carry no meaningful order and may be read in parallel. Follows the BIDS row-order proposal (bids-standard/bids-2-devel#98); consumers sort by a canonical column (e.g. `onset`) when needed, so no sort column is specified."
+          "description": "Whether the source row order is load-bearing and must be preserved (rows read sequentially, and the table gets a `row_idx` column recording each row's line index). When false, rows carry no meaningful order, may be read in parallel, and the table has **no** `row_idx` — a concurrent read fixes no order, so there is nothing to record, and an arbitrary label would only invite ordering by it. Follows the BIDS row-order proposal (bids-standard/bids-2-devel#98); consumers of an unordered table sort by a canonical column (e.g. `onset`), so no sort column is specified."
         },
         "undeclared": {
           "description": "What this table does with source columns the schema does not declare. Table-wide, so it decides the table's shape: a `catalog` table has no `other_data` column at all. For a table holding more than one class of file, scope the policy with `undeclaredWhen` instead.",
@@ -73,14 +95,23 @@
             },
             {
               "const": "catalog",
-              "description": "Do not store undeclared columns. The file is NOT parsed away — it stays on disk and stays in `tabular_files`, whose `file_path` is the authoritative record of its full column set, and the names encountered are collected into `tabular_undeclared_columns`. For sources whose undeclared columns dwarf the declared ones (fMRIPrep confounds carry ~1,800 columns against ~13 declared)."
+              "description": "Do not store undeclared columns. The file is NOT parsed away \u2014 it stays on disk and stays in `file_registry`, whose `file_path` is the authoritative record of its full column set, and the names encountered are collected into `tabular_undeclared_columns`. For sources whose undeclared columns dwarf the declared ones (fMRIPrep confounds carry ~1,800 columns against ~13 declared)."
             }
           ]
         },
         "undeclaredWhen": {
           "type": "array",
-          "description": "Per-file `undeclared` policy, for tables that hold more than one class of file — `sidecars` above all, which is one table for every file in the catalog, so a table-wide flag would strip custom metadata from all raw BIDS to reach one derivative's sidecars. First matching entry wins; falls back to `undeclared`, then to `store`. Does not affect the table's shape: a table scoping its policy per file still gets an `other_data` column, since some of its files will fill it.",
-          "items": { "$ref": "#/$defs/scopedUndeclared" }
+          "description": "Per-file `undeclared` policy, for tables that hold more than one class of file \u2014 `sidecars` above all, which is one table for every file in the catalog, so a table-wide flag would strip custom metadata from all raw BIDS to reach one derivative's sidecars. First matching entry wins; falls back to `undeclared`, then to `store`. Does not affect the table's shape: a table scoping its policy per file still gets an `other_data` column, since some of its files will fill it.",
+          "items": {
+            "$ref": "#/$defs/scopedUndeclared"
+          }
+        },
+        "ignoreKeys": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Source keys this table never stores, by name \u2014 the key-level counterpart of the `ignore` disposition. Dropped as the JSON is parsed, before anything reads the metadata, so an ignored key costs nothing to merge, store, or hold in memory, and it applies whether or not the key has a declared column. For a converter that attaches something large and non-BIDS to otherwise ordinary metadata (dcmstack's DcmMeta writes per-slice DICOM dumps under `global` and `time`, megabytes per sidecar), `undeclared: catalog` is the wrong shape: it would discard every other custom field along with it. Honoured on the `sidecars` table only: it acts at the JSON parse, and `sidecars` is the table fed from parsed JSON. Naming it on another table validates but does nothing \u2014 for a tabular table, the column-level dial is `undeclared`."
         }
       },
       "additionalProperties": false
@@ -90,12 +121,19 @@
       "properties": {
         "selectors": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "description": "BIDS selector expressions over the file's projected concepts; all must pass for this policy to apply."
         },
-        "undeclared": { "$ref": "#/$defs/tablePolicy/properties/undeclared" }
+        "undeclared": {
+          "$ref": "#/$defs/tablePolicy/properties/undeclared"
+        }
       },
-      "required": ["selectors", "undeclared"],
+      "required": [
+        "selectors",
+        "undeclared"
+      ],
       "additionalProperties": false
     }
   }

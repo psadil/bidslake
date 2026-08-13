@@ -422,6 +422,157 @@ mod tests {
         );
     }
 
+    /// A census over a real `recon-all` subject established that the specific mappings above
+    /// reach about a third of the tree; the rest is whole subtrees, not edge cases. Anything
+    /// this map leaves unclassified is invisible to concept queries *and* raises `NotIncluded`
+    /// in `bids-validator-rs` (`rules::files::term_map_recognizes`), so recognition — not
+    /// projection — is what a subtree catch-all is for. One path per subtree that was missed,
+    /// so a narrowing shows up here rather than on a user's tree.
+    #[test]
+    fn every_recon_all_subtree_is_recognized() {
+        let tm = fs();
+        for path in [
+            // label/: only *.ctab and ?h.*.annot were covered, and .label is the bulk of it.
+            "bert/label/lh.cortex.label",
+            "bert/label/lh.BA1_exvivo.thresh.label",
+            "bert/label/aparc.annot.ctab",
+            // stats/: the parc alternation named aparc*/BA_exvivo* only.
+            "bert/stats/sclimbic.stats",
+            "bert/stats/lh.curv.stats",
+            "bert/stats/synthseg.vol.csv",
+            // mri/: both mappings required a direct child ending in .mgz.
+            "bert/mri/orig/001.mgz",
+            "bert/mri/transforms/talairach.xfm",
+            "bert/mri/transforms/synthmorph.mni305/log/run.log",
+            "bert/mri/samseg/samseg.fs.stats",
+            "bert/mri/wm1.txt",
+            // surf/: the mapping required a ?h. prefix.
+            "bert/surf/autodet.gw.stats.lh.dat",
+            // Bookkeeping subtrees, recognized but projecting nothing.
+            "bert/scripts/recon-all.log",
+            "bert/scripts/log/label-cortex.lh.log",
+            "bert/touch/wmsegment.touch",
+            "bert/tmp/filled.edits.txt",
+            "bert/trash/anything",
+            "bert/README.txt",
+            // The mirrored-hemisphere subtree, whose data half is cataloged like the
+            // top-level one and whose bookkeeping half is only recognized.
+            "bert/xhemi/surf/lh.area",
+            "bert/xhemi/mri/transforms/talairach.xfm",
+            "bert/xhemi/label/lh.aparc.annot",
+            "bert/xhemi/scripts/recon-all.done",
+            "bert/xhemi/touch/talairach.touch",
+        ] {
+            let f = tm
+                .classify(path)
+                .unwrap_or_else(|| panic!("unrecognized: {path}"));
+            // The subject must survive every mapping: it is what `scans.sub` projects from,
+            // and what the participants stub is synthesized from.
+            assert_eq!(f.get("sub"), Some("bert"), "{path}");
+        }
+    }
+
+    /// A catch-all states `datatype` but never `suffix`, because `suffix` is what the
+    /// ingestion fragment dispatches a *reader* on (`data/ingestion/freesurfer.json` routes
+    /// `segstats`/`parcstats` to `fs_stats`). Claiming `segstats` for every `stats/*.stats`
+    /// would send files like `sclimbic.stats` through that reader into `freesurfer_aseg` with
+    /// no `seg` to tell them apart. Recognition is the catch-all's job; reading more stats
+    /// families needs a `seg` capture per family and is tracked separately.
+    #[test]
+    fn catch_alls_claim_no_suffix_so_no_reader_is_dispatched() {
+        let tm = fs();
+        for path in [
+            "bert/stats/sclimbic.stats",
+            "bert/stats/qa.stats",
+            "bert/stats/lh.curv.stats",
+            "bert/label/lh.cortex.label",
+            "bert/mri/wm1.txt",
+            "bert/surf/autodet.gw.stats.lh.dat",
+        ] {
+            let f = tm.classify(path).expect(path);
+            assert_eq!(f.datatype.as_deref(), Some("anat"), "{path}");
+            assert_eq!(f.suffix, None, "{path}");
+        }
+    }
+
+    /// A real `SUBJECTS_DIR` holds FreeSurfer's shipped template subjects beside the study's
+    /// own — `fsaverage` and friends. They look exactly like a subject directory, so the
+    /// subject-capturing mappings would bind `sub = "fsaverage"`, catalog the template as study
+    /// data and mint a participant for it. The regex crate has no lookaround, so an earlier
+    /// mapping claims them instead: recognized (no validator noise) with nothing projected.
+    #[test]
+    fn template_subjects_are_recognized_but_not_participants() {
+        let tm = fs();
+        for path in [
+            "fsaverage/label/lh.PALS_B12_Brodmann.annot",
+            "fsaverage/mri/aseg.mgz",
+            "fsaverage5/surf/lh.white",
+            "fsaverage_sym/stats/aseg.stats",
+            "cvs_avg35_inMNI152/mri/norm.mgz",
+            "lh.EC_average/mri/T1.mgz",
+        ] {
+            let f = tm
+                .classify(path)
+                .unwrap_or_else(|| panic!("unrecognized: {path}"));
+            assert_eq!(f.get("sub"), None, "{path}");
+            assert_eq!(f.datatype, None, "{path}");
+            assert_eq!(f.suffix, None, "{path}");
+        }
+        // A study subject whose label merely starts with the same letters is unaffected.
+        let real = tm
+            .classify("fsaverageStudy01/mri/aseg.mgz")
+            .expect("subject");
+        assert_eq!(real.get("sub"), Some("fsaverageStudy01"));
+    }
+
+    /// The subtree catch-alls must not claim concepts they cannot know. A log or a touch file
+    /// is not anatomical data, so it is recognized with nothing projected — the distinction
+    /// `docs/adr/0002` §12 draws for catch-alls.
+    #[test]
+    fn bookkeeping_subtrees_project_no_concepts() {
+        let tm = fs();
+        for path in [
+            "bert/scripts/recon-all.log",
+            "bert/touch/wmsegment.touch",
+            "bert/xhemi/scripts/recon-all.done",
+            "bert/README.txt",
+        ] {
+            let f = tm.classify(path).expect(path);
+            assert_eq!(f.datatype, None, "{path}");
+            assert_eq!(f.suffix, None, "{path}");
+        }
+        // ...while `xhemi`'s data half is anat, like the top-level tree it mirrors.
+        for path in ["bert/xhemi/surf/lh.area", "bert/xhemi/mri/aparc+aseg.mgz"] {
+            let f = tm.classify(path).expect(path);
+            assert_eq!(f.datatype.as_deref(), Some("anat"), "{path}");
+        }
+    }
+
+    /// Adding the catch-alls must not shadow the mappings that carry concepts. `RegexSet`
+    /// yields the lowest matching index, so this pins the ordering the file depends on.
+    #[test]
+    fn specific_mappings_still_win_over_the_new_catch_alls() {
+        let tm = fs();
+        let seg = tm.classify("bert/stats/aseg.stats").expect("aseg");
+        assert_eq!(seg.get("seg"), Some("aseg"));
+        assert_eq!(seg.suffix.as_deref(), Some("segstats"));
+
+        let parc = tm.classify("bert/stats/lh.aparc.stats").expect("aparc");
+        assert_eq!(parc.get("parc"), Some("aparc"));
+        assert_eq!(parc.suffix.as_deref(), Some("parcstats"));
+
+        let dseg = tm.classify("bert/mri/wmparc.mgz").expect("wmparc");
+        assert_eq!(dseg.get("seg"), Some("wmparc"));
+        assert_eq!(dseg.suffix.as_deref(), Some("dseg"));
+
+        let ctab = tm.classify("bert/label/aparc.annot.ctab").expect("ctab");
+        assert_eq!(ctab.suffix.as_deref(), Some("fslabels"));
+
+        // A hemisphere surface keeps `hemi` rather than falling to the `surf/` catch-all.
+        let surf = tm.classify("bert/surf/lh.thickness").expect("surf");
+        assert_eq!(surf.get("hemi"), Some("lh"));
+    }
+
     /// The set drives DDL (which concept columns consult the projection), so it must
     /// cover literal `Entities`, named capture groups, and `Concepts` alike — and
     /// stay tight, since every member costs a `COALESCE` on read.

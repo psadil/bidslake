@@ -11,6 +11,16 @@ resolver = "3"
 edition = "2024"
 version = "0.1.0"
 
+# Release builds carry line tables so a sampling profiler (`samply record` on
+# macOS, `perf record -g` on Linux) can attribute time to source lines. `debug = 1`
+# rather than `2`: line tables are all a sampler needs, and full debuginfo
+# meaningfully lengthens the link step — which matters here because `duckdb` is
+# built from bundled source. On macOS, `unpacked` skips the `dsymutil` pass on
+# every relink.
+[profile.release]
+debug = 1
+split-debuginfo = "unpacked"
+
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

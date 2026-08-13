@@ -100,7 +100,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from polars import DataFrame
 from upath import UPath
 
-from ._sql import quote_ident
+from ._sql import DATAFILES, quote_ident
 from .file import BidsFile
 from .paths import to_local_path
 from .schema._generated import Entity, GetFilters
@@ -120,8 +120,17 @@ class FileInputOf[F: Mapping[str, Any], E: str]:
     NULL`` (how a native-space image is distinguished from its ``space-*``
     resamplings).
 
-    ``dataset_id`` scopes the search to one dataset; ``None`` searches them all,
-    which is usually what you want when a study is one catalog of several datasets.
+    ``dataset_id`` scopes the search: one id, several, or ``None`` to search them
+    all. A sequence is for a study sharded across datasets — one processing run per
+    subject means one dataset per subject, so the FreeSurfer trees are
+    ``sub-01-freesurfer``, ``sub-02-freesurfer``, … rather than one ``freesurfer``.
+
+    Scoping is often unnecessary, and leaving it ``None`` is usually right: ``join``
+    already narrows an input to its unit, and an input that then matches more than
+    one file is reported as *ambiguous* rather than guessed. Reach for a scope when
+    the join alone genuinely is not enough — two versions of the same derivative in
+    one catalog, say — because naming ids couples the binding to a particular
+    catalog's contents.
 
     The type parameters name the *vocabulary* the filters are checked against —
     see :class:`FileInput` below, which pins them to this build's BIDS schema.
@@ -129,8 +138,8 @@ class FileInputOf[F: Mapping[str, Any], E: str]:
 
     join: tuple[E, ...]
     where: F
-    dataset_id: str | None = None
-    table: str = "scans"
+    dataset_id: str | Sequence[str] | None = None
+    table: str = DATAFILES
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -138,8 +147,12 @@ class TableInputOf[E: str]:
     """A slice of an ingested table, resolved per unit.
 
     For the inputs that are not files at all — a few columns of a confounds table,
-    the events for a run. ``order_by`` matters whenever row order is load-bearing
-    (``row_idx`` preserves the original TSV order).
+    the events for a run. ``order_by`` matters whenever row order is load-bearing.
+
+    Order by ``row_idx`` for a table that has it: the column exists exactly on the tables
+    whose source line order is meaningful (recordings, positional ``*timeseries.tsv``), and
+    there it reproduces that order. Tables declared order-insensitive have no ``row_idx`` —
+    ``events`` is the one BIDS table in that group, and its rows are addressed by ``onset``.
     """
 
     join: tuple[E, ...]
@@ -238,7 +251,7 @@ class BindingOf[F: Mapping[str, Any], E: str]:
     anchor: F
     key: tuple[E, ...]
     inputs: Mapping[str, InputOf[F, E]]
-    table: str = "scans"
+    table: str = DATAFILES
 
 
 # The vocabulary a binding is checked against is the catalog's, not the library's:
@@ -276,11 +289,58 @@ class Binding(BindingOf[GetFilters, Entity]):
 type Input = InputOf[GetFilters, Entity]
 
 
+def _named_datasets(scope: str | Sequence[str] | None) -> tuple[str, ...]:
+    """The dataset ids a scope names, as a tuple. A bare `str` is one name, not four
+    characters — which is the bug a plain `tuple(scope)` would introduce."""
+    if scope is None:
+        return ()
+    return (scope,) if isinstance(scope, str) else tuple(scope)
+
+
+def _check_scopes(lake: BidsLake, binding: BindingOf[Any, Any]) -> None:
+    """Reject a `dataset_id` naming a dataset the catalog does not have.
+
+    Checked up front rather than after resolution, because a scope can be *partly*
+    wrong: `["ds001", "typo"]` still resolves from `ds001`, so a late check sees a
+    working input and the misspelled half is silently dropped from the search. Ids
+    are free text, and a study indexed one subject at a time has one dataset per
+    subject, so a name that looks obvious is often not the one in the catalog.
+    """
+    known = _dataset_ids(lake)
+    for name, spec in binding.inputs.items():
+        if not isinstance(spec, FileInputOf):
+            continue
+        absent = sorted(set(_named_datasets(spec.dataset_id)) - known)
+        if not absent:
+            continue
+        msg = (
+            f"input {name!r} names dataset(s) {', '.join(map(repr, absent))}, which "
+            f"are not in this catalog. It holds: {', '.join(sorted(known)) or '(none)'}. "
+            f"Dataset ids are free text — a study indexed one subject at a time has one "
+            f"dataset per subject — so either name them all, or drop `dataset_id` and "
+            f"let the join on {list(spec.join)} scope the input."
+        )
+        raise ValueError(msg)
+
+
+def _dataset_ids(lake: BidsLake) -> set[str]:
+    """Every `dataset_id` in the catalog, for naming what a bad scope could have meant.
+
+    From `dataset_roots` rather than the file registry: a dataset is registered when it is
+    named, so this holds even for one indexed from a root that turned out to be empty —
+    which is exactly the catalog a misspelled scope is most likely to be pointed at.
+    """
+    return set(lake._query("SELECT DISTINCT dataset_id FROM dataset_roots", [])["dataset_id"])
+
+
 def _check_columns(lake: BidsLake, table: str, names: Sequence[str], what: str) -> None:
     """Fail before any query runs, naming the table — a missing join entity is a
     typo far more often than it is a real absence, and the SQL error for it is
     unreadable."""
-    cols = lake.columns(table)
+    # The reachable columns, not the stored ones: a file-keyed table's BIDS concepts live
+    # on the registry and are joined in (docs/adr/0006), so joining on `sub` is legal
+    # against `events` even though `events` does not store it.
+    cols = lake._filter_columns(table)
     missing = [n for n in names if n not in cols]
     if missing:
         msg = f"{what}: column(s) {missing} not in table {table!r}; available: {sorted(cols)}"
@@ -289,7 +349,7 @@ def _check_columns(lake: BidsLake, table: str, names: Sequence[str], what: str) 
 
 def _index_files(
     lake: BidsLake, name: str, spec: FileInputOf[Any, Any]
-) -> dict[tuple[Any, ...], list[tuple[str, str]]]:
+) -> dict[tuple[Any, ...], list[tuple[str, str, str]]]:
     """Every candidate for one file input, bucketed by its join key.
 
     One query for the whole study, not one per unit: the join happens here, in a
@@ -302,15 +362,17 @@ def _index_files(
     if spec.dataset_id is not None:
         where["dataset_id"] = spec.dataset_id
     clause, params = lake._compile_filters(spec.table, where)
-    cols = ", ".join(quote_ident(c) for c in (*spec.join, "dataset_id", "file_path"))
-    sql = f"SELECT {cols} FROM {quote_ident(spec.table)}"
+    # `root_uri` travels with the row: a dataset may span several ingest roots, and which
+    # one a file came from is what says where to open it (docs/adr/0005).
+    cols = ", ".join(quote_ident(c) for c in (*spec.join, "dataset_id", "root_uri", "file_path"))
+    sql = f"SELECT {cols} FROM {lake._relation(spec.table)}"
     if clause:
         sql += f" WHERE {clause}"
 
-    index: dict[tuple[Any, ...], list[tuple[str, str]]] = {}
+    index: dict[tuple[Any, ...], list[tuple[str, str, str]]] = {}
     for row in lake._query(sql, params).iter_rows(named=True):
         key = tuple(row[c] for c in spec.join)
-        index.setdefault(key, []).append((row["dataset_id"], row["file_path"]))
+        index.setdefault(key, []).append((row["dataset_id"], row["root_uri"], row["file_path"]))
     return index
 
 
@@ -322,7 +384,7 @@ def _index_table(
     if spec.order_by is not None:
         _check_columns(lake, spec.table, [spec.order_by], f"input {name!r} order_by")
     select = ", ".join(quote_ident(c) for c in (*spec.join, *spec.columns))
-    sql = f"SELECT {select} FROM {quote_ident(spec.table)}"
+    sql = f"SELECT {select} FROM {lake._relation(spec.table)}"
     if spec.order_by is not None:
         sql += f" ORDER BY {quote_ident(spec.order_by)}"
 
@@ -360,6 +422,8 @@ def resolve(lake: BidsLake, binding: BindingOf[Any, Any]) -> list[Unit]:
             )
             raise KeyError(msg)
 
+    _check_scopes(lake, binding)
+
     file_specs = {n: s for n, s in binding.inputs.items() if isinstance(s, FileInputOf)}
     table_specs = {n: s for n, s in binding.inputs.items() if isinstance(s, TableInputOf)}
     file_index = {n: _index_files(lake, n, s) for n, s in file_specs.items()}
@@ -374,8 +438,8 @@ def resolve(lake: BidsLake, binding: BindingOf[Any, Any]) -> list[Unit]:
         for name, spec in file_specs.items():
             hits = file_index[name].get(tuple(anchor.entities.get(k) for k in spec.join), [])
             if len(hits) == 1:
-                dataset_id, file_path = hits[0]
-                resolved[name] = lake.resolve(dataset_id, file_path)
+                dataset_id, root_uri, file_path = hits[0]
+                resolved[name] = lake.resolve(dataset_id, file_path, root_uri)
             else:
                 unresolved.append(
                     Unresolved(name, len(hits), "missing" if not hits else "ambiguous")
@@ -398,11 +462,11 @@ def resolve(lake: BidsLake, binding: BindingOf[Any, Any]) -> list[Unit]:
             )
         )
 
-    _check_productive(binding, units)
+    _check_productive(lake, binding, units)
     return units
 
 
-def _check_productive(binding: BindingOf[Any, Any], units: list[Unit]) -> None:
+def _check_productive(lake: BidsLake, binding: BindingOf[Any, Any], units: list[Unit]) -> None:
     """Refuse a binding that resolves *nothing*, which is never incompleteness.
 
     Per-unit gaps are data — that is the whole design — but two shapes are not:
@@ -436,6 +500,9 @@ def _check_productive(binding: BindingOf[Any, Any], units: list[Unit]) -> None:
         if matched != {0}:
             continue
         if isinstance(spec, FileInputOf):
+            # Any named dataset exists — `_check_scopes` ran first — so the scope is
+            # still worth printing: the filter can match nothing merely because it was
+            # narrowed to datasets that happen not to hold this kind of file.
             what = f"filter {dict(spec.where)}"
             if spec.dataset_id is not None:
                 what += f" in dataset {spec.dataset_id!r}"

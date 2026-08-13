@@ -13,10 +13,11 @@ async fn channels_association_from_non_nifti_eeg_source() -> anyhow::Result<()> 
     let db = ingest(bids_example("eeg_matchingpennies")).await?;
 
     let channels: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM file_associations \
-         WHERE association_type = 'channels' \
-           AND source_file_path LIKE '%_eeg.vhdr' \
-           AND target_file_path LIKE '%_channels.tsv'",
+        "SELECT COUNT(*) FROM file_associations a \
+         JOIN all_files src ON src.file_id = a.source_file_id \
+         WHERE a.association_type = 'channels' \
+           AND src.file_path LIKE '%_eeg.vhdr' \
+           AND a.target_file_path LIKE '%_channels.tsv'",
         [],
         |r| r.get(0),
     )?;
@@ -35,10 +36,11 @@ async fn channels_association_from_meg_pseudo_file() -> anyhow::Result<()> {
     let db = ingest(bids_example("ds000246")).await?;
 
     let channels: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM file_associations \
-         WHERE association_type = 'channels' \
-           AND source_file_path LIKE '%_meg.ds' \
-           AND target_file_path LIKE '%_channels.tsv'",
+        "SELECT COUNT(*) FROM file_associations a \
+         JOIN all_files src ON src.file_id = a.source_file_id \
+         WHERE a.association_type = 'channels' \
+           AND src.file_path LIKE '%_meg.ds' \
+           AND a.target_file_path LIKE '%_channels.tsv'",
         [],
         |r| r.get(0),
     )?;

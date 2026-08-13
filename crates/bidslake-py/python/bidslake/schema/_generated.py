@@ -65,12 +65,13 @@ class GetFilters(TypedDict, total=False):
 
 
 COLUMNS: dict[str, dict[str, str]] = {
-    "asl_context": {
+    "all_files": {
+        "file_id": "HUGEINT",
         "dataset_id": "VARCHAR",
+        "root_uri": "VARCHAR",
         "file_path": "VARCHAR",
-        "row_idx": "BIGINT",
-        "volume_type": "VARCHAR",
-        "other_data": "JSON",
+        "kind": "VARCHAR",
+        "status": "VARCHAR",
         "acq": "VARCHAR",
         "atlas": "VARCHAR",
         "ce": "VARCHAR",
@@ -112,55 +113,20 @@ COLUMNS: dict[str, dict[str, str]] = {
         "pseudofile": "BOOLEAN",
         "modality": "VARCHAR",
     },
+    "asl_context": {
+        "file_id": "HUGEINT",
+        "row_idx": "BIGINT",
+        "volume_type": "VARCHAR",
+        "other_data": "JSON",
+    },
     "behavioral": {
-        "dataset_id": "VARCHAR",
-        "file_path": "VARCHAR",
+        "file_id": "HUGEINT",
         "row_idx": "BIGINT",
         "HED": "VARCHAR",
         "response_time": "DOUBLE",
         "stim_file": "VARCHAR",
         "trial_type": "VARCHAR",
         "other_data": "JSON",
-        "acq": "VARCHAR",
-        "atlas": "VARCHAR",
-        "ce": "VARCHAR",
-        "chunk": "VARCHAR",
-        "cohort": "VARCHAR",
-        "den": "VARCHAR",
-        "desc": "VARCHAR",
-        "dir": "VARCHAR",
-        "echo": "VARCHAR",
-        "flip": "VARCHAR",
-        "hemi": "VARCHAR",
-        "inv": "VARCHAR",
-        "label": "VARCHAR",
-        "mod": "VARCHAR",
-        "mt": "VARCHAR",
-        "nuc": "VARCHAR",
-        "part": "VARCHAR",
-        "proc": "VARCHAR",
-        "rec": "VARCHAR",
-        "recording": "VARCHAR",
-        "res": "VARCHAR",
-        "run": "VARCHAR",
-        "sample": "VARCHAR",
-        "scale": "VARCHAR",
-        "seg": "VARCHAR",
-        "ses": "VARCHAR",
-        "space": "VARCHAR",
-        "split": "VARCHAR",
-        "stain": "VARCHAR",
-        "sub": "VARCHAR",
-        "task": "VARCHAR",
-        "tpl": "VARCHAR",
-        "tracksys": "VARCHAR",
-        "trc": "VARCHAR",
-        "voi": "VARCHAR",
-        "datatype": "VARCHAR",
-        "suffix": "VARCHAR",
-        "extension": "VARCHAR",
-        "pseudofile": "BOOLEAN",
-        "modality": "VARCHAR",
     },
     "bidslake_meta": {
         "schema_version": "VARCHAR",
@@ -173,8 +139,7 @@ COLUMNS: dict[str, dict[str, str]] = {
         "overlay_digest": "VARCHAR",
     },
     "blood": {
-        "dataset_id": "VARCHAR",
-        "file_path": "VARCHAR",
+        "file_id": "HUGEINT",
         "row_idx": "BIGINT",
         "time": "DOUBLE",
         "hplc_recovery_fractions": "DOUBLE",
@@ -183,50 +148,9 @@ COLUMNS: dict[str, dict[str, str]] = {
         "plasma_radioactivity": "DOUBLE",
         "whole_blood_radioactivity": "DOUBLE",
         "other_data": "JSON",
-        "acq": "VARCHAR",
-        "atlas": "VARCHAR",
-        "ce": "VARCHAR",
-        "chunk": "VARCHAR",
-        "cohort": "VARCHAR",
-        "den": "VARCHAR",
-        "desc": "VARCHAR",
-        "dir": "VARCHAR",
-        "echo": "VARCHAR",
-        "flip": "VARCHAR",
-        "hemi": "VARCHAR",
-        "inv": "VARCHAR",
-        "label": "VARCHAR",
-        "mod": "VARCHAR",
-        "mt": "VARCHAR",
-        "nuc": "VARCHAR",
-        "part": "VARCHAR",
-        "proc": "VARCHAR",
-        "rec": "VARCHAR",
-        "recording": "VARCHAR",
-        "res": "VARCHAR",
-        "run": "VARCHAR",
-        "sample": "VARCHAR",
-        "scale": "VARCHAR",
-        "seg": "VARCHAR",
-        "ses": "VARCHAR",
-        "space": "VARCHAR",
-        "split": "VARCHAR",
-        "stain": "VARCHAR",
-        "sub": "VARCHAR",
-        "task": "VARCHAR",
-        "tpl": "VARCHAR",
-        "tracksys": "VARCHAR",
-        "trc": "VARCHAR",
-        "voi": "VARCHAR",
-        "datatype": "VARCHAR",
-        "suffix": "VARCHAR",
-        "extension": "VARCHAR",
-        "pseudofile": "BOOLEAN",
-        "modality": "VARCHAR",
     },
     "dataset_description": {
         "dataset_id": "VARCHAR",
-        "root_uri": "VARCHAR",
         "Name": "VARCHAR",
         "BIDSVersion": "VARCHAR",
         "HEDVersion": "VARCHAR",
@@ -265,57 +189,19 @@ COLUMNS: dict[str, dict[str, str]] = {
         "relation": "VARCHAR",
         "via_identity": "VARCHAR",
     },
-    "descriptions": {
+    "dataset_roots": {
         "dataset_id": "VARCHAR",
-        "file_path": "VARCHAR",
+        "root_uri": "VARCHAR",
+    },
+    "descriptions": {
+        "file_id": "HUGEINT",
         "row_idx": "BIGINT",
         "desc_id": "VARCHAR",
         "description": "VARCHAR",
         "other_data": "JSON",
-        "acq": "VARCHAR",
-        "atlas": "VARCHAR",
-        "ce": "VARCHAR",
-        "chunk": "VARCHAR",
-        "cohort": "VARCHAR",
-        "den": "VARCHAR",
-        "desc": "VARCHAR",
-        "dir": "VARCHAR",
-        "echo": "VARCHAR",
-        "flip": "VARCHAR",
-        "hemi": "VARCHAR",
-        "inv": "VARCHAR",
-        "label": "VARCHAR",
-        "mod": "VARCHAR",
-        "mt": "VARCHAR",
-        "nuc": "VARCHAR",
-        "part": "VARCHAR",
-        "proc": "VARCHAR",
-        "rec": "VARCHAR",
-        "recording": "VARCHAR",
-        "res": "VARCHAR",
-        "run": "VARCHAR",
-        "sample": "VARCHAR",
-        "scale": "VARCHAR",
-        "seg": "VARCHAR",
-        "ses": "VARCHAR",
-        "space": "VARCHAR",
-        "split": "VARCHAR",
-        "stain": "VARCHAR",
-        "sub": "VARCHAR",
-        "task": "VARCHAR",
-        "tpl": "VARCHAR",
-        "tracksys": "VARCHAR",
-        "trc": "VARCHAR",
-        "voi": "VARCHAR",
-        "datatype": "VARCHAR",
-        "suffix": "VARCHAR",
-        "extension": "VARCHAR",
-        "pseudofile": "BOOLEAN",
-        "modality": "VARCHAR",
     },
     "diffusion": {
-        "dataset_id": "VARCHAR",
-        "file_path": "VARCHAR",
+        "file_id": "HUGEINT",
         "volume_idx": "BIGINT",
         "bval": "DOUBLE",
         "bvec_x": "DOUBLE",
@@ -323,8 +209,7 @@ COLUMNS: dict[str, dict[str, str]] = {
         "bvec_z": "DOUBLE",
     },
     "eeg_channels": {
-        "dataset_id": "VARCHAR",
-        "file_path": "VARCHAR",
+        "file_id": "HUGEINT",
         "row_idx": "BIGINT",
         "name": "VARCHAR",
         "type": "VARCHAR",
@@ -338,50 +223,9 @@ COLUMNS: dict[str, dict[str, str]] = {
         "status": "VARCHAR",
         "status_description": "VARCHAR",
         "other_data": "JSON",
-        "acq": "VARCHAR",
-        "atlas": "VARCHAR",
-        "ce": "VARCHAR",
-        "chunk": "VARCHAR",
-        "cohort": "VARCHAR",
-        "den": "VARCHAR",
-        "desc": "VARCHAR",
-        "dir": "VARCHAR",
-        "echo": "VARCHAR",
-        "flip": "VARCHAR",
-        "hemi": "VARCHAR",
-        "inv": "VARCHAR",
-        "label": "VARCHAR",
-        "mod": "VARCHAR",
-        "mt": "VARCHAR",
-        "nuc": "VARCHAR",
-        "part": "VARCHAR",
-        "proc": "VARCHAR",
-        "rec": "VARCHAR",
-        "recording": "VARCHAR",
-        "res": "VARCHAR",
-        "run": "VARCHAR",
-        "sample": "VARCHAR",
-        "scale": "VARCHAR",
-        "seg": "VARCHAR",
-        "ses": "VARCHAR",
-        "space": "VARCHAR",
-        "split": "VARCHAR",
-        "stain": "VARCHAR",
-        "sub": "VARCHAR",
-        "task": "VARCHAR",
-        "tpl": "VARCHAR",
-        "tracksys": "VARCHAR",
-        "trc": "VARCHAR",
-        "voi": "VARCHAR",
-        "datatype": "VARCHAR",
-        "suffix": "VARCHAR",
-        "extension": "VARCHAR",
-        "pseudofile": "BOOLEAN",
-        "modality": "VARCHAR",
     },
     "eeg_electrodes": {
-        "dataset_id": "VARCHAR",
-        "file_path": "VARCHAR",
+        "file_id": "HUGEINT",
         "row_idx": "BIGINT",
         "name": "VARCHAR",
         "x": "DOUBLE",
@@ -391,50 +235,9 @@ COLUMNS: dict[str, dict[str, str]] = {
         "material": "VARCHAR",
         "type": "VARCHAR",
         "other_data": "JSON",
-        "acq": "VARCHAR",
-        "atlas": "VARCHAR",
-        "ce": "VARCHAR",
-        "chunk": "VARCHAR",
-        "cohort": "VARCHAR",
-        "den": "VARCHAR",
-        "desc": "VARCHAR",
-        "dir": "VARCHAR",
-        "echo": "VARCHAR",
-        "flip": "VARCHAR",
-        "hemi": "VARCHAR",
-        "inv": "VARCHAR",
-        "label": "VARCHAR",
-        "mod": "VARCHAR",
-        "mt": "VARCHAR",
-        "nuc": "VARCHAR",
-        "part": "VARCHAR",
-        "proc": "VARCHAR",
-        "rec": "VARCHAR",
-        "recording": "VARCHAR",
-        "res": "VARCHAR",
-        "run": "VARCHAR",
-        "sample": "VARCHAR",
-        "scale": "VARCHAR",
-        "seg": "VARCHAR",
-        "ses": "VARCHAR",
-        "space": "VARCHAR",
-        "split": "VARCHAR",
-        "stain": "VARCHAR",
-        "sub": "VARCHAR",
-        "task": "VARCHAR",
-        "tpl": "VARCHAR",
-        "tracksys": "VARCHAR",
-        "trc": "VARCHAR",
-        "voi": "VARCHAR",
-        "datatype": "VARCHAR",
-        "suffix": "VARCHAR",
-        "extension": "VARCHAR",
-        "pseudofile": "BOOLEAN",
-        "modality": "VARCHAR",
     },
     "emg_channels": {
-        "dataset_id": "VARCHAR",
-        "file_path": "VARCHAR",
+        "file_id": "HUGEINT",
         "row_idx": "BIGINT",
         "name": "VARCHAR",
         "type": "VARCHAR",
@@ -454,50 +257,9 @@ COLUMNS: dict[str, dict[str, str]] = {
         "status_description": "VARCHAR",
         "target_muscle": "VARCHAR",
         "other_data": "JSON",
-        "acq": "VARCHAR",
-        "atlas": "VARCHAR",
-        "ce": "VARCHAR",
-        "chunk": "VARCHAR",
-        "cohort": "VARCHAR",
-        "den": "VARCHAR",
-        "desc": "VARCHAR",
-        "dir": "VARCHAR",
-        "echo": "VARCHAR",
-        "flip": "VARCHAR",
-        "hemi": "VARCHAR",
-        "inv": "VARCHAR",
-        "label": "VARCHAR",
-        "mod": "VARCHAR",
-        "mt": "VARCHAR",
-        "nuc": "VARCHAR",
-        "part": "VARCHAR",
-        "proc": "VARCHAR",
-        "rec": "VARCHAR",
-        "recording": "VARCHAR",
-        "res": "VARCHAR",
-        "run": "VARCHAR",
-        "sample": "VARCHAR",
-        "scale": "VARCHAR",
-        "seg": "VARCHAR",
-        "ses": "VARCHAR",
-        "space": "VARCHAR",
-        "split": "VARCHAR",
-        "stain": "VARCHAR",
-        "sub": "VARCHAR",
-        "task": "VARCHAR",
-        "tpl": "VARCHAR",
-        "tracksys": "VARCHAR",
-        "trc": "VARCHAR",
-        "voi": "VARCHAR",
-        "datatype": "VARCHAR",
-        "suffix": "VARCHAR",
-        "extension": "VARCHAR",
-        "pseudofile": "BOOLEAN",
-        "modality": "VARCHAR",
     },
     "emg_electrodes": {
-        "dataset_id": "VARCHAR",
-        "file_path": "VARCHAR",
+        "file_id": "HUGEINT",
         "row_idx": "BIGINT",
         "name": "VARCHAR",
         "x": "DOUBLE",
@@ -509,51 +271,9 @@ COLUMNS: dict[str, dict[str, str]] = {
         "material": "VARCHAR",
         "type": "VARCHAR",
         "other_data": "JSON",
-        "acq": "VARCHAR",
-        "atlas": "VARCHAR",
-        "ce": "VARCHAR",
-        "chunk": "VARCHAR",
-        "cohort": "VARCHAR",
-        "den": "VARCHAR",
-        "desc": "VARCHAR",
-        "dir": "VARCHAR",
-        "echo": "VARCHAR",
-        "flip": "VARCHAR",
-        "hemi": "VARCHAR",
-        "inv": "VARCHAR",
-        "label": "VARCHAR",
-        "mod": "VARCHAR",
-        "mt": "VARCHAR",
-        "nuc": "VARCHAR",
-        "part": "VARCHAR",
-        "proc": "VARCHAR",
-        "rec": "VARCHAR",
-        "recording": "VARCHAR",
-        "res": "VARCHAR",
-        "run": "VARCHAR",
-        "sample": "VARCHAR",
-        "scale": "VARCHAR",
-        "seg": "VARCHAR",
-        "ses": "VARCHAR",
-        "space": "VARCHAR",
-        "split": "VARCHAR",
-        "stain": "VARCHAR",
-        "sub": "VARCHAR",
-        "task": "VARCHAR",
-        "tpl": "VARCHAR",
-        "tracksys": "VARCHAR",
-        "trc": "VARCHAR",
-        "voi": "VARCHAR",
-        "datatype": "VARCHAR",
-        "suffix": "VARCHAR",
-        "extension": "VARCHAR",
-        "pseudofile": "BOOLEAN",
-        "modality": "VARCHAR",
     },
     "events": {
-        "dataset_id": "VARCHAR",
-        "file_path": "VARCHAR",
-        "row_idx": "BIGINT",
+        "file_id": "HUGEINT",
         "onset": "DOUBLE",
         "duration": "DOUBLE",
         "HED": "VARCHAR",
@@ -562,56 +282,23 @@ COLUMNS: dict[str, dict[str, str]] = {
         "stim_file": "VARCHAR",
         "trial_type": "VARCHAR",
         "other_data": "JSON",
-        "acq": "VARCHAR",
-        "atlas": "VARCHAR",
-        "ce": "VARCHAR",
-        "chunk": "VARCHAR",
-        "cohort": "VARCHAR",
-        "den": "VARCHAR",
-        "desc": "VARCHAR",
-        "dir": "VARCHAR",
-        "echo": "VARCHAR",
-        "flip": "VARCHAR",
-        "hemi": "VARCHAR",
-        "inv": "VARCHAR",
-        "label": "VARCHAR",
-        "mod": "VARCHAR",
-        "mt": "VARCHAR",
-        "nuc": "VARCHAR",
-        "part": "VARCHAR",
-        "proc": "VARCHAR",
-        "rec": "VARCHAR",
-        "recording": "VARCHAR",
-        "res": "VARCHAR",
-        "run": "VARCHAR",
-        "sample": "VARCHAR",
-        "scale": "VARCHAR",
-        "seg": "VARCHAR",
-        "ses": "VARCHAR",
-        "space": "VARCHAR",
-        "split": "VARCHAR",
-        "stain": "VARCHAR",
-        "sub": "VARCHAR",
-        "task": "VARCHAR",
-        "tpl": "VARCHAR",
-        "tracksys": "VARCHAR",
-        "trc": "VARCHAR",
-        "voi": "VARCHAR",
-        "datatype": "VARCHAR",
-        "suffix": "VARCHAR",
-        "extension": "VARCHAR",
-        "pseudofile": "BOOLEAN",
-        "modality": "VARCHAR",
     },
     "file_associations": {
-        "dataset_id": "VARCHAR",
-        "source_file_path": "VARCHAR",
+        "source_file_id": "HUGEINT",
+        "target_file_id": "HUGEINT",
         "target_file_path": "VARCHAR",
         "association_type": "VARCHAR",
     },
-    "ieeg_channels": {
+    "file_registry": {
+        "file_id": "HUGEINT",
         "dataset_id": "VARCHAR",
+        "root_uri": "VARCHAR",
         "file_path": "VARCHAR",
+        "kind": "VARCHAR",
+        "status": "VARCHAR",
+    },
+    "ieeg_channels": {
+        "file_id": "HUGEINT",
         "row_idx": "BIGINT",
         "name": "VARCHAR",
         "type": "VARCHAR",
@@ -626,50 +313,9 @@ COLUMNS: dict[str, dict[str, str]] = {
         "status": "VARCHAR",
         "status_description": "VARCHAR",
         "other_data": "JSON",
-        "acq": "VARCHAR",
-        "atlas": "VARCHAR",
-        "ce": "VARCHAR",
-        "chunk": "VARCHAR",
-        "cohort": "VARCHAR",
-        "den": "VARCHAR",
-        "desc": "VARCHAR",
-        "dir": "VARCHAR",
-        "echo": "VARCHAR",
-        "flip": "VARCHAR",
-        "hemi": "VARCHAR",
-        "inv": "VARCHAR",
-        "label": "VARCHAR",
-        "mod": "VARCHAR",
-        "mt": "VARCHAR",
-        "nuc": "VARCHAR",
-        "part": "VARCHAR",
-        "proc": "VARCHAR",
-        "rec": "VARCHAR",
-        "recording": "VARCHAR",
-        "res": "VARCHAR",
-        "run": "VARCHAR",
-        "sample": "VARCHAR",
-        "scale": "VARCHAR",
-        "seg": "VARCHAR",
-        "ses": "VARCHAR",
-        "space": "VARCHAR",
-        "split": "VARCHAR",
-        "stain": "VARCHAR",
-        "sub": "VARCHAR",
-        "task": "VARCHAR",
-        "tpl": "VARCHAR",
-        "tracksys": "VARCHAR",
-        "trc": "VARCHAR",
-        "voi": "VARCHAR",
-        "datatype": "VARCHAR",
-        "suffix": "VARCHAR",
-        "extension": "VARCHAR",
-        "pseudofile": "BOOLEAN",
-        "modality": "VARCHAR",
     },
     "ieeg_electrodes": {
-        "dataset_id": "VARCHAR",
-        "file_path": "VARCHAR",
+        "file_id": "HUGEINT",
         "row_idx": "BIGINT",
         "name": "VARCHAR",
         "x": "DOUBLE",
@@ -684,50 +330,9 @@ COLUMNS: dict[str, dict[str, str]] = {
         "material": "VARCHAR",
         "type": "VARCHAR",
         "other_data": "JSON",
-        "acq": "VARCHAR",
-        "atlas": "VARCHAR",
-        "ce": "VARCHAR",
-        "chunk": "VARCHAR",
-        "cohort": "VARCHAR",
-        "den": "VARCHAR",
-        "desc": "VARCHAR",
-        "dir": "VARCHAR",
-        "echo": "VARCHAR",
-        "flip": "VARCHAR",
-        "hemi": "VARCHAR",
-        "inv": "VARCHAR",
-        "label": "VARCHAR",
-        "mod": "VARCHAR",
-        "mt": "VARCHAR",
-        "nuc": "VARCHAR",
-        "part": "VARCHAR",
-        "proc": "VARCHAR",
-        "rec": "VARCHAR",
-        "recording": "VARCHAR",
-        "res": "VARCHAR",
-        "run": "VARCHAR",
-        "sample": "VARCHAR",
-        "scale": "VARCHAR",
-        "seg": "VARCHAR",
-        "ses": "VARCHAR",
-        "space": "VARCHAR",
-        "split": "VARCHAR",
-        "stain": "VARCHAR",
-        "sub": "VARCHAR",
-        "task": "VARCHAR",
-        "tpl": "VARCHAR",
-        "tracksys": "VARCHAR",
-        "trc": "VARCHAR",
-        "voi": "VARCHAR",
-        "datatype": "VARCHAR",
-        "suffix": "VARCHAR",
-        "extension": "VARCHAR",
-        "pseudofile": "BOOLEAN",
-        "modality": "VARCHAR",
     },
     "meg_channels": {
-        "dataset_id": "VARCHAR",
-        "file_path": "VARCHAR",
+        "file_id": "HUGEINT",
         "row_idx": "BIGINT",
         "name": "VARCHAR",
         "type": "VARCHAR",
@@ -741,96 +346,14 @@ COLUMNS: dict[str, dict[str, str]] = {
         "status": "VARCHAR",
         "status_description": "VARCHAR",
         "other_data": "JSON",
-        "acq": "VARCHAR",
-        "atlas": "VARCHAR",
-        "ce": "VARCHAR",
-        "chunk": "VARCHAR",
-        "cohort": "VARCHAR",
-        "den": "VARCHAR",
-        "desc": "VARCHAR",
-        "dir": "VARCHAR",
-        "echo": "VARCHAR",
-        "flip": "VARCHAR",
-        "hemi": "VARCHAR",
-        "inv": "VARCHAR",
-        "label": "VARCHAR",
-        "mod": "VARCHAR",
-        "mt": "VARCHAR",
-        "nuc": "VARCHAR",
-        "part": "VARCHAR",
-        "proc": "VARCHAR",
-        "rec": "VARCHAR",
-        "recording": "VARCHAR",
-        "res": "VARCHAR",
-        "run": "VARCHAR",
-        "sample": "VARCHAR",
-        "scale": "VARCHAR",
-        "seg": "VARCHAR",
-        "ses": "VARCHAR",
-        "space": "VARCHAR",
-        "split": "VARCHAR",
-        "stain": "VARCHAR",
-        "sub": "VARCHAR",
-        "task": "VARCHAR",
-        "tpl": "VARCHAR",
-        "tracksys": "VARCHAR",
-        "trc": "VARCHAR",
-        "voi": "VARCHAR",
-        "datatype": "VARCHAR",
-        "suffix": "VARCHAR",
-        "extension": "VARCHAR",
-        "pseudofile": "BOOLEAN",
-        "modality": "VARCHAR",
     },
     "motion": {
-        "dataset_id": "VARCHAR",
-        "file_path": "VARCHAR",
+        "file_id": "HUGEINT",
         "row_idx": "BIGINT",
         "other_data": "JSON",
-        "acq": "VARCHAR",
-        "atlas": "VARCHAR",
-        "ce": "VARCHAR",
-        "chunk": "VARCHAR",
-        "cohort": "VARCHAR",
-        "den": "VARCHAR",
-        "desc": "VARCHAR",
-        "dir": "VARCHAR",
-        "echo": "VARCHAR",
-        "flip": "VARCHAR",
-        "hemi": "VARCHAR",
-        "inv": "VARCHAR",
-        "label": "VARCHAR",
-        "mod": "VARCHAR",
-        "mt": "VARCHAR",
-        "nuc": "VARCHAR",
-        "part": "VARCHAR",
-        "proc": "VARCHAR",
-        "rec": "VARCHAR",
-        "recording": "VARCHAR",
-        "res": "VARCHAR",
-        "run": "VARCHAR",
-        "sample": "VARCHAR",
-        "scale": "VARCHAR",
-        "seg": "VARCHAR",
-        "ses": "VARCHAR",
-        "space": "VARCHAR",
-        "split": "VARCHAR",
-        "stain": "VARCHAR",
-        "sub": "VARCHAR",
-        "task": "VARCHAR",
-        "tpl": "VARCHAR",
-        "tracksys": "VARCHAR",
-        "trc": "VARCHAR",
-        "voi": "VARCHAR",
-        "datatype": "VARCHAR",
-        "suffix": "VARCHAR",
-        "extension": "VARCHAR",
-        "pseudofile": "BOOLEAN",
-        "modality": "VARCHAR",
     },
     "motion_channels": {
-        "dataset_id": "VARCHAR",
-        "file_path": "VARCHAR",
+        "file_id": "HUGEINT",
         "row_idx": "BIGINT",
         "name": "VARCHAR",
         "component": "VARCHAR",
@@ -844,50 +367,9 @@ COLUMNS: dict[str, dict[str, str]] = {
         "status": "VARCHAR",
         "status_description": "VARCHAR",
         "other_data": "JSON",
-        "acq": "VARCHAR",
-        "atlas": "VARCHAR",
-        "ce": "VARCHAR",
-        "chunk": "VARCHAR",
-        "cohort": "VARCHAR",
-        "den": "VARCHAR",
-        "desc": "VARCHAR",
-        "dir": "VARCHAR",
-        "echo": "VARCHAR",
-        "flip": "VARCHAR",
-        "hemi": "VARCHAR",
-        "inv": "VARCHAR",
-        "label": "VARCHAR",
-        "mod": "VARCHAR",
-        "mt": "VARCHAR",
-        "nuc": "VARCHAR",
-        "part": "VARCHAR",
-        "proc": "VARCHAR",
-        "rec": "VARCHAR",
-        "recording": "VARCHAR",
-        "res": "VARCHAR",
-        "run": "VARCHAR",
-        "sample": "VARCHAR",
-        "scale": "VARCHAR",
-        "seg": "VARCHAR",
-        "ses": "VARCHAR",
-        "space": "VARCHAR",
-        "split": "VARCHAR",
-        "stain": "VARCHAR",
-        "sub": "VARCHAR",
-        "task": "VARCHAR",
-        "tpl": "VARCHAR",
-        "tracksys": "VARCHAR",
-        "trc": "VARCHAR",
-        "voi": "VARCHAR",
-        "datatype": "VARCHAR",
-        "suffix": "VARCHAR",
-        "extension": "VARCHAR",
-        "pseudofile": "BOOLEAN",
-        "modality": "VARCHAR",
     },
     "nirs_channels": {
-        "dataset_id": "VARCHAR",
-        "file_path": "VARCHAR",
+        "file_id": "HUGEINT",
         "row_idx": "BIGINT",
         "name": "VARCHAR",
         "type": "VARCHAR",
@@ -906,50 +388,9 @@ COLUMNS: dict[str, dict[str, str]] = {
         "wavelength_actual": "DOUBLE",
         "wavelength_emission_actual": "DOUBLE",
         "other_data": "JSON",
-        "acq": "VARCHAR",
-        "atlas": "VARCHAR",
-        "ce": "VARCHAR",
-        "chunk": "VARCHAR",
-        "cohort": "VARCHAR",
-        "den": "VARCHAR",
-        "desc": "VARCHAR",
-        "dir": "VARCHAR",
-        "echo": "VARCHAR",
-        "flip": "VARCHAR",
-        "hemi": "VARCHAR",
-        "inv": "VARCHAR",
-        "label": "VARCHAR",
-        "mod": "VARCHAR",
-        "mt": "VARCHAR",
-        "nuc": "VARCHAR",
-        "part": "VARCHAR",
-        "proc": "VARCHAR",
-        "rec": "VARCHAR",
-        "recording": "VARCHAR",
-        "res": "VARCHAR",
-        "run": "VARCHAR",
-        "sample": "VARCHAR",
-        "scale": "VARCHAR",
-        "seg": "VARCHAR",
-        "ses": "VARCHAR",
-        "space": "VARCHAR",
-        "split": "VARCHAR",
-        "stain": "VARCHAR",
-        "sub": "VARCHAR",
-        "task": "VARCHAR",
-        "tpl": "VARCHAR",
-        "tracksys": "VARCHAR",
-        "trc": "VARCHAR",
-        "voi": "VARCHAR",
-        "datatype": "VARCHAR",
-        "suffix": "VARCHAR",
-        "extension": "VARCHAR",
-        "pseudofile": "BOOLEAN",
-        "modality": "VARCHAR",
     },
     "nirs_optodes": {
-        "dataset_id": "VARCHAR",
-        "file_path": "VARCHAR",
+        "file_id": "HUGEINT",
         "row_idx": "BIGINT",
         "name": "VARCHAR",
         "type": "VARCHAR",
@@ -963,46 +404,6 @@ COLUMNS: dict[str, dict[str, str]] = {
         "template_y": "DOUBLE",
         "template_z": "DOUBLE",
         "other_data": "JSON",
-        "acq": "VARCHAR",
-        "atlas": "VARCHAR",
-        "ce": "VARCHAR",
-        "chunk": "VARCHAR",
-        "cohort": "VARCHAR",
-        "den": "VARCHAR",
-        "desc": "VARCHAR",
-        "dir": "VARCHAR",
-        "echo": "VARCHAR",
-        "flip": "VARCHAR",
-        "hemi": "VARCHAR",
-        "inv": "VARCHAR",
-        "label": "VARCHAR",
-        "mod": "VARCHAR",
-        "mt": "VARCHAR",
-        "nuc": "VARCHAR",
-        "part": "VARCHAR",
-        "proc": "VARCHAR",
-        "rec": "VARCHAR",
-        "recording": "VARCHAR",
-        "res": "VARCHAR",
-        "run": "VARCHAR",
-        "sample": "VARCHAR",
-        "scale": "VARCHAR",
-        "seg": "VARCHAR",
-        "ses": "VARCHAR",
-        "space": "VARCHAR",
-        "split": "VARCHAR",
-        "stain": "VARCHAR",
-        "sub": "VARCHAR",
-        "task": "VARCHAR",
-        "tpl": "VARCHAR",
-        "tracksys": "VARCHAR",
-        "trc": "VARCHAR",
-        "voi": "VARCHAR",
-        "datatype": "VARCHAR",
-        "suffix": "VARCHAR",
-        "extension": "VARCHAR",
-        "pseudofile": "BOOLEAN",
-        "modality": "VARCHAR",
     },
     "participants": {
         "dataset_id": "VARCHAR",
@@ -1017,56 +418,14 @@ COLUMNS: dict[str, dict[str, str]] = {
         "other_data": "JSON",
     },
     "phenotype": {
-        "dataset_id": "VARCHAR",
-        "file_path": "VARCHAR",
+        "file_id": "HUGEINT",
         "row_idx": "BIGINT",
         "participant_id": "VARCHAR",
         "HED": "VARCHAR",
         "other_data": "JSON",
-        "acq": "VARCHAR",
-        "atlas": "VARCHAR",
-        "ce": "VARCHAR",
-        "chunk": "VARCHAR",
-        "cohort": "VARCHAR",
-        "den": "VARCHAR",
-        "desc": "VARCHAR",
-        "dir": "VARCHAR",
-        "echo": "VARCHAR",
-        "flip": "VARCHAR",
-        "hemi": "VARCHAR",
-        "inv": "VARCHAR",
-        "label": "VARCHAR",
-        "mod": "VARCHAR",
-        "mt": "VARCHAR",
-        "nuc": "VARCHAR",
-        "part": "VARCHAR",
-        "proc": "VARCHAR",
-        "rec": "VARCHAR",
-        "recording": "VARCHAR",
-        "res": "VARCHAR",
-        "run": "VARCHAR",
-        "sample": "VARCHAR",
-        "scale": "VARCHAR",
-        "seg": "VARCHAR",
-        "ses": "VARCHAR",
-        "space": "VARCHAR",
-        "split": "VARCHAR",
-        "stain": "VARCHAR",
-        "sub": "VARCHAR",
-        "task": "VARCHAR",
-        "tpl": "VARCHAR",
-        "tracksys": "VARCHAR",
-        "trc": "VARCHAR",
-        "voi": "VARCHAR",
-        "datatype": "VARCHAR",
-        "suffix": "VARCHAR",
-        "extension": "VARCHAR",
-        "pseudofile": "BOOLEAN",
-        "modality": "VARCHAR",
     },
     "physio": {
-        "dataset_id": "VARCHAR",
-        "file_path": "VARCHAR",
+        "file_id": "HUGEINT",
         "row_idx": "BIGINT",
         "cardiac": "DOUBLE",
         "respiratory": "DOUBLE",
@@ -1076,100 +435,18 @@ COLUMNS: dict[str, dict[str, str]] = {
         "y_coordinate": "DOUBLE",
         "pupil_size": "DOUBLE",
         "other_data": "JSON",
-        "acq": "VARCHAR",
-        "atlas": "VARCHAR",
-        "ce": "VARCHAR",
-        "chunk": "VARCHAR",
-        "cohort": "VARCHAR",
-        "den": "VARCHAR",
-        "desc": "VARCHAR",
-        "dir": "VARCHAR",
-        "echo": "VARCHAR",
-        "flip": "VARCHAR",
-        "hemi": "VARCHAR",
-        "inv": "VARCHAR",
-        "label": "VARCHAR",
-        "mod": "VARCHAR",
-        "mt": "VARCHAR",
-        "nuc": "VARCHAR",
-        "part": "VARCHAR",
-        "proc": "VARCHAR",
-        "rec": "VARCHAR",
-        "recording": "VARCHAR",
-        "res": "VARCHAR",
-        "run": "VARCHAR",
-        "sample": "VARCHAR",
-        "scale": "VARCHAR",
-        "seg": "VARCHAR",
-        "ses": "VARCHAR",
-        "space": "VARCHAR",
-        "split": "VARCHAR",
-        "stain": "VARCHAR",
-        "sub": "VARCHAR",
-        "task": "VARCHAR",
-        "tpl": "VARCHAR",
-        "tracksys": "VARCHAR",
-        "trc": "VARCHAR",
-        "voi": "VARCHAR",
-        "datatype": "VARCHAR",
-        "suffix": "VARCHAR",
-        "extension": "VARCHAR",
-        "pseudofile": "BOOLEAN",
-        "modality": "VARCHAR",
     },
     "physio_events": {
-        "dataset_id": "VARCHAR",
-        "file_path": "VARCHAR",
+        "file_id": "HUGEINT",
         "row_idx": "BIGINT",
         "onset": "DOUBLE",
         "duration": "DOUBLE",
         "message": "VARCHAR",
         "trial_type": "VARCHAR",
         "other_data": "JSON",
-        "acq": "VARCHAR",
-        "atlas": "VARCHAR",
-        "ce": "VARCHAR",
-        "chunk": "VARCHAR",
-        "cohort": "VARCHAR",
-        "den": "VARCHAR",
-        "desc": "VARCHAR",
-        "dir": "VARCHAR",
-        "echo": "VARCHAR",
-        "flip": "VARCHAR",
-        "hemi": "VARCHAR",
-        "inv": "VARCHAR",
-        "label": "VARCHAR",
-        "mod": "VARCHAR",
-        "mt": "VARCHAR",
-        "nuc": "VARCHAR",
-        "part": "VARCHAR",
-        "proc": "VARCHAR",
-        "rec": "VARCHAR",
-        "recording": "VARCHAR",
-        "res": "VARCHAR",
-        "run": "VARCHAR",
-        "sample": "VARCHAR",
-        "scale": "VARCHAR",
-        "seg": "VARCHAR",
-        "ses": "VARCHAR",
-        "space": "VARCHAR",
-        "split": "VARCHAR",
-        "stain": "VARCHAR",
-        "sub": "VARCHAR",
-        "task": "VARCHAR",
-        "tpl": "VARCHAR",
-        "tracksys": "VARCHAR",
-        "trc": "VARCHAR",
-        "voi": "VARCHAR",
-        "datatype": "VARCHAR",
-        "suffix": "VARCHAR",
-        "extension": "VARCHAR",
-        "pseudofile": "BOOLEAN",
-        "modality": "VARCHAR",
     },
     "samples": {
-        "dataset_id": "VARCHAR",
-        "file_path": "VARCHAR",
+        "file_id": "HUGEINT",
         "row_idx": "BIGINT",
         "derived_from": "VARCHAR",
         "participant_id": "VARCHAR",
@@ -1177,97 +454,15 @@ COLUMNS: dict[str, dict[str, str]] = {
         "sample_id": "VARCHAR",
         "sample_type": "VARCHAR",
         "other_data": "JSON",
-        "acq": "VARCHAR",
-        "atlas": "VARCHAR",
-        "ce": "VARCHAR",
-        "chunk": "VARCHAR",
-        "cohort": "VARCHAR",
-        "den": "VARCHAR",
-        "desc": "VARCHAR",
-        "dir": "VARCHAR",
-        "echo": "VARCHAR",
-        "flip": "VARCHAR",
-        "hemi": "VARCHAR",
-        "inv": "VARCHAR",
-        "label": "VARCHAR",
-        "mod": "VARCHAR",
-        "mt": "VARCHAR",
-        "nuc": "VARCHAR",
-        "part": "VARCHAR",
-        "proc": "VARCHAR",
-        "rec": "VARCHAR",
-        "recording": "VARCHAR",
-        "res": "VARCHAR",
-        "run": "VARCHAR",
-        "sample": "VARCHAR",
-        "scale": "VARCHAR",
-        "seg": "VARCHAR",
-        "ses": "VARCHAR",
-        "space": "VARCHAR",
-        "split": "VARCHAR",
-        "stain": "VARCHAR",
-        "sub": "VARCHAR",
-        "task": "VARCHAR",
-        "tpl": "VARCHAR",
-        "tracksys": "VARCHAR",
-        "trc": "VARCHAR",
-        "voi": "VARCHAR",
-        "datatype": "VARCHAR",
-        "suffix": "VARCHAR",
-        "extension": "VARCHAR",
-        "pseudofile": "BOOLEAN",
-        "modality": "VARCHAR",
     },
     "scans": {
-        "dataset_id": "VARCHAR",
-        "file_path": "VARCHAR",
+        "file_id": "HUGEINT",
         "HED": "VARCHAR",
         "acq_time": "TIMESTAMP",
         "other_data": "JSON",
-        "acq": "VARCHAR",
-        "atlas": "VARCHAR",
-        "ce": "VARCHAR",
-        "chunk": "VARCHAR",
-        "cohort": "VARCHAR",
-        "den": "VARCHAR",
-        "desc": "VARCHAR",
-        "dir": "VARCHAR",
-        "echo": "VARCHAR",
-        "flip": "VARCHAR",
-        "hemi": "VARCHAR",
-        "inv": "VARCHAR",
-        "label": "VARCHAR",
-        "mod": "VARCHAR",
-        "mt": "VARCHAR",
-        "nuc": "VARCHAR",
-        "part": "VARCHAR",
-        "proc": "VARCHAR",
-        "rec": "VARCHAR",
-        "recording": "VARCHAR",
-        "res": "VARCHAR",
-        "run": "VARCHAR",
-        "sample": "VARCHAR",
-        "scale": "VARCHAR",
-        "seg": "VARCHAR",
-        "ses": "VARCHAR",
-        "space": "VARCHAR",
-        "split": "VARCHAR",
-        "stain": "VARCHAR",
-        "sub": "VARCHAR",
-        "task": "VARCHAR",
-        "tpl": "VARCHAR",
-        "tracksys": "VARCHAR",
-        "trc": "VARCHAR",
-        "voi": "VARCHAR",
-        "datatype": "VARCHAR",
-        "suffix": "VARCHAR",
-        "extension": "VARCHAR",
-        "pseudofile": "BOOLEAN",
-        "modality": "VARCHAR",
     },
     "segmentation_lookup": {
-        "dataset_id": "VARCHAR",
-        "file_path": "VARCHAR",
+        "file_id": "HUGEINT",
         "row_idx": "BIGINT",
         "abbreviation": "VARCHAR",
         "color": "VARCHAR",
@@ -1275,46 +470,6 @@ COLUMNS: dict[str, dict[str, str]] = {
         "mapping": "BIGINT",
         "name": "VARCHAR",
         "other_data": "JSON",
-        "acq": "VARCHAR",
-        "atlas": "VARCHAR",
-        "ce": "VARCHAR",
-        "chunk": "VARCHAR",
-        "cohort": "VARCHAR",
-        "den": "VARCHAR",
-        "desc": "VARCHAR",
-        "dir": "VARCHAR",
-        "echo": "VARCHAR",
-        "flip": "VARCHAR",
-        "hemi": "VARCHAR",
-        "inv": "VARCHAR",
-        "label": "VARCHAR",
-        "mod": "VARCHAR",
-        "mt": "VARCHAR",
-        "nuc": "VARCHAR",
-        "part": "VARCHAR",
-        "proc": "VARCHAR",
-        "rec": "VARCHAR",
-        "recording": "VARCHAR",
-        "res": "VARCHAR",
-        "run": "VARCHAR",
-        "sample": "VARCHAR",
-        "scale": "VARCHAR",
-        "seg": "VARCHAR",
-        "ses": "VARCHAR",
-        "space": "VARCHAR",
-        "split": "VARCHAR",
-        "stain": "VARCHAR",
-        "sub": "VARCHAR",
-        "task": "VARCHAR",
-        "tpl": "VARCHAR",
-        "tracksys": "VARCHAR",
-        "trc": "VARCHAR",
-        "voi": "VARCHAR",
-        "datatype": "VARCHAR",
-        "suffix": "VARCHAR",
-        "extension": "VARCHAR",
-        "pseudofile": "BOOLEAN",
-        "modality": "VARCHAR",
     },
     "sessions": {
         "dataset_id": "VARCHAR",
@@ -1326,8 +481,7 @@ COLUMNS: dict[str, dict[str, str]] = {
         "other_data": "JSON",
     },
     "sidecars": {
-        "dataset_id": "VARCHAR",
-        "file_path": "VARCHAR",
+        "file_id": "HUGEINT",
         "ACCELChannelCount": "BIGINT",
         "ANGACCELChannelCount": "BIGINT",
         "Acknowledgements": "VARCHAR",
@@ -1779,57 +933,9 @@ COLUMNS: dict[str, dict[str, str]] = {
         "other_data": "JSON",
     },
     "stim": {
-        "dataset_id": "VARCHAR",
-        "file_path": "VARCHAR",
+        "file_id": "HUGEINT",
         "row_idx": "BIGINT",
         "other_data": "JSON",
-        "acq": "VARCHAR",
-        "atlas": "VARCHAR",
-        "ce": "VARCHAR",
-        "chunk": "VARCHAR",
-        "cohort": "VARCHAR",
-        "den": "VARCHAR",
-        "desc": "VARCHAR",
-        "dir": "VARCHAR",
-        "echo": "VARCHAR",
-        "flip": "VARCHAR",
-        "hemi": "VARCHAR",
-        "inv": "VARCHAR",
-        "label": "VARCHAR",
-        "mod": "VARCHAR",
-        "mt": "VARCHAR",
-        "nuc": "VARCHAR",
-        "part": "VARCHAR",
-        "proc": "VARCHAR",
-        "rec": "VARCHAR",
-        "recording": "VARCHAR",
-        "res": "VARCHAR",
-        "run": "VARCHAR",
-        "sample": "VARCHAR",
-        "scale": "VARCHAR",
-        "seg": "VARCHAR",
-        "ses": "VARCHAR",
-        "space": "VARCHAR",
-        "split": "VARCHAR",
-        "stain": "VARCHAR",
-        "sub": "VARCHAR",
-        "task": "VARCHAR",
-        "tpl": "VARCHAR",
-        "tracksys": "VARCHAR",
-        "trc": "VARCHAR",
-        "voi": "VARCHAR",
-        "datatype": "VARCHAR",
-        "suffix": "VARCHAR",
-        "extension": "VARCHAR",
-        "pseudofile": "BOOLEAN",
-        "modality": "VARCHAR",
-    },
-    "tabular_files": {
-        "dataset_id": "VARCHAR",
-        "file_path": "VARCHAR",
-        "table_name": "VARCHAR",
-        "n_rows": "BIGINT",
-        "status": "VARCHAR",
     },
     "tabular_undeclared_columns": {
         "table_name": "VARCHAR",
@@ -1841,12 +947,13 @@ COLUMNS: dict[str, dict[str, str]] = {
 class C:
     """Typed `pl.col` accessors by table (e.g. `C.scans.task`)."""
 
-    class asl_context:
+    class all_files:
+        file_id: pl.Expr = pl.col("file_id")
         dataset_id: pl.Expr = pl.col("dataset_id")
+        root_uri: pl.Expr = pl.col("root_uri")
         file_path: pl.Expr = pl.col("file_path")
-        row_idx: pl.Expr = pl.col("row_idx")
-        volume_type: pl.Expr = pl.col("volume_type")
-        other_data: pl.Expr = pl.col("other_data")
+        kind: pl.Expr = pl.col("kind")
+        status: pl.Expr = pl.col("status")
         acq: pl.Expr = pl.col("acq")
         atlas: pl.Expr = pl.col("atlas")
         ce: pl.Expr = pl.col("ce")
@@ -1888,55 +995,20 @@ class C:
         pseudofile: pl.Expr = pl.col("pseudofile")
         modality: pl.Expr = pl.col("modality")
 
+    class asl_context:
+        file_id: pl.Expr = pl.col("file_id")
+        row_idx: pl.Expr = pl.col("row_idx")
+        volume_type: pl.Expr = pl.col("volume_type")
+        other_data: pl.Expr = pl.col("other_data")
+
     class behavioral:
-        dataset_id: pl.Expr = pl.col("dataset_id")
-        file_path: pl.Expr = pl.col("file_path")
+        file_id: pl.Expr = pl.col("file_id")
         row_idx: pl.Expr = pl.col("row_idx")
         HED: pl.Expr = pl.col("HED")
         response_time: pl.Expr = pl.col("response_time")
         stim_file: pl.Expr = pl.col("stim_file")
         trial_type: pl.Expr = pl.col("trial_type")
         other_data: pl.Expr = pl.col("other_data")
-        acq: pl.Expr = pl.col("acq")
-        atlas: pl.Expr = pl.col("atlas")
-        ce: pl.Expr = pl.col("ce")
-        chunk: pl.Expr = pl.col("chunk")
-        cohort: pl.Expr = pl.col("cohort")
-        den: pl.Expr = pl.col("den")
-        desc: pl.Expr = pl.col("desc")
-        dir: pl.Expr = pl.col("dir")
-        echo: pl.Expr = pl.col("echo")
-        flip: pl.Expr = pl.col("flip")
-        hemi: pl.Expr = pl.col("hemi")
-        inv: pl.Expr = pl.col("inv")
-        label: pl.Expr = pl.col("label")
-        mod: pl.Expr = pl.col("mod")
-        mt: pl.Expr = pl.col("mt")
-        nuc: pl.Expr = pl.col("nuc")
-        part: pl.Expr = pl.col("part")
-        proc: pl.Expr = pl.col("proc")
-        rec: pl.Expr = pl.col("rec")
-        recording: pl.Expr = pl.col("recording")
-        res: pl.Expr = pl.col("res")
-        run: pl.Expr = pl.col("run")
-        sample: pl.Expr = pl.col("sample")
-        scale: pl.Expr = pl.col("scale")
-        seg: pl.Expr = pl.col("seg")
-        ses: pl.Expr = pl.col("ses")
-        space: pl.Expr = pl.col("space")
-        split: pl.Expr = pl.col("split")
-        stain: pl.Expr = pl.col("stain")
-        sub: pl.Expr = pl.col("sub")
-        task: pl.Expr = pl.col("task")
-        tpl: pl.Expr = pl.col("tpl")
-        tracksys: pl.Expr = pl.col("tracksys")
-        trc: pl.Expr = pl.col("trc")
-        voi: pl.Expr = pl.col("voi")
-        datatype: pl.Expr = pl.col("datatype")
-        suffix: pl.Expr = pl.col("suffix")
-        extension: pl.Expr = pl.col("extension")
-        pseudofile: pl.Expr = pl.col("pseudofile")
-        modality: pl.Expr = pl.col("modality")
 
     class bidslake_meta:
         schema_version: pl.Expr = pl.col("schema_version")
@@ -1949,8 +1021,7 @@ class C:
         overlay_digest: pl.Expr = pl.col("overlay_digest")
 
     class blood:
-        dataset_id: pl.Expr = pl.col("dataset_id")
-        file_path: pl.Expr = pl.col("file_path")
+        file_id: pl.Expr = pl.col("file_id")
         row_idx: pl.Expr = pl.col("row_idx")
         time: pl.Expr = pl.col("time")
         hplc_recovery_fractions: pl.Expr = pl.col("hplc_recovery_fractions")
@@ -1959,50 +1030,9 @@ class C:
         plasma_radioactivity: pl.Expr = pl.col("plasma_radioactivity")
         whole_blood_radioactivity: pl.Expr = pl.col("whole_blood_radioactivity")
         other_data: pl.Expr = pl.col("other_data")
-        acq: pl.Expr = pl.col("acq")
-        atlas: pl.Expr = pl.col("atlas")
-        ce: pl.Expr = pl.col("ce")
-        chunk: pl.Expr = pl.col("chunk")
-        cohort: pl.Expr = pl.col("cohort")
-        den: pl.Expr = pl.col("den")
-        desc: pl.Expr = pl.col("desc")
-        dir: pl.Expr = pl.col("dir")
-        echo: pl.Expr = pl.col("echo")
-        flip: pl.Expr = pl.col("flip")
-        hemi: pl.Expr = pl.col("hemi")
-        inv: pl.Expr = pl.col("inv")
-        label: pl.Expr = pl.col("label")
-        mod: pl.Expr = pl.col("mod")
-        mt: pl.Expr = pl.col("mt")
-        nuc: pl.Expr = pl.col("nuc")
-        part: pl.Expr = pl.col("part")
-        proc: pl.Expr = pl.col("proc")
-        rec: pl.Expr = pl.col("rec")
-        recording: pl.Expr = pl.col("recording")
-        res: pl.Expr = pl.col("res")
-        run: pl.Expr = pl.col("run")
-        sample: pl.Expr = pl.col("sample")
-        scale: pl.Expr = pl.col("scale")
-        seg: pl.Expr = pl.col("seg")
-        ses: pl.Expr = pl.col("ses")
-        space: pl.Expr = pl.col("space")
-        split: pl.Expr = pl.col("split")
-        stain: pl.Expr = pl.col("stain")
-        sub: pl.Expr = pl.col("sub")
-        task: pl.Expr = pl.col("task")
-        tpl: pl.Expr = pl.col("tpl")
-        tracksys: pl.Expr = pl.col("tracksys")
-        trc: pl.Expr = pl.col("trc")
-        voi: pl.Expr = pl.col("voi")
-        datatype: pl.Expr = pl.col("datatype")
-        suffix: pl.Expr = pl.col("suffix")
-        extension: pl.Expr = pl.col("extension")
-        pseudofile: pl.Expr = pl.col("pseudofile")
-        modality: pl.Expr = pl.col("modality")
 
     class dataset_description:
         dataset_id: pl.Expr = pl.col("dataset_id")
-        root_uri: pl.Expr = pl.col("root_uri")
         Name: pl.Expr = pl.col("Name")
         BIDSVersion: pl.Expr = pl.col("BIDSVersion")
         HEDVersion: pl.Expr = pl.col("HEDVersion")
@@ -2041,57 +1071,19 @@ class C:
         relation: pl.Expr = pl.col("relation")
         via_identity: pl.Expr = pl.col("via_identity")
 
-    class descriptions:
+    class dataset_roots:
         dataset_id: pl.Expr = pl.col("dataset_id")
-        file_path: pl.Expr = pl.col("file_path")
+        root_uri: pl.Expr = pl.col("root_uri")
+
+    class descriptions:
+        file_id: pl.Expr = pl.col("file_id")
         row_idx: pl.Expr = pl.col("row_idx")
         desc_id: pl.Expr = pl.col("desc_id")
         description: pl.Expr = pl.col("description")
         other_data: pl.Expr = pl.col("other_data")
-        acq: pl.Expr = pl.col("acq")
-        atlas: pl.Expr = pl.col("atlas")
-        ce: pl.Expr = pl.col("ce")
-        chunk: pl.Expr = pl.col("chunk")
-        cohort: pl.Expr = pl.col("cohort")
-        den: pl.Expr = pl.col("den")
-        desc: pl.Expr = pl.col("desc")
-        dir: pl.Expr = pl.col("dir")
-        echo: pl.Expr = pl.col("echo")
-        flip: pl.Expr = pl.col("flip")
-        hemi: pl.Expr = pl.col("hemi")
-        inv: pl.Expr = pl.col("inv")
-        label: pl.Expr = pl.col("label")
-        mod: pl.Expr = pl.col("mod")
-        mt: pl.Expr = pl.col("mt")
-        nuc: pl.Expr = pl.col("nuc")
-        part: pl.Expr = pl.col("part")
-        proc: pl.Expr = pl.col("proc")
-        rec: pl.Expr = pl.col("rec")
-        recording: pl.Expr = pl.col("recording")
-        res: pl.Expr = pl.col("res")
-        run: pl.Expr = pl.col("run")
-        sample: pl.Expr = pl.col("sample")
-        scale: pl.Expr = pl.col("scale")
-        seg: pl.Expr = pl.col("seg")
-        ses: pl.Expr = pl.col("ses")
-        space: pl.Expr = pl.col("space")
-        split: pl.Expr = pl.col("split")
-        stain: pl.Expr = pl.col("stain")
-        sub: pl.Expr = pl.col("sub")
-        task: pl.Expr = pl.col("task")
-        tpl: pl.Expr = pl.col("tpl")
-        tracksys: pl.Expr = pl.col("tracksys")
-        trc: pl.Expr = pl.col("trc")
-        voi: pl.Expr = pl.col("voi")
-        datatype: pl.Expr = pl.col("datatype")
-        suffix: pl.Expr = pl.col("suffix")
-        extension: pl.Expr = pl.col("extension")
-        pseudofile: pl.Expr = pl.col("pseudofile")
-        modality: pl.Expr = pl.col("modality")
 
     class diffusion:
-        dataset_id: pl.Expr = pl.col("dataset_id")
-        file_path: pl.Expr = pl.col("file_path")
+        file_id: pl.Expr = pl.col("file_id")
         volume_idx: pl.Expr = pl.col("volume_idx")
         bval: pl.Expr = pl.col("bval")
         bvec_x: pl.Expr = pl.col("bvec_x")
@@ -2099,8 +1091,7 @@ class C:
         bvec_z: pl.Expr = pl.col("bvec_z")
 
     class eeg_channels:
-        dataset_id: pl.Expr = pl.col("dataset_id")
-        file_path: pl.Expr = pl.col("file_path")
+        file_id: pl.Expr = pl.col("file_id")
         row_idx: pl.Expr = pl.col("row_idx")
         name: pl.Expr = pl.col("name")
         type: pl.Expr = pl.col("type")
@@ -2114,50 +1105,9 @@ class C:
         status: pl.Expr = pl.col("status")
         status_description: pl.Expr = pl.col("status_description")
         other_data: pl.Expr = pl.col("other_data")
-        acq: pl.Expr = pl.col("acq")
-        atlas: pl.Expr = pl.col("atlas")
-        ce: pl.Expr = pl.col("ce")
-        chunk: pl.Expr = pl.col("chunk")
-        cohort: pl.Expr = pl.col("cohort")
-        den: pl.Expr = pl.col("den")
-        desc: pl.Expr = pl.col("desc")
-        dir: pl.Expr = pl.col("dir")
-        echo: pl.Expr = pl.col("echo")
-        flip: pl.Expr = pl.col("flip")
-        hemi: pl.Expr = pl.col("hemi")
-        inv: pl.Expr = pl.col("inv")
-        label: pl.Expr = pl.col("label")
-        mod: pl.Expr = pl.col("mod")
-        mt: pl.Expr = pl.col("mt")
-        nuc: pl.Expr = pl.col("nuc")
-        part: pl.Expr = pl.col("part")
-        proc: pl.Expr = pl.col("proc")
-        rec: pl.Expr = pl.col("rec")
-        recording: pl.Expr = pl.col("recording")
-        res: pl.Expr = pl.col("res")
-        run: pl.Expr = pl.col("run")
-        sample: pl.Expr = pl.col("sample")
-        scale: pl.Expr = pl.col("scale")
-        seg: pl.Expr = pl.col("seg")
-        ses: pl.Expr = pl.col("ses")
-        space: pl.Expr = pl.col("space")
-        split: pl.Expr = pl.col("split")
-        stain: pl.Expr = pl.col("stain")
-        sub: pl.Expr = pl.col("sub")
-        task: pl.Expr = pl.col("task")
-        tpl: pl.Expr = pl.col("tpl")
-        tracksys: pl.Expr = pl.col("tracksys")
-        trc: pl.Expr = pl.col("trc")
-        voi: pl.Expr = pl.col("voi")
-        datatype: pl.Expr = pl.col("datatype")
-        suffix: pl.Expr = pl.col("suffix")
-        extension: pl.Expr = pl.col("extension")
-        pseudofile: pl.Expr = pl.col("pseudofile")
-        modality: pl.Expr = pl.col("modality")
 
     class eeg_electrodes:
-        dataset_id: pl.Expr = pl.col("dataset_id")
-        file_path: pl.Expr = pl.col("file_path")
+        file_id: pl.Expr = pl.col("file_id")
         row_idx: pl.Expr = pl.col("row_idx")
         name: pl.Expr = pl.col("name")
         x: pl.Expr = pl.col("x")
@@ -2167,50 +1117,9 @@ class C:
         material: pl.Expr = pl.col("material")
         type: pl.Expr = pl.col("type")
         other_data: pl.Expr = pl.col("other_data")
-        acq: pl.Expr = pl.col("acq")
-        atlas: pl.Expr = pl.col("atlas")
-        ce: pl.Expr = pl.col("ce")
-        chunk: pl.Expr = pl.col("chunk")
-        cohort: pl.Expr = pl.col("cohort")
-        den: pl.Expr = pl.col("den")
-        desc: pl.Expr = pl.col("desc")
-        dir: pl.Expr = pl.col("dir")
-        echo: pl.Expr = pl.col("echo")
-        flip: pl.Expr = pl.col("flip")
-        hemi: pl.Expr = pl.col("hemi")
-        inv: pl.Expr = pl.col("inv")
-        label: pl.Expr = pl.col("label")
-        mod: pl.Expr = pl.col("mod")
-        mt: pl.Expr = pl.col("mt")
-        nuc: pl.Expr = pl.col("nuc")
-        part: pl.Expr = pl.col("part")
-        proc: pl.Expr = pl.col("proc")
-        rec: pl.Expr = pl.col("rec")
-        recording: pl.Expr = pl.col("recording")
-        res: pl.Expr = pl.col("res")
-        run: pl.Expr = pl.col("run")
-        sample: pl.Expr = pl.col("sample")
-        scale: pl.Expr = pl.col("scale")
-        seg: pl.Expr = pl.col("seg")
-        ses: pl.Expr = pl.col("ses")
-        space: pl.Expr = pl.col("space")
-        split: pl.Expr = pl.col("split")
-        stain: pl.Expr = pl.col("stain")
-        sub: pl.Expr = pl.col("sub")
-        task: pl.Expr = pl.col("task")
-        tpl: pl.Expr = pl.col("tpl")
-        tracksys: pl.Expr = pl.col("tracksys")
-        trc: pl.Expr = pl.col("trc")
-        voi: pl.Expr = pl.col("voi")
-        datatype: pl.Expr = pl.col("datatype")
-        suffix: pl.Expr = pl.col("suffix")
-        extension: pl.Expr = pl.col("extension")
-        pseudofile: pl.Expr = pl.col("pseudofile")
-        modality: pl.Expr = pl.col("modality")
 
     class emg_channels:
-        dataset_id: pl.Expr = pl.col("dataset_id")
-        file_path: pl.Expr = pl.col("file_path")
+        file_id: pl.Expr = pl.col("file_id")
         row_idx: pl.Expr = pl.col("row_idx")
         name: pl.Expr = pl.col("name")
         type: pl.Expr = pl.col("type")
@@ -2230,50 +1139,9 @@ class C:
         status_description: pl.Expr = pl.col("status_description")
         target_muscle: pl.Expr = pl.col("target_muscle")
         other_data: pl.Expr = pl.col("other_data")
-        acq: pl.Expr = pl.col("acq")
-        atlas: pl.Expr = pl.col("atlas")
-        ce: pl.Expr = pl.col("ce")
-        chunk: pl.Expr = pl.col("chunk")
-        cohort: pl.Expr = pl.col("cohort")
-        den: pl.Expr = pl.col("den")
-        desc: pl.Expr = pl.col("desc")
-        dir: pl.Expr = pl.col("dir")
-        echo: pl.Expr = pl.col("echo")
-        flip: pl.Expr = pl.col("flip")
-        hemi: pl.Expr = pl.col("hemi")
-        inv: pl.Expr = pl.col("inv")
-        label: pl.Expr = pl.col("label")
-        mod: pl.Expr = pl.col("mod")
-        mt: pl.Expr = pl.col("mt")
-        nuc: pl.Expr = pl.col("nuc")
-        part: pl.Expr = pl.col("part")
-        proc: pl.Expr = pl.col("proc")
-        rec: pl.Expr = pl.col("rec")
-        recording: pl.Expr = pl.col("recording")
-        res: pl.Expr = pl.col("res")
-        run: pl.Expr = pl.col("run")
-        sample: pl.Expr = pl.col("sample")
-        scale: pl.Expr = pl.col("scale")
-        seg: pl.Expr = pl.col("seg")
-        ses: pl.Expr = pl.col("ses")
-        space: pl.Expr = pl.col("space")
-        split: pl.Expr = pl.col("split")
-        stain: pl.Expr = pl.col("stain")
-        sub: pl.Expr = pl.col("sub")
-        task: pl.Expr = pl.col("task")
-        tpl: pl.Expr = pl.col("tpl")
-        tracksys: pl.Expr = pl.col("tracksys")
-        trc: pl.Expr = pl.col("trc")
-        voi: pl.Expr = pl.col("voi")
-        datatype: pl.Expr = pl.col("datatype")
-        suffix: pl.Expr = pl.col("suffix")
-        extension: pl.Expr = pl.col("extension")
-        pseudofile: pl.Expr = pl.col("pseudofile")
-        modality: pl.Expr = pl.col("modality")
 
     class emg_electrodes:
-        dataset_id: pl.Expr = pl.col("dataset_id")
-        file_path: pl.Expr = pl.col("file_path")
+        file_id: pl.Expr = pl.col("file_id")
         row_idx: pl.Expr = pl.col("row_idx")
         name: pl.Expr = pl.col("name")
         x: pl.Expr = pl.col("x")
@@ -2285,51 +1153,9 @@ class C:
         material: pl.Expr = pl.col("material")
         type: pl.Expr = pl.col("type")
         other_data: pl.Expr = pl.col("other_data")
-        acq: pl.Expr = pl.col("acq")
-        atlas: pl.Expr = pl.col("atlas")
-        ce: pl.Expr = pl.col("ce")
-        chunk: pl.Expr = pl.col("chunk")
-        cohort: pl.Expr = pl.col("cohort")
-        den: pl.Expr = pl.col("den")
-        desc: pl.Expr = pl.col("desc")
-        dir: pl.Expr = pl.col("dir")
-        echo: pl.Expr = pl.col("echo")
-        flip: pl.Expr = pl.col("flip")
-        hemi: pl.Expr = pl.col("hemi")
-        inv: pl.Expr = pl.col("inv")
-        label: pl.Expr = pl.col("label")
-        mod: pl.Expr = pl.col("mod")
-        mt: pl.Expr = pl.col("mt")
-        nuc: pl.Expr = pl.col("nuc")
-        part: pl.Expr = pl.col("part")
-        proc: pl.Expr = pl.col("proc")
-        rec: pl.Expr = pl.col("rec")
-        recording: pl.Expr = pl.col("recording")
-        res: pl.Expr = pl.col("res")
-        run: pl.Expr = pl.col("run")
-        sample: pl.Expr = pl.col("sample")
-        scale: pl.Expr = pl.col("scale")
-        seg: pl.Expr = pl.col("seg")
-        ses: pl.Expr = pl.col("ses")
-        space: pl.Expr = pl.col("space")
-        split: pl.Expr = pl.col("split")
-        stain: pl.Expr = pl.col("stain")
-        sub: pl.Expr = pl.col("sub")
-        task: pl.Expr = pl.col("task")
-        tpl: pl.Expr = pl.col("tpl")
-        tracksys: pl.Expr = pl.col("tracksys")
-        trc: pl.Expr = pl.col("trc")
-        voi: pl.Expr = pl.col("voi")
-        datatype: pl.Expr = pl.col("datatype")
-        suffix: pl.Expr = pl.col("suffix")
-        extension: pl.Expr = pl.col("extension")
-        pseudofile: pl.Expr = pl.col("pseudofile")
-        modality: pl.Expr = pl.col("modality")
 
     class events:
-        dataset_id: pl.Expr = pl.col("dataset_id")
-        file_path: pl.Expr = pl.col("file_path")
-        row_idx: pl.Expr = pl.col("row_idx")
+        file_id: pl.Expr = pl.col("file_id")
         onset: pl.Expr = pl.col("onset")
         duration: pl.Expr = pl.col("duration")
         HED: pl.Expr = pl.col("HED")
@@ -2338,56 +1164,23 @@ class C:
         stim_file: pl.Expr = pl.col("stim_file")
         trial_type: pl.Expr = pl.col("trial_type")
         other_data: pl.Expr = pl.col("other_data")
-        acq: pl.Expr = pl.col("acq")
-        atlas: pl.Expr = pl.col("atlas")
-        ce: pl.Expr = pl.col("ce")
-        chunk: pl.Expr = pl.col("chunk")
-        cohort: pl.Expr = pl.col("cohort")
-        den: pl.Expr = pl.col("den")
-        desc: pl.Expr = pl.col("desc")
-        dir: pl.Expr = pl.col("dir")
-        echo: pl.Expr = pl.col("echo")
-        flip: pl.Expr = pl.col("flip")
-        hemi: pl.Expr = pl.col("hemi")
-        inv: pl.Expr = pl.col("inv")
-        label: pl.Expr = pl.col("label")
-        mod: pl.Expr = pl.col("mod")
-        mt: pl.Expr = pl.col("mt")
-        nuc: pl.Expr = pl.col("nuc")
-        part: pl.Expr = pl.col("part")
-        proc: pl.Expr = pl.col("proc")
-        rec: pl.Expr = pl.col("rec")
-        recording: pl.Expr = pl.col("recording")
-        res: pl.Expr = pl.col("res")
-        run: pl.Expr = pl.col("run")
-        sample: pl.Expr = pl.col("sample")
-        scale: pl.Expr = pl.col("scale")
-        seg: pl.Expr = pl.col("seg")
-        ses: pl.Expr = pl.col("ses")
-        space: pl.Expr = pl.col("space")
-        split: pl.Expr = pl.col("split")
-        stain: pl.Expr = pl.col("stain")
-        sub: pl.Expr = pl.col("sub")
-        task: pl.Expr = pl.col("task")
-        tpl: pl.Expr = pl.col("tpl")
-        tracksys: pl.Expr = pl.col("tracksys")
-        trc: pl.Expr = pl.col("trc")
-        voi: pl.Expr = pl.col("voi")
-        datatype: pl.Expr = pl.col("datatype")
-        suffix: pl.Expr = pl.col("suffix")
-        extension: pl.Expr = pl.col("extension")
-        pseudofile: pl.Expr = pl.col("pseudofile")
-        modality: pl.Expr = pl.col("modality")
 
     class file_associations:
-        dataset_id: pl.Expr = pl.col("dataset_id")
-        source_file_path: pl.Expr = pl.col("source_file_path")
+        source_file_id: pl.Expr = pl.col("source_file_id")
+        target_file_id: pl.Expr = pl.col("target_file_id")
         target_file_path: pl.Expr = pl.col("target_file_path")
         association_type: pl.Expr = pl.col("association_type")
 
-    class ieeg_channels:
+    class file_registry:
+        file_id: pl.Expr = pl.col("file_id")
         dataset_id: pl.Expr = pl.col("dataset_id")
+        root_uri: pl.Expr = pl.col("root_uri")
         file_path: pl.Expr = pl.col("file_path")
+        kind: pl.Expr = pl.col("kind")
+        status: pl.Expr = pl.col("status")
+
+    class ieeg_channels:
+        file_id: pl.Expr = pl.col("file_id")
         row_idx: pl.Expr = pl.col("row_idx")
         name: pl.Expr = pl.col("name")
         type: pl.Expr = pl.col("type")
@@ -2402,50 +1195,9 @@ class C:
         status: pl.Expr = pl.col("status")
         status_description: pl.Expr = pl.col("status_description")
         other_data: pl.Expr = pl.col("other_data")
-        acq: pl.Expr = pl.col("acq")
-        atlas: pl.Expr = pl.col("atlas")
-        ce: pl.Expr = pl.col("ce")
-        chunk: pl.Expr = pl.col("chunk")
-        cohort: pl.Expr = pl.col("cohort")
-        den: pl.Expr = pl.col("den")
-        desc: pl.Expr = pl.col("desc")
-        dir: pl.Expr = pl.col("dir")
-        echo: pl.Expr = pl.col("echo")
-        flip: pl.Expr = pl.col("flip")
-        hemi: pl.Expr = pl.col("hemi")
-        inv: pl.Expr = pl.col("inv")
-        label: pl.Expr = pl.col("label")
-        mod: pl.Expr = pl.col("mod")
-        mt: pl.Expr = pl.col("mt")
-        nuc: pl.Expr = pl.col("nuc")
-        part: pl.Expr = pl.col("part")
-        proc: pl.Expr = pl.col("proc")
-        rec: pl.Expr = pl.col("rec")
-        recording: pl.Expr = pl.col("recording")
-        res: pl.Expr = pl.col("res")
-        run: pl.Expr = pl.col("run")
-        sample: pl.Expr = pl.col("sample")
-        scale: pl.Expr = pl.col("scale")
-        seg: pl.Expr = pl.col("seg")
-        ses: pl.Expr = pl.col("ses")
-        space: pl.Expr = pl.col("space")
-        split: pl.Expr = pl.col("split")
-        stain: pl.Expr = pl.col("stain")
-        sub: pl.Expr = pl.col("sub")
-        task: pl.Expr = pl.col("task")
-        tpl: pl.Expr = pl.col("tpl")
-        tracksys: pl.Expr = pl.col("tracksys")
-        trc: pl.Expr = pl.col("trc")
-        voi: pl.Expr = pl.col("voi")
-        datatype: pl.Expr = pl.col("datatype")
-        suffix: pl.Expr = pl.col("suffix")
-        extension: pl.Expr = pl.col("extension")
-        pseudofile: pl.Expr = pl.col("pseudofile")
-        modality: pl.Expr = pl.col("modality")
 
     class ieeg_electrodes:
-        dataset_id: pl.Expr = pl.col("dataset_id")
-        file_path: pl.Expr = pl.col("file_path")
+        file_id: pl.Expr = pl.col("file_id")
         row_idx: pl.Expr = pl.col("row_idx")
         name: pl.Expr = pl.col("name")
         x: pl.Expr = pl.col("x")
@@ -2460,50 +1212,9 @@ class C:
         material: pl.Expr = pl.col("material")
         type: pl.Expr = pl.col("type")
         other_data: pl.Expr = pl.col("other_data")
-        acq: pl.Expr = pl.col("acq")
-        atlas: pl.Expr = pl.col("atlas")
-        ce: pl.Expr = pl.col("ce")
-        chunk: pl.Expr = pl.col("chunk")
-        cohort: pl.Expr = pl.col("cohort")
-        den: pl.Expr = pl.col("den")
-        desc: pl.Expr = pl.col("desc")
-        dir: pl.Expr = pl.col("dir")
-        echo: pl.Expr = pl.col("echo")
-        flip: pl.Expr = pl.col("flip")
-        hemi: pl.Expr = pl.col("hemi")
-        inv: pl.Expr = pl.col("inv")
-        label: pl.Expr = pl.col("label")
-        mod: pl.Expr = pl.col("mod")
-        mt: pl.Expr = pl.col("mt")
-        nuc: pl.Expr = pl.col("nuc")
-        part: pl.Expr = pl.col("part")
-        proc: pl.Expr = pl.col("proc")
-        rec: pl.Expr = pl.col("rec")
-        recording: pl.Expr = pl.col("recording")
-        res: pl.Expr = pl.col("res")
-        run: pl.Expr = pl.col("run")
-        sample: pl.Expr = pl.col("sample")
-        scale: pl.Expr = pl.col("scale")
-        seg: pl.Expr = pl.col("seg")
-        ses: pl.Expr = pl.col("ses")
-        space: pl.Expr = pl.col("space")
-        split: pl.Expr = pl.col("split")
-        stain: pl.Expr = pl.col("stain")
-        sub: pl.Expr = pl.col("sub")
-        task: pl.Expr = pl.col("task")
-        tpl: pl.Expr = pl.col("tpl")
-        tracksys: pl.Expr = pl.col("tracksys")
-        trc: pl.Expr = pl.col("trc")
-        voi: pl.Expr = pl.col("voi")
-        datatype: pl.Expr = pl.col("datatype")
-        suffix: pl.Expr = pl.col("suffix")
-        extension: pl.Expr = pl.col("extension")
-        pseudofile: pl.Expr = pl.col("pseudofile")
-        modality: pl.Expr = pl.col("modality")
 
     class meg_channels:
-        dataset_id: pl.Expr = pl.col("dataset_id")
-        file_path: pl.Expr = pl.col("file_path")
+        file_id: pl.Expr = pl.col("file_id")
         row_idx: pl.Expr = pl.col("row_idx")
         name: pl.Expr = pl.col("name")
         type: pl.Expr = pl.col("type")
@@ -2517,96 +1228,14 @@ class C:
         status: pl.Expr = pl.col("status")
         status_description: pl.Expr = pl.col("status_description")
         other_data: pl.Expr = pl.col("other_data")
-        acq: pl.Expr = pl.col("acq")
-        atlas: pl.Expr = pl.col("atlas")
-        ce: pl.Expr = pl.col("ce")
-        chunk: pl.Expr = pl.col("chunk")
-        cohort: pl.Expr = pl.col("cohort")
-        den: pl.Expr = pl.col("den")
-        desc: pl.Expr = pl.col("desc")
-        dir: pl.Expr = pl.col("dir")
-        echo: pl.Expr = pl.col("echo")
-        flip: pl.Expr = pl.col("flip")
-        hemi: pl.Expr = pl.col("hemi")
-        inv: pl.Expr = pl.col("inv")
-        label: pl.Expr = pl.col("label")
-        mod: pl.Expr = pl.col("mod")
-        mt: pl.Expr = pl.col("mt")
-        nuc: pl.Expr = pl.col("nuc")
-        part: pl.Expr = pl.col("part")
-        proc: pl.Expr = pl.col("proc")
-        rec: pl.Expr = pl.col("rec")
-        recording: pl.Expr = pl.col("recording")
-        res: pl.Expr = pl.col("res")
-        run: pl.Expr = pl.col("run")
-        sample: pl.Expr = pl.col("sample")
-        scale: pl.Expr = pl.col("scale")
-        seg: pl.Expr = pl.col("seg")
-        ses: pl.Expr = pl.col("ses")
-        space: pl.Expr = pl.col("space")
-        split: pl.Expr = pl.col("split")
-        stain: pl.Expr = pl.col("stain")
-        sub: pl.Expr = pl.col("sub")
-        task: pl.Expr = pl.col("task")
-        tpl: pl.Expr = pl.col("tpl")
-        tracksys: pl.Expr = pl.col("tracksys")
-        trc: pl.Expr = pl.col("trc")
-        voi: pl.Expr = pl.col("voi")
-        datatype: pl.Expr = pl.col("datatype")
-        suffix: pl.Expr = pl.col("suffix")
-        extension: pl.Expr = pl.col("extension")
-        pseudofile: pl.Expr = pl.col("pseudofile")
-        modality: pl.Expr = pl.col("modality")
 
     class motion:
-        dataset_id: pl.Expr = pl.col("dataset_id")
-        file_path: pl.Expr = pl.col("file_path")
+        file_id: pl.Expr = pl.col("file_id")
         row_idx: pl.Expr = pl.col("row_idx")
         other_data: pl.Expr = pl.col("other_data")
-        acq: pl.Expr = pl.col("acq")
-        atlas: pl.Expr = pl.col("atlas")
-        ce: pl.Expr = pl.col("ce")
-        chunk: pl.Expr = pl.col("chunk")
-        cohort: pl.Expr = pl.col("cohort")
-        den: pl.Expr = pl.col("den")
-        desc: pl.Expr = pl.col("desc")
-        dir: pl.Expr = pl.col("dir")
-        echo: pl.Expr = pl.col("echo")
-        flip: pl.Expr = pl.col("flip")
-        hemi: pl.Expr = pl.col("hemi")
-        inv: pl.Expr = pl.col("inv")
-        label: pl.Expr = pl.col("label")
-        mod: pl.Expr = pl.col("mod")
-        mt: pl.Expr = pl.col("mt")
-        nuc: pl.Expr = pl.col("nuc")
-        part: pl.Expr = pl.col("part")
-        proc: pl.Expr = pl.col("proc")
-        rec: pl.Expr = pl.col("rec")
-        recording: pl.Expr = pl.col("recording")
-        res: pl.Expr = pl.col("res")
-        run: pl.Expr = pl.col("run")
-        sample: pl.Expr = pl.col("sample")
-        scale: pl.Expr = pl.col("scale")
-        seg: pl.Expr = pl.col("seg")
-        ses: pl.Expr = pl.col("ses")
-        space: pl.Expr = pl.col("space")
-        split: pl.Expr = pl.col("split")
-        stain: pl.Expr = pl.col("stain")
-        sub: pl.Expr = pl.col("sub")
-        task: pl.Expr = pl.col("task")
-        tpl: pl.Expr = pl.col("tpl")
-        tracksys: pl.Expr = pl.col("tracksys")
-        trc: pl.Expr = pl.col("trc")
-        voi: pl.Expr = pl.col("voi")
-        datatype: pl.Expr = pl.col("datatype")
-        suffix: pl.Expr = pl.col("suffix")
-        extension: pl.Expr = pl.col("extension")
-        pseudofile: pl.Expr = pl.col("pseudofile")
-        modality: pl.Expr = pl.col("modality")
 
     class motion_channels:
-        dataset_id: pl.Expr = pl.col("dataset_id")
-        file_path: pl.Expr = pl.col("file_path")
+        file_id: pl.Expr = pl.col("file_id")
         row_idx: pl.Expr = pl.col("row_idx")
         name: pl.Expr = pl.col("name")
         component: pl.Expr = pl.col("component")
@@ -2620,50 +1249,9 @@ class C:
         status: pl.Expr = pl.col("status")
         status_description: pl.Expr = pl.col("status_description")
         other_data: pl.Expr = pl.col("other_data")
-        acq: pl.Expr = pl.col("acq")
-        atlas: pl.Expr = pl.col("atlas")
-        ce: pl.Expr = pl.col("ce")
-        chunk: pl.Expr = pl.col("chunk")
-        cohort: pl.Expr = pl.col("cohort")
-        den: pl.Expr = pl.col("den")
-        desc: pl.Expr = pl.col("desc")
-        dir: pl.Expr = pl.col("dir")
-        echo: pl.Expr = pl.col("echo")
-        flip: pl.Expr = pl.col("flip")
-        hemi: pl.Expr = pl.col("hemi")
-        inv: pl.Expr = pl.col("inv")
-        label: pl.Expr = pl.col("label")
-        mod: pl.Expr = pl.col("mod")
-        mt: pl.Expr = pl.col("mt")
-        nuc: pl.Expr = pl.col("nuc")
-        part: pl.Expr = pl.col("part")
-        proc: pl.Expr = pl.col("proc")
-        rec: pl.Expr = pl.col("rec")
-        recording: pl.Expr = pl.col("recording")
-        res: pl.Expr = pl.col("res")
-        run: pl.Expr = pl.col("run")
-        sample: pl.Expr = pl.col("sample")
-        scale: pl.Expr = pl.col("scale")
-        seg: pl.Expr = pl.col("seg")
-        ses: pl.Expr = pl.col("ses")
-        space: pl.Expr = pl.col("space")
-        split: pl.Expr = pl.col("split")
-        stain: pl.Expr = pl.col("stain")
-        sub: pl.Expr = pl.col("sub")
-        task: pl.Expr = pl.col("task")
-        tpl: pl.Expr = pl.col("tpl")
-        tracksys: pl.Expr = pl.col("tracksys")
-        trc: pl.Expr = pl.col("trc")
-        voi: pl.Expr = pl.col("voi")
-        datatype: pl.Expr = pl.col("datatype")
-        suffix: pl.Expr = pl.col("suffix")
-        extension: pl.Expr = pl.col("extension")
-        pseudofile: pl.Expr = pl.col("pseudofile")
-        modality: pl.Expr = pl.col("modality")
 
     class nirs_channels:
-        dataset_id: pl.Expr = pl.col("dataset_id")
-        file_path: pl.Expr = pl.col("file_path")
+        file_id: pl.Expr = pl.col("file_id")
         row_idx: pl.Expr = pl.col("row_idx")
         name: pl.Expr = pl.col("name")
         type: pl.Expr = pl.col("type")
@@ -2682,50 +1270,9 @@ class C:
         wavelength_actual: pl.Expr = pl.col("wavelength_actual")
         wavelength_emission_actual: pl.Expr = pl.col("wavelength_emission_actual")
         other_data: pl.Expr = pl.col("other_data")
-        acq: pl.Expr = pl.col("acq")
-        atlas: pl.Expr = pl.col("atlas")
-        ce: pl.Expr = pl.col("ce")
-        chunk: pl.Expr = pl.col("chunk")
-        cohort: pl.Expr = pl.col("cohort")
-        den: pl.Expr = pl.col("den")
-        desc: pl.Expr = pl.col("desc")
-        dir: pl.Expr = pl.col("dir")
-        echo: pl.Expr = pl.col("echo")
-        flip: pl.Expr = pl.col("flip")
-        hemi: pl.Expr = pl.col("hemi")
-        inv: pl.Expr = pl.col("inv")
-        label: pl.Expr = pl.col("label")
-        mod: pl.Expr = pl.col("mod")
-        mt: pl.Expr = pl.col("mt")
-        nuc: pl.Expr = pl.col("nuc")
-        part: pl.Expr = pl.col("part")
-        proc: pl.Expr = pl.col("proc")
-        rec: pl.Expr = pl.col("rec")
-        recording: pl.Expr = pl.col("recording")
-        res: pl.Expr = pl.col("res")
-        run: pl.Expr = pl.col("run")
-        sample: pl.Expr = pl.col("sample")
-        scale: pl.Expr = pl.col("scale")
-        seg: pl.Expr = pl.col("seg")
-        ses: pl.Expr = pl.col("ses")
-        space: pl.Expr = pl.col("space")
-        split: pl.Expr = pl.col("split")
-        stain: pl.Expr = pl.col("stain")
-        sub: pl.Expr = pl.col("sub")
-        task: pl.Expr = pl.col("task")
-        tpl: pl.Expr = pl.col("tpl")
-        tracksys: pl.Expr = pl.col("tracksys")
-        trc: pl.Expr = pl.col("trc")
-        voi: pl.Expr = pl.col("voi")
-        datatype: pl.Expr = pl.col("datatype")
-        suffix: pl.Expr = pl.col("suffix")
-        extension: pl.Expr = pl.col("extension")
-        pseudofile: pl.Expr = pl.col("pseudofile")
-        modality: pl.Expr = pl.col("modality")
 
     class nirs_optodes:
-        dataset_id: pl.Expr = pl.col("dataset_id")
-        file_path: pl.Expr = pl.col("file_path")
+        file_id: pl.Expr = pl.col("file_id")
         row_idx: pl.Expr = pl.col("row_idx")
         name: pl.Expr = pl.col("name")
         type: pl.Expr = pl.col("type")
@@ -2739,46 +1286,6 @@ class C:
         template_y: pl.Expr = pl.col("template_y")
         template_z: pl.Expr = pl.col("template_z")
         other_data: pl.Expr = pl.col("other_data")
-        acq: pl.Expr = pl.col("acq")
-        atlas: pl.Expr = pl.col("atlas")
-        ce: pl.Expr = pl.col("ce")
-        chunk: pl.Expr = pl.col("chunk")
-        cohort: pl.Expr = pl.col("cohort")
-        den: pl.Expr = pl.col("den")
-        desc: pl.Expr = pl.col("desc")
-        dir: pl.Expr = pl.col("dir")
-        echo: pl.Expr = pl.col("echo")
-        flip: pl.Expr = pl.col("flip")
-        hemi: pl.Expr = pl.col("hemi")
-        inv: pl.Expr = pl.col("inv")
-        label: pl.Expr = pl.col("label")
-        mod: pl.Expr = pl.col("mod")
-        mt: pl.Expr = pl.col("mt")
-        nuc: pl.Expr = pl.col("nuc")
-        part: pl.Expr = pl.col("part")
-        proc: pl.Expr = pl.col("proc")
-        rec: pl.Expr = pl.col("rec")
-        recording: pl.Expr = pl.col("recording")
-        res: pl.Expr = pl.col("res")
-        run: pl.Expr = pl.col("run")
-        sample: pl.Expr = pl.col("sample")
-        scale: pl.Expr = pl.col("scale")
-        seg: pl.Expr = pl.col("seg")
-        ses: pl.Expr = pl.col("ses")
-        space: pl.Expr = pl.col("space")
-        split: pl.Expr = pl.col("split")
-        stain: pl.Expr = pl.col("stain")
-        sub: pl.Expr = pl.col("sub")
-        task: pl.Expr = pl.col("task")
-        tpl: pl.Expr = pl.col("tpl")
-        tracksys: pl.Expr = pl.col("tracksys")
-        trc: pl.Expr = pl.col("trc")
-        voi: pl.Expr = pl.col("voi")
-        datatype: pl.Expr = pl.col("datatype")
-        suffix: pl.Expr = pl.col("suffix")
-        extension: pl.Expr = pl.col("extension")
-        pseudofile: pl.Expr = pl.col("pseudofile")
-        modality: pl.Expr = pl.col("modality")
 
     class participants:
         dataset_id: pl.Expr = pl.col("dataset_id")
@@ -2793,56 +1300,14 @@ class C:
         other_data: pl.Expr = pl.col("other_data")
 
     class phenotype:
-        dataset_id: pl.Expr = pl.col("dataset_id")
-        file_path: pl.Expr = pl.col("file_path")
+        file_id: pl.Expr = pl.col("file_id")
         row_idx: pl.Expr = pl.col("row_idx")
         participant_id: pl.Expr = pl.col("participant_id")
         HED: pl.Expr = pl.col("HED")
         other_data: pl.Expr = pl.col("other_data")
-        acq: pl.Expr = pl.col("acq")
-        atlas: pl.Expr = pl.col("atlas")
-        ce: pl.Expr = pl.col("ce")
-        chunk: pl.Expr = pl.col("chunk")
-        cohort: pl.Expr = pl.col("cohort")
-        den: pl.Expr = pl.col("den")
-        desc: pl.Expr = pl.col("desc")
-        dir: pl.Expr = pl.col("dir")
-        echo: pl.Expr = pl.col("echo")
-        flip: pl.Expr = pl.col("flip")
-        hemi: pl.Expr = pl.col("hemi")
-        inv: pl.Expr = pl.col("inv")
-        label: pl.Expr = pl.col("label")
-        mod: pl.Expr = pl.col("mod")
-        mt: pl.Expr = pl.col("mt")
-        nuc: pl.Expr = pl.col("nuc")
-        part: pl.Expr = pl.col("part")
-        proc: pl.Expr = pl.col("proc")
-        rec: pl.Expr = pl.col("rec")
-        recording: pl.Expr = pl.col("recording")
-        res: pl.Expr = pl.col("res")
-        run: pl.Expr = pl.col("run")
-        sample: pl.Expr = pl.col("sample")
-        scale: pl.Expr = pl.col("scale")
-        seg: pl.Expr = pl.col("seg")
-        ses: pl.Expr = pl.col("ses")
-        space: pl.Expr = pl.col("space")
-        split: pl.Expr = pl.col("split")
-        stain: pl.Expr = pl.col("stain")
-        sub: pl.Expr = pl.col("sub")
-        task: pl.Expr = pl.col("task")
-        tpl: pl.Expr = pl.col("tpl")
-        tracksys: pl.Expr = pl.col("tracksys")
-        trc: pl.Expr = pl.col("trc")
-        voi: pl.Expr = pl.col("voi")
-        datatype: pl.Expr = pl.col("datatype")
-        suffix: pl.Expr = pl.col("suffix")
-        extension: pl.Expr = pl.col("extension")
-        pseudofile: pl.Expr = pl.col("pseudofile")
-        modality: pl.Expr = pl.col("modality")
 
     class physio:
-        dataset_id: pl.Expr = pl.col("dataset_id")
-        file_path: pl.Expr = pl.col("file_path")
+        file_id: pl.Expr = pl.col("file_id")
         row_idx: pl.Expr = pl.col("row_idx")
         cardiac: pl.Expr = pl.col("cardiac")
         respiratory: pl.Expr = pl.col("respiratory")
@@ -2852,100 +1317,18 @@ class C:
         y_coordinate: pl.Expr = pl.col("y_coordinate")
         pupil_size: pl.Expr = pl.col("pupil_size")
         other_data: pl.Expr = pl.col("other_data")
-        acq: pl.Expr = pl.col("acq")
-        atlas: pl.Expr = pl.col("atlas")
-        ce: pl.Expr = pl.col("ce")
-        chunk: pl.Expr = pl.col("chunk")
-        cohort: pl.Expr = pl.col("cohort")
-        den: pl.Expr = pl.col("den")
-        desc: pl.Expr = pl.col("desc")
-        dir: pl.Expr = pl.col("dir")
-        echo: pl.Expr = pl.col("echo")
-        flip: pl.Expr = pl.col("flip")
-        hemi: pl.Expr = pl.col("hemi")
-        inv: pl.Expr = pl.col("inv")
-        label: pl.Expr = pl.col("label")
-        mod: pl.Expr = pl.col("mod")
-        mt: pl.Expr = pl.col("mt")
-        nuc: pl.Expr = pl.col("nuc")
-        part: pl.Expr = pl.col("part")
-        proc: pl.Expr = pl.col("proc")
-        rec: pl.Expr = pl.col("rec")
-        recording: pl.Expr = pl.col("recording")
-        res: pl.Expr = pl.col("res")
-        run: pl.Expr = pl.col("run")
-        sample: pl.Expr = pl.col("sample")
-        scale: pl.Expr = pl.col("scale")
-        seg: pl.Expr = pl.col("seg")
-        ses: pl.Expr = pl.col("ses")
-        space: pl.Expr = pl.col("space")
-        split: pl.Expr = pl.col("split")
-        stain: pl.Expr = pl.col("stain")
-        sub: pl.Expr = pl.col("sub")
-        task: pl.Expr = pl.col("task")
-        tpl: pl.Expr = pl.col("tpl")
-        tracksys: pl.Expr = pl.col("tracksys")
-        trc: pl.Expr = pl.col("trc")
-        voi: pl.Expr = pl.col("voi")
-        datatype: pl.Expr = pl.col("datatype")
-        suffix: pl.Expr = pl.col("suffix")
-        extension: pl.Expr = pl.col("extension")
-        pseudofile: pl.Expr = pl.col("pseudofile")
-        modality: pl.Expr = pl.col("modality")
 
     class physio_events:
-        dataset_id: pl.Expr = pl.col("dataset_id")
-        file_path: pl.Expr = pl.col("file_path")
+        file_id: pl.Expr = pl.col("file_id")
         row_idx: pl.Expr = pl.col("row_idx")
         onset: pl.Expr = pl.col("onset")
         duration: pl.Expr = pl.col("duration")
         message: pl.Expr = pl.col("message")
         trial_type: pl.Expr = pl.col("trial_type")
         other_data: pl.Expr = pl.col("other_data")
-        acq: pl.Expr = pl.col("acq")
-        atlas: pl.Expr = pl.col("atlas")
-        ce: pl.Expr = pl.col("ce")
-        chunk: pl.Expr = pl.col("chunk")
-        cohort: pl.Expr = pl.col("cohort")
-        den: pl.Expr = pl.col("den")
-        desc: pl.Expr = pl.col("desc")
-        dir: pl.Expr = pl.col("dir")
-        echo: pl.Expr = pl.col("echo")
-        flip: pl.Expr = pl.col("flip")
-        hemi: pl.Expr = pl.col("hemi")
-        inv: pl.Expr = pl.col("inv")
-        label: pl.Expr = pl.col("label")
-        mod: pl.Expr = pl.col("mod")
-        mt: pl.Expr = pl.col("mt")
-        nuc: pl.Expr = pl.col("nuc")
-        part: pl.Expr = pl.col("part")
-        proc: pl.Expr = pl.col("proc")
-        rec: pl.Expr = pl.col("rec")
-        recording: pl.Expr = pl.col("recording")
-        res: pl.Expr = pl.col("res")
-        run: pl.Expr = pl.col("run")
-        sample: pl.Expr = pl.col("sample")
-        scale: pl.Expr = pl.col("scale")
-        seg: pl.Expr = pl.col("seg")
-        ses: pl.Expr = pl.col("ses")
-        space: pl.Expr = pl.col("space")
-        split: pl.Expr = pl.col("split")
-        stain: pl.Expr = pl.col("stain")
-        sub: pl.Expr = pl.col("sub")
-        task: pl.Expr = pl.col("task")
-        tpl: pl.Expr = pl.col("tpl")
-        tracksys: pl.Expr = pl.col("tracksys")
-        trc: pl.Expr = pl.col("trc")
-        voi: pl.Expr = pl.col("voi")
-        datatype: pl.Expr = pl.col("datatype")
-        suffix: pl.Expr = pl.col("suffix")
-        extension: pl.Expr = pl.col("extension")
-        pseudofile: pl.Expr = pl.col("pseudofile")
-        modality: pl.Expr = pl.col("modality")
 
     class samples:
-        dataset_id: pl.Expr = pl.col("dataset_id")
-        file_path: pl.Expr = pl.col("file_path")
+        file_id: pl.Expr = pl.col("file_id")
         row_idx: pl.Expr = pl.col("row_idx")
         derived_from: pl.Expr = pl.col("derived_from")
         participant_id: pl.Expr = pl.col("participant_id")
@@ -2953,97 +1336,15 @@ class C:
         sample_id: pl.Expr = pl.col("sample_id")
         sample_type: pl.Expr = pl.col("sample_type")
         other_data: pl.Expr = pl.col("other_data")
-        acq: pl.Expr = pl.col("acq")
-        atlas: pl.Expr = pl.col("atlas")
-        ce: pl.Expr = pl.col("ce")
-        chunk: pl.Expr = pl.col("chunk")
-        cohort: pl.Expr = pl.col("cohort")
-        den: pl.Expr = pl.col("den")
-        desc: pl.Expr = pl.col("desc")
-        dir: pl.Expr = pl.col("dir")
-        echo: pl.Expr = pl.col("echo")
-        flip: pl.Expr = pl.col("flip")
-        hemi: pl.Expr = pl.col("hemi")
-        inv: pl.Expr = pl.col("inv")
-        label: pl.Expr = pl.col("label")
-        mod: pl.Expr = pl.col("mod")
-        mt: pl.Expr = pl.col("mt")
-        nuc: pl.Expr = pl.col("nuc")
-        part: pl.Expr = pl.col("part")
-        proc: pl.Expr = pl.col("proc")
-        rec: pl.Expr = pl.col("rec")
-        recording: pl.Expr = pl.col("recording")
-        res: pl.Expr = pl.col("res")
-        run: pl.Expr = pl.col("run")
-        sample: pl.Expr = pl.col("sample")
-        scale: pl.Expr = pl.col("scale")
-        seg: pl.Expr = pl.col("seg")
-        ses: pl.Expr = pl.col("ses")
-        space: pl.Expr = pl.col("space")
-        split: pl.Expr = pl.col("split")
-        stain: pl.Expr = pl.col("stain")
-        sub: pl.Expr = pl.col("sub")
-        task: pl.Expr = pl.col("task")
-        tpl: pl.Expr = pl.col("tpl")
-        tracksys: pl.Expr = pl.col("tracksys")
-        trc: pl.Expr = pl.col("trc")
-        voi: pl.Expr = pl.col("voi")
-        datatype: pl.Expr = pl.col("datatype")
-        suffix: pl.Expr = pl.col("suffix")
-        extension: pl.Expr = pl.col("extension")
-        pseudofile: pl.Expr = pl.col("pseudofile")
-        modality: pl.Expr = pl.col("modality")
 
     class scans:
-        dataset_id: pl.Expr = pl.col("dataset_id")
-        file_path: pl.Expr = pl.col("file_path")
+        file_id: pl.Expr = pl.col("file_id")
         HED: pl.Expr = pl.col("HED")
         acq_time: pl.Expr = pl.col("acq_time")
         other_data: pl.Expr = pl.col("other_data")
-        acq: pl.Expr = pl.col("acq")
-        atlas: pl.Expr = pl.col("atlas")
-        ce: pl.Expr = pl.col("ce")
-        chunk: pl.Expr = pl.col("chunk")
-        cohort: pl.Expr = pl.col("cohort")
-        den: pl.Expr = pl.col("den")
-        desc: pl.Expr = pl.col("desc")
-        dir: pl.Expr = pl.col("dir")
-        echo: pl.Expr = pl.col("echo")
-        flip: pl.Expr = pl.col("flip")
-        hemi: pl.Expr = pl.col("hemi")
-        inv: pl.Expr = pl.col("inv")
-        label: pl.Expr = pl.col("label")
-        mod: pl.Expr = pl.col("mod")
-        mt: pl.Expr = pl.col("mt")
-        nuc: pl.Expr = pl.col("nuc")
-        part: pl.Expr = pl.col("part")
-        proc: pl.Expr = pl.col("proc")
-        rec: pl.Expr = pl.col("rec")
-        recording: pl.Expr = pl.col("recording")
-        res: pl.Expr = pl.col("res")
-        run: pl.Expr = pl.col("run")
-        sample: pl.Expr = pl.col("sample")
-        scale: pl.Expr = pl.col("scale")
-        seg: pl.Expr = pl.col("seg")
-        ses: pl.Expr = pl.col("ses")
-        space: pl.Expr = pl.col("space")
-        split: pl.Expr = pl.col("split")
-        stain: pl.Expr = pl.col("stain")
-        sub: pl.Expr = pl.col("sub")
-        task: pl.Expr = pl.col("task")
-        tpl: pl.Expr = pl.col("tpl")
-        tracksys: pl.Expr = pl.col("tracksys")
-        trc: pl.Expr = pl.col("trc")
-        voi: pl.Expr = pl.col("voi")
-        datatype: pl.Expr = pl.col("datatype")
-        suffix: pl.Expr = pl.col("suffix")
-        extension: pl.Expr = pl.col("extension")
-        pseudofile: pl.Expr = pl.col("pseudofile")
-        modality: pl.Expr = pl.col("modality")
 
     class segmentation_lookup:
-        dataset_id: pl.Expr = pl.col("dataset_id")
-        file_path: pl.Expr = pl.col("file_path")
+        file_id: pl.Expr = pl.col("file_id")
         row_idx: pl.Expr = pl.col("row_idx")
         abbreviation: pl.Expr = pl.col("abbreviation")
         color: pl.Expr = pl.col("color")
@@ -3051,46 +1352,6 @@ class C:
         mapping: pl.Expr = pl.col("mapping")
         name: pl.Expr = pl.col("name")
         other_data: pl.Expr = pl.col("other_data")
-        acq: pl.Expr = pl.col("acq")
-        atlas: pl.Expr = pl.col("atlas")
-        ce: pl.Expr = pl.col("ce")
-        chunk: pl.Expr = pl.col("chunk")
-        cohort: pl.Expr = pl.col("cohort")
-        den: pl.Expr = pl.col("den")
-        desc: pl.Expr = pl.col("desc")
-        dir: pl.Expr = pl.col("dir")
-        echo: pl.Expr = pl.col("echo")
-        flip: pl.Expr = pl.col("flip")
-        hemi: pl.Expr = pl.col("hemi")
-        inv: pl.Expr = pl.col("inv")
-        label: pl.Expr = pl.col("label")
-        mod: pl.Expr = pl.col("mod")
-        mt: pl.Expr = pl.col("mt")
-        nuc: pl.Expr = pl.col("nuc")
-        part: pl.Expr = pl.col("part")
-        proc: pl.Expr = pl.col("proc")
-        rec: pl.Expr = pl.col("rec")
-        recording: pl.Expr = pl.col("recording")
-        res: pl.Expr = pl.col("res")
-        run: pl.Expr = pl.col("run")
-        sample: pl.Expr = pl.col("sample")
-        scale: pl.Expr = pl.col("scale")
-        seg: pl.Expr = pl.col("seg")
-        ses: pl.Expr = pl.col("ses")
-        space: pl.Expr = pl.col("space")
-        split: pl.Expr = pl.col("split")
-        stain: pl.Expr = pl.col("stain")
-        sub: pl.Expr = pl.col("sub")
-        task: pl.Expr = pl.col("task")
-        tpl: pl.Expr = pl.col("tpl")
-        tracksys: pl.Expr = pl.col("tracksys")
-        trc: pl.Expr = pl.col("trc")
-        voi: pl.Expr = pl.col("voi")
-        datatype: pl.Expr = pl.col("datatype")
-        suffix: pl.Expr = pl.col("suffix")
-        extension: pl.Expr = pl.col("extension")
-        pseudofile: pl.Expr = pl.col("pseudofile")
-        modality: pl.Expr = pl.col("modality")
 
     class sessions:
         dataset_id: pl.Expr = pl.col("dataset_id")
@@ -3102,8 +1363,7 @@ class C:
         other_data: pl.Expr = pl.col("other_data")
 
     class sidecars:
-        dataset_id: pl.Expr = pl.col("dataset_id")
-        file_path: pl.Expr = pl.col("file_path")
+        file_id: pl.Expr = pl.col("file_id")
         ACCELChannelCount: pl.Expr = pl.col("ACCELChannelCount")
         ANGACCELChannelCount: pl.Expr = pl.col("ANGACCELChannelCount")
         Acknowledgements: pl.Expr = pl.col("Acknowledgements")
@@ -3555,57 +1815,9 @@ class C:
         other_data: pl.Expr = pl.col("other_data")
 
     class stim:
-        dataset_id: pl.Expr = pl.col("dataset_id")
-        file_path: pl.Expr = pl.col("file_path")
+        file_id: pl.Expr = pl.col("file_id")
         row_idx: pl.Expr = pl.col("row_idx")
         other_data: pl.Expr = pl.col("other_data")
-        acq: pl.Expr = pl.col("acq")
-        atlas: pl.Expr = pl.col("atlas")
-        ce: pl.Expr = pl.col("ce")
-        chunk: pl.Expr = pl.col("chunk")
-        cohort: pl.Expr = pl.col("cohort")
-        den: pl.Expr = pl.col("den")
-        desc: pl.Expr = pl.col("desc")
-        dir: pl.Expr = pl.col("dir")
-        echo: pl.Expr = pl.col("echo")
-        flip: pl.Expr = pl.col("flip")
-        hemi: pl.Expr = pl.col("hemi")
-        inv: pl.Expr = pl.col("inv")
-        label: pl.Expr = pl.col("label")
-        mod: pl.Expr = pl.col("mod")
-        mt: pl.Expr = pl.col("mt")
-        nuc: pl.Expr = pl.col("nuc")
-        part: pl.Expr = pl.col("part")
-        proc: pl.Expr = pl.col("proc")
-        rec: pl.Expr = pl.col("rec")
-        recording: pl.Expr = pl.col("recording")
-        res: pl.Expr = pl.col("res")
-        run: pl.Expr = pl.col("run")
-        sample: pl.Expr = pl.col("sample")
-        scale: pl.Expr = pl.col("scale")
-        seg: pl.Expr = pl.col("seg")
-        ses: pl.Expr = pl.col("ses")
-        space: pl.Expr = pl.col("space")
-        split: pl.Expr = pl.col("split")
-        stain: pl.Expr = pl.col("stain")
-        sub: pl.Expr = pl.col("sub")
-        task: pl.Expr = pl.col("task")
-        tpl: pl.Expr = pl.col("tpl")
-        tracksys: pl.Expr = pl.col("tracksys")
-        trc: pl.Expr = pl.col("trc")
-        voi: pl.Expr = pl.col("voi")
-        datatype: pl.Expr = pl.col("datatype")
-        suffix: pl.Expr = pl.col("suffix")
-        extension: pl.Expr = pl.col("extension")
-        pseudofile: pl.Expr = pl.col("pseudofile")
-        modality: pl.Expr = pl.col("modality")
-
-    class tabular_files:
-        dataset_id: pl.Expr = pl.col("dataset_id")
-        file_path: pl.Expr = pl.col("file_path")
-        table_name: pl.Expr = pl.col("table_name")
-        n_rows: pl.Expr = pl.col("n_rows")
-        status: pl.Expr = pl.col("status")
 
     class tabular_undeclared_columns:
         table_name: pl.Expr = pl.col("table_name")

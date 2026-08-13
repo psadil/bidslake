@@ -112,6 +112,70 @@ def test_an_input_that_never_resolves_is_an_error_not_45_missing_subjects(lake) 
         lake.bind(binding)
 
 
+def test_naming_a_dataset_the_catalog_lacks_says_so(lake) -> None:
+    """The easiest version of this mistake to make, and the hardest to read.
+
+    Dataset ids are free text, so a study indexed one subject at a time has
+    `sub-01-freesurfer` rather than `freesurfer`. Reporting only "no candidates"
+    leaves the reader checking their filter values, which are fine.
+    """
+    binding = Binding(
+        anchor={**BOLD, "dataset_id": "ds001"},
+        key=("sub",),
+        inputs={"anat": FileInput(join=("sub",), dataset_id="nosuchdataset", where=ANAT)},
+    )
+    with pytest.raises(ValueError, match="are not in this catalog"):
+        lake.bind(binding)
+    # ...and it names what the catalog does hold, so the fix is visible.
+    with pytest.raises(ValueError, match="ds001"):
+        lake.bind(binding)
+
+
+def test_dataset_id_accepts_several(lake) -> None:
+    """A study sharded across datasets has one per subject, not one to name.
+
+    The runtime always compiled a sequence to `IN (...)` — every other filter accepts
+    one — so this pins the behaviour the annotation used to hide.
+    """
+    binding = Binding(
+        anchor={**BOLD, "dataset_id": "ds001", "sub": "01", "run": "01"},
+        key=("sub", "ses", "task", "run"),
+        inputs={
+            "anat": FileInput(
+                join=("sub",),
+                dataset_id=["ds001", "eyetracking_fmri"],
+                where=ANAT,
+            )
+        },
+    )
+    unit = next(iter(lake.bind(binding)))
+    # Both datasets have a sub-01 T1w, so widening the scope re-introduces exactly the
+    # ambiguity `dataset_id` exists to remove — reported, not guessed.
+    assert [(x.name, x.n_matched, x.reason) for x in unit.unresolved] == [("anat", 2, "ambiguous")]
+
+    # Narrowed to one of them, it resolves.
+    narrowed = Binding(
+        anchor={**BOLD, "dataset_id": "ds001", "sub": "01", "run": "01"},
+        key=("sub", "ses", "task", "run"),
+        inputs={"anat": FileInput(join=("sub",), dataset_id=["ds001"], where=ANAT)},
+    )
+    assert not next(iter(lake.bind(narrowed))).unresolved
+
+
+def test_a_missing_name_among_several_is_reported(lake) -> None:
+    """`str` is one name, not four characters — and one bad name in a list still names
+    itself, rather than being lost among the valid ones."""
+    binding = Binding(
+        anchor={**BOLD, "dataset_id": "ds001"},
+        key=("sub",),
+        inputs={
+            "anat": FileInput(join=("sub",), dataset_id=["ds001", "nosuchdataset"], where=ANAT)
+        },
+    )
+    with pytest.raises(ValueError, match="'nosuchdataset'"):
+        lake.bind(binding)
+
+
 def test_an_anchor_matching_nothing_is_an_error(lake) -> None:
     """Otherwise `for unit in lake.bind(B)` silently does no work.
 
@@ -261,7 +325,9 @@ def test_table_input_returns_an_ordered_slice(lake) -> None:
                 join=("sub", "task", "run"),
                 table="events",
                 columns=("onset", "duration"),
-                order_by="row_idx",
+                # `onset`, not `row_idx`: `events` is declared order-insensitive, so it
+                # carries no `row_idx` — its rows are addressed by onset.
+                order_by="onset",
             )
         },
     )
@@ -270,7 +336,7 @@ def test_table_input_returns_an_ordered_slice(lake) -> None:
     assert events.columns == ["onset", "duration"]
     assert events.height == 158
     onsets = events["onset"].to_list()
-    assert onsets == sorted(onsets), "row_idx order preserved"
+    assert onsets == sorted(onsets), "order_by applied"
 
 
 def test_join_outside_the_key_is_rejected(lake) -> None:

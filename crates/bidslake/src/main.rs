@@ -6,16 +6,22 @@ use std::path::PathBuf;
 // The CLI is a consumer of the library, not a second copy of it. Declaring these as
 // `mod` here would compile every one of them a second time, in parallel with the lib
 // and invisible to it.
-use bidslake::{bids, links, s3, schema};
+#[cfg(feature = "s3")]
+use bidslake::s3;
+use bidslake::{bids, links, schema};
 
 use bidslake::bids::BidsParser;
 use bidslake::db::BidsDb;
 use bidslake::fs::{BidsFileSystem, LocalFileSystem};
 use bidslake::schema::Schema;
+use bidslake::timing;
 
 #[derive(Parser)]
 #[command(name = "bidslake")]
 #[command(about = "Convert BIDS datasets to DuckDB lakehouse format")]
+// The commit, not just the package version: a binary is usually copied to wherever it
+// runs, and `--version` is the only way to tell which source that copy came from.
+#[command(version = bidslake::BUILD)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -34,11 +40,19 @@ enum Commands {
         #[arg(short, long, default_value = "bidslake.duckdb")]
         output: String,
 
-        /// Dataset ID (optional, inferred from dataset_description.json if not provided)
+        /// Dataset ID (optional, inferred from dataset_description.json if not provided).
+        ///
+        /// A dataset may span several ingest roots — subject-sharded pipeline output is
+        /// one dataset with one root per subject — so naming the same id on a second
+        /// `--input` adds that root rather than being refused (docs/adr/0005). Naming it
+        /// is also how you say two roots belong together when the inferred name cannot:
+        /// a pipeline writes its own name into `Name`, identically for every study.
         #[arg(short, long)]
         dataset_id: Option<String>,
 
-        /// Use anonymous access for S3 (no AWS credentials required)
+        /// Use anonymous access for S3 (no AWS credentials required). Applies only to
+        /// an `s3://` input; inert in a build without the `s3` feature, which refuses
+        /// such inputs outright.
         #[arg(long)]
         no_sign_request: bool,
 
@@ -53,15 +67,16 @@ enum Commands {
         overlay: Vec<String>,
 
         /// Everything bidslake bundles for a data producer, by name (`fmriprep`,
-        /// `mriqc`, `qsiprep`, `freesurfer`, `feat`): any of a schema overlay
+        /// `mriqc`, `qsiprep`, `freesurfer`, `feat`, `dcmstack`): any of a schema overlay
         /// (vocabulary), a BEP-043 term map (path→concept projection, for layouts whose
         /// filenames carry no BIDS entities), and an ingestion fragment (read/catalog
         /// policy). Which of the three exist varies by producer. Repeatable.
         ///
-        /// The set describes the CATALOG, not the dataset being added: `scans` is created
-        /// once and keeps the shape of the run that created it, so name every adapter the
-        /// catalog uses on every run and order stops mattering. A run needing a concept
-        /// column `scans` lacks is refused rather than silently dropping it.
+        /// The set describes the CATALOG, not the dataset being added. Name every adapter
+        /// the catalog uses on every run and order stops mattering: a run needing the term-map
+        /// projection column an existing registry lacks is refused rather than silently
+        /// dropping it, and a run *narrower* than the catalog redefines the `all_files` view
+        /// without the concepts the wider one added.
         #[arg(long = "adapter")]
         adapter: Vec<String>,
 
@@ -83,6 +98,13 @@ enum Commands {
         /// on. Repeatable (docs/adr/0003).
         #[arg(long = "source-dataset")]
         source_dataset: Vec<String>,
+
+        /// Where DuckDB spills to disk when a query exceeds its memory limit.
+        /// Defaults to the platform temp directory — deliberately *not* alongside
+        /// `--output`, which is where DuckDB would otherwise put it, because a
+        /// catalog on a network filesystem would then spill over the network.
+        #[arg(long)]
+        temp_dir: Option<PathBuf>,
     },
 
     /// Print the DuckDB schema bidslake would build from the BIDS schema (plus any
@@ -201,6 +223,7 @@ async fn main() -> Result<()> {
             dry_run,
             no_bidsignore,
             source_dataset,
+            temp_dir,
         } => {
             let schema_path_str = schema_path
                 .as_deref()
@@ -221,12 +244,15 @@ async fn main() -> Result<()> {
             let embedded_ingestion = discover_embedded(&input, "ingestion.json");
             let bundle = resolve_adapters(&adapter, embedded_ingestion.as_deref())?;
             overlays.extend(bundle.overlays);
-            let schema = Schema::load_full(
-                schema_path_str,
-                &overlays,
-                bundle.ingestion,
-                &bundle.term_maps,
-            )?;
+            let schema = {
+                let _t = timing::scope(timing::Phase::SchemaLoad);
+                Schema::load_full(
+                    schema_path_str,
+                    &overlays,
+                    bundle.ingestion,
+                    &bundle.term_maps,
+                )?
+            };
             run_indexer(
                 input,
                 output,
@@ -239,6 +265,7 @@ async fn main() -> Result<()> {
                 dry_run,
                 !no_bidsignore,
                 source_dataset,
+                temp_dir,
             )
             .await
         }
@@ -347,16 +374,10 @@ fn ensure_link_tables(db: &BidsDb) -> Result<()> {
 /// re-index. Mirrors `BidsParser::record_links`, but reads the stored columns instead of the
 /// live JSON. Returns the number of datasets processed.
 fn backfill_links(db: &BidsDb) -> Result<usize> {
-    type Row = (
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    );
+    type Row = (String, Option<String>, Option<String>, Option<String>);
     let rows: Vec<Row> = {
         let mut stmt = db.conn.prepare(
-            "SELECT dataset_id, root_uri, \"DatasetDOI\", \"SourceDatasets\", \
+            "SELECT dataset_id, \"DatasetDOI\", \"SourceDatasets\", \
              CAST(\"DatasetLinks\" AS VARCHAR) FROM dataset_description",
         )?;
         let mapped = stmt.query_map([], |r| {
@@ -365,21 +386,22 @@ fn backfill_links(db: &BidsDb) -> Result<usize> {
                 r.get::<_, Option<String>>(1)?,
                 r.get::<_, Option<String>>(2)?,
                 r.get::<_, Option<String>>(3)?,
-                r.get::<_, Option<String>>(4)?,
             ))
         })?;
         mapped.collect::<std::result::Result<_, _>>()?
     };
 
-    for (dataset_id, root_uri, doi, sources, named) in &rows {
+    for (dataset_id, doi, sources, named) in &rows {
         db.clear_derived_links(dataset_id)?;
         db.record_dataset_identity(
             dataset_id,
             &links::canonicalize(&format!("dataset:{dataset_id}")),
             "self",
         )?;
-        if let Some(root) = root_uri {
-            db.record_dataset_identity(dataset_id, &links::canonicalize(root), "root_uri")?;
+        // Roots come from `dataset_roots`, not from a column on this row: a dataset may
+        // have been built from several, and all of them are identities it *is*.
+        for root in db.dataset_roots(dataset_id)? {
+            db.record_dataset_identity(dataset_id, &links::canonicalize(&root), "root_uri")?;
         }
         if let Some(doi) = doi {
             db.record_dataset_identity(dataset_id, &links::canonicalize(doi), "DatasetDOI")?;
@@ -729,8 +751,14 @@ async fn run_indexer(
     dry_run: bool,
     apply_bidsignore: bool,
     declared_sources: Vec<String>,
+    temp_dir: Option<PathBuf>,
 ) -> Result<()> {
     println!("Input BIDS location: {}", input);
+
+    // Before anything is created on disk, so a run this build cannot serve fails
+    // without leaving an empty catalog behind.
+    check_input_supported(&input)?;
+
     // A dry run parses into a throwaway in-memory database and reports routing rather
     // than writing anything to disk.
     let db_path = if dry_run { ":memory:" } else { &output };
@@ -740,59 +768,42 @@ async fn run_indexer(
         println!("Output DuckDB file: {}", output);
     }
 
-    let db = BidsDb::new(db_path)?;
-    db.create_tables(&schema)?;
-    db.stamp_term_maps(&term_map_provenance)?;
-    db.stamp_ingestion(&ingestion_provenance)?;
+    let db = BidsDb::open_with_temp_dir(db_path, temp_dir.as_deref())?;
 
-    // Region/anonymous settings for httpfs, when the input is S3.
-    let mut s3_httpfs: Option<(String, bool)> = None;
-    let fs: Box<dyn BidsFileSystem> = if input.starts_with("s3://") {
-        {
-            // Parse bucket and prefix from s3://bucket/prefix
-            let parts: Vec<&str> = input.trim_start_matches("s3://").splitn(2, '/').collect();
-            let bucket = parts[0];
-            let prefix = if parts.len() > 1 { parts[1] } else { "" };
+    // Wrap the whole run — DDL included — in one transaction, for two reasons.
+    //
+    // Atomicity is the load-bearing one: dropping `txn` without committing (on any `?` below)
+    // rolls the whole run back, so a failed ingest leaves no half-created catalog behind.
+    // That is also why `create_tables` and the two `stamp_*` calls are inside it rather than
+    // ahead of it — the schema stamps describe this run, so they should not survive it.
+    //
+    // It also stops DuckDB autocommitting, and so fsyncing, once per statement on a
+    // file-backed database.
+    let txn = db.conn.unchecked_transaction()?;
 
-            println!("Using S3 backend: bucket={}, prefix={}", bucket, prefix);
-            let signing = if no_sign_request {
-                s3::SigningMode::Anonymous
-            } else {
-                s3::SigningMode::Signed
-            };
-            let client = s3::S3Client::new(bucket, prefix, signing).await?;
-            s3_httpfs = Some((client.region().to_string(), client.anonymous()));
-            Box::new(client)
-        }
-    } else {
-        println!("Using local filesystem backend");
-        Box::new(LocalFileSystem::new(PathBuf::from(&input)))
-    };
-
-    // Teach DuckDB to read `s3://` TSVs directly (both the write connection and the
-    // parser's read-preflight connection run `read_csv` over them).
-    if let Some((region, anonymous)) = &s3_httpfs {
-        s3::configure_httpfs(&db.conn, region, *anonymous)?;
+    {
+        let _t = timing::scope(timing::Phase::Ddl);
+        db.create_tables(&schema)?;
+        db.stamp_term_maps(&term_map_provenance)?;
+        db.stamp_ingestion(&ingestion_provenance)?;
     }
 
-    let s3_httpfs_cfg = s3_httpfs
-        .as_ref()
-        .map(|(region, anonymous)| bids::S3Httpfs {
-            region: region.clone(),
-            anonymous: *anonymous,
-        });
+    let (fs, s3_httpfs_cfg) = open_backend(&input, no_sign_request, &db).await?;
+
     let mut parser: BidsParser =
         BidsParser::new(fs, dataset_id, schema, s3_httpfs_cfg, apply_bidsignore)
             .with_term_maps(term_maps)
             .with_declared_sources(declared_sources);
 
-    // Wrap the whole ingest in one transaction. DuckDB otherwise autocommits
-    // every statement, fsyncing per row on a file-backed database — the single
-    // biggest cost for real (file) ingests. Dropping `txn` without committing
-    // (i.e. on an error `?` below) rolls the whole ingest back.
-    let txn = db.conn.unchecked_transaction()?;
     parser.parse(&db).await?;
-    txn.commit()?;
+    {
+        // The commit is where a file-backed catalog is actually written and fsynced,
+        // and on a network-hosted database that is not a rounding error — so it is
+        // timed rather than left in the gap between the last phase and process exit.
+        let _t = timing::scope(timing::Phase::Commit);
+        txn.commit()?;
+    }
+    timing::report();
 
     if dry_run {
         print_routing_summary(&db)?;
@@ -801,6 +812,82 @@ async fn run_indexer(
         report_reclaimable_space(&db, &output);
     }
 
+    Ok(())
+}
+
+/// Open the filesystem backend for `input`, returning it with the httpfs settings the
+/// parser's read-preflight connection needs.
+///
+/// For an `s3://` input this also teaches the *write* connection to read `s3://` TSVs,
+/// so the two connections are configured in one place rather than from two call sites
+/// that must agree.
+#[cfg(feature = "s3")]
+async fn open_backend(
+    input: &str,
+    no_sign_request: bool,
+    db: &BidsDb,
+) -> Result<(Box<dyn BidsFileSystem>, Option<bids::S3Httpfs>)> {
+    if !input.starts_with("s3://") {
+        println!("Using local filesystem backend");
+        return Ok((Box::new(LocalFileSystem::new(PathBuf::from(input))), None));
+    }
+
+    // Parse bucket and prefix from s3://bucket/prefix
+    let parts: Vec<&str> = input.trim_start_matches("s3://").splitn(2, '/').collect();
+    let bucket = parts[0];
+    let prefix = if parts.len() > 1 { parts[1] } else { "" };
+
+    println!("Using S3 backend: bucket={}, prefix={}", bucket, prefix);
+    let signing = if no_sign_request {
+        s3::SigningMode::Anonymous
+    } else {
+        s3::SigningMode::Signed
+    };
+    let client = s3::S3Client::new(bucket, prefix, signing).await?;
+    let region = client.region().to_string();
+    let anonymous = client.anonymous();
+
+    // Both the write connection and the parser's preflight connection run `read_csv`
+    // over `s3://` paths, so both need httpfs.
+    s3::configure_httpfs(&db.conn, &region, anonymous)?;
+
+    Ok((Box::new(client), Some(bids::S3Httpfs { region, anonymous })))
+}
+
+/// Open the filesystem backend for `input` in a build without the `s3` feature.
+///
+/// Only the local backend exists here; [`check_input_supported`] has already rejected
+/// an `s3://` input.
+#[cfg(not(feature = "s3"))]
+async fn open_backend(
+    input: &str,
+    _no_sign_request: bool,
+    _db: &BidsDb,
+) -> Result<(Box<dyn BidsFileSystem>, Option<bids::S3Httpfs>)> {
+    println!("Using local filesystem backend");
+    Ok((Box::new(LocalFileSystem::new(PathBuf::from(input))), None))
+}
+
+/// Every input location is openable when the `s3` feature is on.
+#[cfg(feature = "s3")]
+fn check_input_supported(_input: &str) -> Result<()> {
+    Ok(())
+}
+
+/// Refuse an `s3://` input this build cannot open.
+///
+/// Checked up front, before the output database is created, so a rejected run leaves
+/// nothing behind. And refused explicitly rather than falling through to the local
+/// backend, which would take the URI as a relative directory name and complain about a
+/// missing path — hiding the real answer, that this binary cannot talk to S3 at all.
+#[cfg(not(feature = "s3"))]
+fn check_input_supported(input: &str) -> Result<()> {
+    if input.starts_with("s3://") {
+        anyhow::bail!(
+            "cannot index {input}: this bidslake was built without the `s3` feature. \
+             Rebuild with `--features s3` (the default), or pass a local directory."
+        );
+    }
     Ok(())
 }
 
@@ -839,9 +926,10 @@ fn report_reclaimable_space(db: &BidsDb, output: &str) {
 /// plus the list of `skipped` files (the ones an overlay could bring in).
 fn print_routing_summary(db: &BidsDb) -> Result<()> {
     println!("\n=== dry run: tabular routing ===");
-    let mut stmt = db
-        .conn
-        .prepare("SELECT status, count(*) FROM tabular_files GROUP BY status ORDER BY status")?;
+    let mut stmt = db.conn.prepare(
+        "SELECT status, count(*) FROM file_registry \
+             WHERE status IS NOT NULL GROUP BY status ORDER BY status",
+    )?;
     let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
     for row in rows {
         let (status, n) = row?;
@@ -849,7 +937,7 @@ fn print_routing_summary(db: &BidsDb) -> Result<()> {
     }
 
     let mut stmt = db.conn.prepare(
-        "SELECT file_path FROM tabular_files WHERE status = 'skipped' ORDER BY file_path",
+        "SELECT file_path FROM file_registry WHERE status = 'skipped' ORDER BY file_path",
     )?;
     let skipped: Vec<String> = stmt
         .query_map([], |r| r.get::<_, String>(0))?

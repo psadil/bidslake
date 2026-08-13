@@ -1,0 +1,8 @@
+{
+  "IngestionSchemaVersion": "0.1.0",
+  "tables": {
+    "sidecars": {
+      "ignoreKeys": ["global", "time"]
+    }
+  }
+}

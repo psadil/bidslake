@@ -303,6 +303,9 @@ async fn build_hed_schemas(
 impl BidsContext {
     /// Build a context for a specific file.
     pub async fn new(file: &BidsFile, dataset: &DatasetContext, schema: &BidsSchema) -> Self {
+        // The walk no longer `stat`s every entry to carry a size — ingestion never
+        // reads it, and validation is the one consumer, once per file, here.
+        let size = file.size_bytes();
         let file_parts = read_entities(&file.name);
         let entities = resolve_entities(&file_parts.entities, &schema.entity_name_to_key);
         let datatype = find_datatype(&file.path, &schema.raw);
@@ -329,7 +332,7 @@ impl BidsContext {
             crate::files::tsv::load_tsv_columns(file)
                 .await
                 .unwrap_or_default()
-        } else if file_parts.extension == ".tsv.gz" && file.size != 0 {
+        } else if file_parts.extension == ".tsv.gz" && size != 0 {
             columns_from_sidecar(&sidecar)
         } else {
             HashMap::new()
@@ -430,7 +433,7 @@ impl BidsContext {
 
         BidsContext {
             path: file.path.clone(),
-            size: file.size,
+            size,
             raw_entities: file_parts.entities,
             entities,
             entity_keys: file_parts.entity_keys,
