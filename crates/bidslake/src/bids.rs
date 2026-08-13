@@ -969,10 +969,19 @@ impl BidsParser {
         // Written through the staged upsert rather than the Appender: the registry has a
         // primary key and no generated columns, so a re-index replaces a row rather than
         // colliding with itself.
+        //
+        // Fatal, not a warning. Every table below points at the registry, so a run that
+        // failed to write it has produced no catalog at all — and swallowing the error
+        // let that run go on to print "Conversion complete!" and exit 0. Returning here
+        // drops the ingest transaction instead, leaving the catalog as it was.
         let registry_rows = self.registry_rows(&dataset_id);
-        if let Err(e) = db.upsert_rows(&self.schema, "file_registry", &registry_rows) {
-            eprintln!("Failed to write the file registry: {e}");
-        }
+        db.upsert_rows(&self.schema, "file_registry", &registry_rows)
+            .with_context(|| {
+                format!(
+                    "writing {} file registry rows for {dataset_id}",
+                    registry_rows.len()
+                )
+            })?;
 
         // Lever 1b: ingest the deferred per-row tabular files in header-grouped
         // batches now that all of them are collected.
@@ -1049,9 +1058,10 @@ impl BidsParser {
         // That dedup is only against this run's own candidates; a row this dataset already has
         // from a previous run is handled by the insert's own `OR IGNORE` (see
         // `BidsDb::append_file_associations`), so a re-index refreshes rather than colliding.
-        if let Err(e) = db.append_file_associations(&deduped) {
-            eprintln!("Failed to insert file associations: {e}");
-        }
+        // One statement for the whole dataset, so a failure here loses every association
+        // it has — with nothing in the catalog to say so. Fatal, like the registry.
+        db.append_file_associations(&deduped)
+            .with_context(|| format!("writing {} file associations", deduped.len()))?;
 
         // Insert pending diffusion data — only when we have both bval and bvec. Upserted for the
         // same reason.
@@ -1066,17 +1076,22 @@ impl BidsParser {
             if !registered.contains(nifti_path.as_str()) {
                 continue;
             }
+            // Fatal too, unlike the tabular flush's per-file tolerance: a failed tabular
+            // file is still recorded, with `status = "failed"`, so the catalog says the
+            // rows are missing. Diffusion has no such bookkeeping — a swallowed error
+            // here is a file whose gradients are simply absent, indistinguishable from
+            // one that never had any.
             if let (Some(bval), Some(bvec_x), Some(bvec_y), Some(bvec_z)) =
                 (&diff.bval, &diff.bvec_x, &diff.bvec_y, &diff.bvec_z)
-                && let Err(e) = db.insert_diffusion(
+            {
+                db.insert_diffusion(
                     &self.file_key(&diff.dataset_id, nifti_path),
                     bval,
                     bvec_x,
                     bvec_y,
                     bvec_z,
                 )
-            {
-                eprintln!("Failed to insert diffusion data for {}: {}", nifti_path, e);
+                .with_context(|| format!("writing diffusion gradients for {nifti_path}"))?;
             }
         }
 
@@ -1121,7 +1136,7 @@ impl BidsParser {
         // across the whole `bids-examples` corpus) and is the single path for every
         // backend, so a shared sidecar is read once regardless of how many imaging
         // files inherit it.
-        self.apply_inheritance_collected(db);
+        self.apply_inheritance_collected(db)?;
 
         drop(inherit_phase);
         let flush_phase = timing::scope(Phase::Flush);
@@ -1297,7 +1312,10 @@ impl BidsParser {
     /// ancestor-directory order so a nearer (deeper) sidecar overrides. This is the
     /// sole inheritance path (local and S3); it reproduces the tree-based reference
     /// resolver row-for-row across the corpus.
-    fn apply_inheritance_collected(&self, db: &BidsDb) {
+    ///
+    /// Errors rather than warning if the write fails: these rows are the dataset's
+    /// metadata, and a run that lost them has not produced the catalog it reports.
+    fn apply_inheritance_collected(&self, db: &BidsDb) -> Result<()> {
         timing::count(Counter::ImagingFiles, self.imaging_files.len() as u64);
         timing::count(Counter::Sidecars, self.sidecars.len() as u64);
         let index = SidecarIndex::new(&self.sidecars);
@@ -1337,9 +1355,8 @@ impl BidsParser {
         // re-index rewrites rows it already wrote. It cannot lean on `scans`' read-back `seen`
         // set either — a file's metadata can change without its path changing, so a row already
         // present still has to be replaced rather than skipped.
-        if let Err(e) = db.upsert_rows(&self.schema, "sidecars", &rows) {
-            eprintln!("Failed to bulk-insert sidecars: {e}");
-        }
+        db.upsert_rows(&self.schema, "sidecars", &rows)
+            .with_context(|| format!("writing {} sidecars rows", rows.len()))
     }
 
     /// Read, with bounded concurrency, the file bodies and TSV headers the serial
