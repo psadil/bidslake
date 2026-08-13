@@ -4,6 +4,13 @@ members = ["crates/bids-core", "crates/bids-schema", "crates/bidslake", "crates/
 # Excluding it from default-members keeps the existing `cargo test` workflow
 # (and CI) untouched; it is still a workspace member so path deps and the lock
 # file resolve together.
+#
+# So prefer `cargo test` over `cargo test --workspace`. Opting the crate in
+# needs `PYO3_PYTHON` pointed at an interpreter (as the CI codegen job does):
+# a test *binary* has to link libpython, unlike the cdylib maturin builds with
+# `-undefined dynamic_lookup`, and without it the link picks the macOS system
+# framework and the harness dies at startup with a dyld rpath error. It carries
+# no Rust tests of its own — its suite is `crates/bidslake-py`'s pytest.
 default-members = ["crates/bids-core", "crates/bids-schema", "crates/bidslake", "crates/bids-validator-rs", "crates/hed-validator-rs"]
 resolver = "3"
 

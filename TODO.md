@@ -4,28 +4,30 @@ Deferred / optional items surfaced by the July 2026 design sweep but left out of
 remediation pass (see the finding ids in parentheses). Recorded here for later; not filed
 as issues. Roughly ordered by value.
 
-- [ ] **An inherited `.bval`/`.bvec` applies to many images, and nothing models that.**
-  Surfaced while adding the `diffusion` → `file_registry` foreign key (ADR 0006), which turned a
-  silent bug loud. `process_diffusion_file` derives the image a gradient set belongs to by
-  swapping the extension on its stem — `sub-01_dwi.bval` → `sub-01_dwi.nii.gz` — which is right
-  only for a gradient file sitting beside its image. BIDS inheritance also allows one at a
-  *higher* level, applying to every image below it: `ds114` ships a root-level `dwi.bval` and
-  `dwi.bvec`, whose synthesized `dwi.nii.gz` is nothing on disk. Before the FK, that wrote
-  `diffusion` rows keyed to a file the dataset does not contain; now those gradients are
-  **skipped**, so an inherited gradient set is not queryable at all (the files themselves are
-  still in `file_registry`, under their own paths).
+- [x] **An inherited `.bval`/`.bvec` applies to many images, and nothing models that.**
+  Resolved by [ADR 0007](docs/adr/0007-within-dataset-file-associations.md), taking the
+  second of the two routes this entry named: the payload keys on the *gradient file*
+  (`bvals`/`bvecs`) and the image-facing `diffusion` is a view joining through
+  `file_associations`. The first route — duplicating the values per inheriting image — was
+  rejected because it leaves the catalog handling one BIDS rule two ways (`events` shared,
+  gradients copied) and because it would make the *writer* depend on association edges,
+  which are not available on every backend.
 
-  Neither behaviour is right, and the shape is the problem: `diffusion` is keyed
-  `(file_id, volume_idx)`, one row per volume *of one image*, so a gradient set shared by N
-  images has no single referent to key on. Resolving it needs a **many-to-many** relation
-  between a gradient file and the images that inherit it — the same shape
-  `file_associations` has for `IntendedFor`, and the same resolution `SidecarIndex` already
-  performs for JSON sidecars (`(dataset_id, suffix, directory)` with an entity-subset match).
-  The obvious route is to reuse that: resolve the gradient file to its set of images the way
-  inheritance resolves a sidecar, then either store `diffusion` per (image, volume) with the
-  values duplicated, or key it to the *gradient* file and join through an association table.
-  Worth deciding which before implementing; the second keeps one row per gradient volume but
-  makes every read a join.
+  The entry assumed the many-to-many had to be built. It did not: the schema already
+  declares `meta.associations.bval`/`.bvec` with `inherit: true`, and
+  `resolve_structural_associations` was already writing exactly those edges — 20 of them for
+  ds114 — with nothing consuming them. `events` had been reading the same shape correctly
+  all along. Two adjacent bugs fell out with the stem swap: the hardcoded `.nii.gz` (which
+  had silently skipped `dwi_deriv`'s uncompressed image) and the `epi` suffix.
+
+- [ ] **`*_channels.tsv` should declare `describes` too.** The `channels` association exists
+  and the table is ordered, so `{ "association": "channels", "axis": "channel", "view": … }`
+  would give the same re-keying every other per-row table now gets. Deferred only so that
+  rewiring the positional channel-name lookup in `bids.rs` (`SELECT name FROM
+  motion_channels … ORDER BY row_idx`, the one place row order is load-bearing *inside*
+  bidslake) onto the view is a deliberate change rather than a side effect. `*_electrodes`
+  and `coordsystem` are the multi-association case — several targets per source, so
+  `(file_id, channel_idx)` would not be unique — which is permitted but wants a look first.
 
 - [ ] **Genuine lazy `get()` streaming** (`py-04`). `get()` is typed `Iterator[BidsFile]` but
   materializes the whole Arrow-IPC buffer + Polars frame first, so its laziness is cosmetic
@@ -101,7 +103,10 @@ accessors; and the opt-in `python -m bidslake.stubgen`. Remaining follow-ups:
   as needs arise — e.g. the fMRIPrep overlay does not yet capture `*_desc-MELODIC_mixing.tsv` or
   `*_AROMAnoiseICs.csv` (they show as `skipped` on `ds000001-fmriprep`); MRIQC group TSVs; more
   QSIPrep QC files. Column *values* are only lightly validated (the bids-examples confounds files
-  are empty) — check names against a dataset with real confound data when one is available.
+  are empty) — check names against a dataset with real confound data when one is available. The
+  same emptiness is why row *alignment* (row N ↔ volume N, ADR 0007) is asserted against the
+  synthetic fixture in `test_overlay.rs::adapter_keys_confounds_rows_to_every_image_of_the_run`
+  rather than against the corpus; a real confounds file would let the corpus carry it.
   (MRIQC's *per-image* IQMs no longer need the group TSVs: a sidecar whose data file the dataset
   never ships is now promoted to a record of its own, so the overlay's typed IQM columns populate
   straight from `sub-…_T1w.json`/`_bold.json` — validated on `ds001761-mriqc`, 475 records.
@@ -172,15 +177,16 @@ accessors; and the opt-in `python -m bidslake.stubgen`. Remaining follow-ups:
   raised, and should assert whichever behaviour is chosen.
 
 - [ ] **Extend the `file_registry` foreign key to the per-row tables.** docs/adr/0006 §4 gives
-  `scans`, `sidecars` and `diffusion` a real `FOREIGN KEY (file_id) REFERENCES
+  `scans`, `sidecars` and the gradient tables a real `FOREIGN KEY (file_id) REFERENCES
   file_registry(file_id)`; the 22 per-row tables (`events`, `*_channels`, `motion`, `physio`,
-  the adapter reader tables) reference it by convention only. The FK on `diffusion` caught a
-  real dangling-reference bug immediately, which is the argument for extending it — but each
-  per-row table is written by a bulk `INSERT ... SELECT` from `read_csv`, so the per-row
-  constraint check has to be measured against the batched-ingest benchmark before it is
-  imposed. Expect it to surface latent bugs of the same shape as the `ds114` one, so budget
-  for those rather than treating it as a one-line change. `file_associations` is a separate
-  case and cannot take one as it stands: `target_file_id` is nullable by design.
+  the adapter reader tables) reference it by convention only. The FK on the gradient payload
+  caught a real dangling-reference bug immediately, which is the argument for extending it —
+  but each per-row table is written by a bulk `INSERT ... SELECT` from `read_csv`, so the
+  per-row constraint check has to be measured against the batched-ingest benchmark before it
+  is imposed. Cheaper now than when this was written: ADR 0007 made every per-row table key
+  on the file its rows came from, which is always a registry row, so there is no carve-out to
+  design — expect measurement, not latent bugs of the `ds114` shape. `file_associations` is a
+  separate case and cannot take one as it stands: `target_file_id` is nullable by design.
 
 - [ ] **Rebuild the file registry when a later run needs a wider `projected`**. Mostly closed by
   [ADR 0006](docs/adr/0006-file-registry.md) §3: the concept columns moved onto the `all_files`
