@@ -119,6 +119,13 @@ COLUMNS: dict[str, dict[str, str]] = {
         "volume_type": "VARCHAR",
         "other_data": "JSON",
     },
+    "asl_volumes": {
+        "file_id": "HUGEINT",
+        "volume_idx": "BIGINT",
+        "volume_type": "VARCHAR",
+        "other_data": "JSON",
+        "source_file_id": "HUGEINT",
+    },
     "behavioral": {
         "file_id": "HUGEINT",
         "row_idx": "BIGINT",
@@ -148,6 +155,32 @@ COLUMNS: dict[str, dict[str, str]] = {
         "plasma_radioactivity": "DOUBLE",
         "whole_blood_radioactivity": "DOUBLE",
         "other_data": "JSON",
+    },
+    "bval_volumes": {
+        "file_id": "HUGEINT",
+        "volume_idx": "BIGINT",
+        "b": "DOUBLE",
+        "source_file_id": "HUGEINT",
+    },
+    "bvals": {
+        "file_id": "HUGEINT",
+        "row_idx": "BIGINT",
+        "b": "DOUBLE",
+    },
+    "bvec_volumes": {
+        "file_id": "HUGEINT",
+        "volume_idx": "BIGINT",
+        "x": "DOUBLE",
+        "y": "DOUBLE",
+        "z": "DOUBLE",
+        "source_file_id": "HUGEINT",
+    },
+    "bvecs": {
+        "file_id": "HUGEINT",
+        "row_idx": "BIGINT",
+        "x": "DOUBLE",
+        "y": "DOUBLE",
+        "z": "DOUBLE",
     },
     "dataset_description": {
         "dataset_id": "VARCHAR",
@@ -207,6 +240,8 @@ COLUMNS: dict[str, dict[str, str]] = {
         "bvec_x": "DOUBLE",
         "bvec_y": "DOUBLE",
         "bvec_z": "DOUBLE",
+        "bval_file_id": "HUGEINT",
+        "bvec_file_id": "HUGEINT",
     },
     "eeg_channels": {
         "file_id": "HUGEINT",
@@ -1001,6 +1036,13 @@ class C:
         volume_type: pl.Expr = pl.col("volume_type")
         other_data: pl.Expr = pl.col("other_data")
 
+    class asl_volumes:
+        file_id: pl.Expr = pl.col("file_id")
+        volume_idx: pl.Expr = pl.col("volume_idx")
+        volume_type: pl.Expr = pl.col("volume_type")
+        other_data: pl.Expr = pl.col("other_data")
+        source_file_id: pl.Expr = pl.col("source_file_id")
+
     class behavioral:
         file_id: pl.Expr = pl.col("file_id")
         row_idx: pl.Expr = pl.col("row_idx")
@@ -1030,6 +1072,32 @@ class C:
         plasma_radioactivity: pl.Expr = pl.col("plasma_radioactivity")
         whole_blood_radioactivity: pl.Expr = pl.col("whole_blood_radioactivity")
         other_data: pl.Expr = pl.col("other_data")
+
+    class bval_volumes:
+        file_id: pl.Expr = pl.col("file_id")
+        volume_idx: pl.Expr = pl.col("volume_idx")
+        b: pl.Expr = pl.col("b")
+        source_file_id: pl.Expr = pl.col("source_file_id")
+
+    class bvals:
+        file_id: pl.Expr = pl.col("file_id")
+        row_idx: pl.Expr = pl.col("row_idx")
+        b: pl.Expr = pl.col("b")
+
+    class bvec_volumes:
+        file_id: pl.Expr = pl.col("file_id")
+        volume_idx: pl.Expr = pl.col("volume_idx")
+        x: pl.Expr = pl.col("x")
+        y: pl.Expr = pl.col("y")
+        z: pl.Expr = pl.col("z")
+        source_file_id: pl.Expr = pl.col("source_file_id")
+
+    class bvecs:
+        file_id: pl.Expr = pl.col("file_id")
+        row_idx: pl.Expr = pl.col("row_idx")
+        x: pl.Expr = pl.col("x")
+        y: pl.Expr = pl.col("y")
+        z: pl.Expr = pl.col("z")
 
     class dataset_description:
         dataset_id: pl.Expr = pl.col("dataset_id")
@@ -1089,6 +1157,8 @@ class C:
         bvec_x: pl.Expr = pl.col("bvec_x")
         bvec_y: pl.Expr = pl.col("bvec_y")
         bvec_z: pl.Expr = pl.col("bvec_z")
+        bval_file_id: pl.Expr = pl.col("bval_file_id")
+        bvec_file_id: pl.Expr = pl.col("bvec_file_id")
 
     class eeg_channels:
         file_id: pl.Expr = pl.col("file_id")

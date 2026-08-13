@@ -113,6 +113,30 @@ class BidsFile:
         resolved at ingest). Empty frame if there are none."""
         return self._require_lake()._events_for(self.file_id)
 
+    def get_described_by(
+        self,
+        kind: str,
+        *,
+        table: str | None = None,
+        order_by: str | None = "row_idx",
+    ) -> pl.DataFrame:
+        """The rows of the file that *describes* this one — a confounds timeseries, a
+        channels table, a gradient set — reached through ``file_associations``.
+
+        ``kind`` is the ``association_type``, which names the table unless ``table``
+        overrides it. The rows are stored once against the describing file and shared by
+        every file it describes, so this is the read side of BIDS inheritance for tabular
+        companions: a root-level ``dwi.bval`` or ``task-*_events.tsv`` answers here for
+        every image below it, without a copy per image.
+
+        Empty frame when the catalog has no such table — an adapter's table is absent from
+        a catalog built without that adapter, which is an answer, not an error.
+
+        For the ordered per-volume tables an equivalent view exists and carries the BIDS
+        concepts (``lake.get(table="diffusion", sub="01")``); this is the per-file lookup.
+        """
+        return self._require_lake()._rows_for(self.file_id, kind, table=table, order_by=order_by)
+
     def get_associated(self, kind: str | None = None) -> list[BidsFile]:
         """Files cross-referenced from this one (fieldmaps, events, …) via
         `file_associations`, optionally filtered to one `association_type`."""

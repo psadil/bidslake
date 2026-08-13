@@ -522,17 +522,44 @@ class BidsLake:
                 meta[key] = value
         return meta
 
+    def _rows_for(
+        self,
+        file_id: int,
+        association_type: str,
+        table: str | None = None,
+        order_by: str | None = None,
+    ) -> DataFrame:
+        """Rows of the file that *describes* `file_id`, reached through `file_associations`.
+
+        The one shape every such relation takes (docs/adr/0007): the rows are stored once,
+        keyed by the describing file, and the edge says which data files they are about. An
+        inherited describing file — ds114's root `task-*_events.tsv` over 20 BOLD runs, or
+        its `dwi.bval` over 20 images — is one stored copy and N edges, so this is a lookup
+        rather than a scan over duplicated rows.
+
+        `association_type` names the table by default: a schema-declared edge is named for
+        the table it feeds (`events`), and an overlay-declared one is namespaced to it
+        (`fmriprep_confounds`), so the map is the identity in both cases.
+        """
+        tbl = table or association_type
+        if tbl not in self.tables():
+            # An adapter's table is absent from a catalog built without that adapter, which
+            # is a legitimate "no rows" rather than an error.
+            return DataFrame()
+        sql = (
+            f"SELECT t.* FROM file_associations fa "
+            f"JOIN {quote_ident(tbl)} t ON t.file_id = fa.target_file_id "
+            f"WHERE fa.source_file_id = ? AND fa.association_type = ?"
+        )
+        if order_by is not None:
+            sql += f" ORDER BY t.{quote_ident(order_by)}"
+        return self._query(sql, [file_id, association_type])
+
     def _events_for(self, file_id: int) -> DataFrame:
         # Ordered by `onset`, which is what addresses an event. `events` is declared
         # order-insensitive so its files are read concurrently and it has no `row_idx`;
         # `onset` is the canonical order, and BIDS asks for events.tsv to be written in it.
-        return self._query(
-            "SELECT e.* FROM file_associations fa "
-            "JOIN events e ON e.file_id = fa.target_file_id "
-            "WHERE fa.source_file_id = ? AND fa.association_type = 'events' "
-            "ORDER BY e.onset",
-            [file_id],
-        )
+        return self._rows_for(file_id, "events", order_by="onset")
 
     def _associated_for(
         self, dataset_id: str, root_uri: str, file_id: int, kind: str | None

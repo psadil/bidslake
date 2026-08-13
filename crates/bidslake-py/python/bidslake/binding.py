@@ -32,11 +32,20 @@ A binding states that shape once::
                 join=("sub", "ses"), dataset_id="freesurfer",
                 where={"seg": "wmparc", "extension": ".mgz"}),
             "motion": TableInput(
-                join=("sub", "ses", "task", "run"), table="fmriprep_confounds",
+                association="fmriprep_confounds", table="fmriprep_confounds",
                 columns=("rot_x", "rot_y", "rot_z", "trans_x", "trans_y", "trans_z"),
                 order_by="row_idx"),
         },
     )
+
+The ``motion`` input is keyed by ``association``, not by entities, and the difference is
+not cosmetic. A confounds file happens to share ``sub``/``ses``/``task``/``run`` with the
+images it describes, so an entity match gets the right answer — but only by luck of naming.
+The same match is simply *wrong* for a describing file one directory level up: ds114's
+root ``dwi.bval`` applies to twenty images and has no ``sub`` to join on at all. The
+association is derived from the schema's own ``meta.associations``, so it is right in both
+cases, and it is the same relation :meth:`BidsFile.get_described_by` reads
+(``docs/adr/0007``). ``join=`` remains for tables with no declared association.
 
     for unit in lake.bind(MELODIC):
         if unit.unresolved:
@@ -153,12 +162,33 @@ class TableInputOf[E: str]:
     whose source line order is meaningful (recordings, positional ``*timeseries.tsv``), and
     there it reproduces that order. Tables declared order-insensitive have no ``row_idx`` —
     ``events`` is the one BIDS table in that group, and its rows are addressed by ``onset``.
+
+    Two ways to say which rows belong to a unit, and exactly one must be given:
+
+    ``association``
+        The rows of the file the schema says *describes* the anchor, through
+        ``file_associations`` (docs/adr/0007). Derived, so it is right by construction —
+        including for a describing file that sits at a *higher* directory level and covers
+        many images, where there is no entity to match on at all.
+    ``join``
+        Match the anchor's entity values. A heuristic, and the only option for a table with
+        no declared association. It happens to be right for confounds, whose file shares
+        ``sub``/``ses``/``task``/``run`` with its images, and is simply wrong for an
+        inherited one: a root-level ``dwi.bval`` has no ``sub`` to join on.
     """
 
-    join: tuple[E, ...]
     table: str
     columns: tuple[str, ...]
+    join: tuple[E, ...] = ()
+    association: str | None = None
     order_by: str | None = None
+
+    def __post_init__(self) -> None:
+        if bool(self.join) == bool(self.association):
+            raise ValueError(
+                f"TableInput({self.table!r}) needs exactly one of `join` or `association`; "
+                f"got join={self.join!r}, association={self.association!r}"
+            )
 
 
 type InputOf[F: Mapping[str, Any], E: str] = FileInputOf[F, E] | TableInputOf[E]
@@ -376,6 +406,40 @@ def _index_files(
     return index
 
 
+def _index_table_by_association(
+    lake: BidsLake, name: str, spec: TableInputOf[Any]
+) -> dict[int, DataFrame]:
+    """Every row of one table input, bucketed by the **anchor file id** it describes.
+
+    Still one query for the whole study, like `_index_table`: the edges are a join, not a
+    per-unit lookup. The bucketing key is `file_associations.source_file_id`, so a
+    describing file shared by many anchors lands in each of their buckets from one stored
+    copy.
+
+    Columns are checked against the raw table, not `lake._relation(...)`: the SELECT is off
+    the table itself, so the registry's concept columns are not in scope here.
+    """
+    assert spec.association is not None
+    _check_columns(lake, spec.table, spec.columns, f"input {name!r}")
+    if spec.order_by is not None:
+        _check_columns(lake, spec.table, [spec.order_by], f"input {name!r} order_by")
+    select = ", ".join(f"t.{quote_ident(c)}" for c in spec.columns)
+    sql = (
+        f"SELECT fa.source_file_id AS __src, {select} "
+        f"FROM file_associations fa "
+        f"JOIN {quote_ident(spec.table)} t ON t.file_id = fa.target_file_id "
+        f"WHERE fa.association_type = ?"
+    )
+    if spec.order_by is not None:
+        sql += f" ORDER BY t.{quote_ident(spec.order_by)}"
+
+    df = lake._query(sql, [spec.association])
+    if df.is_empty():
+        return {}
+    parts = df.partition_by(["__src"], as_dict=True, maintain_order=True)
+    return {key[0]: part.select(list(spec.columns)) for key, part in parts.items()}
+
+
 def _index_table(
     lake: BidsLake, name: str, spec: TableInputOf[Any]
 ) -> dict[tuple[Any, ...], DataFrame]:
@@ -427,7 +491,16 @@ def resolve(lake: BidsLake, binding: BindingOf[Any, Any]) -> list[Unit]:
     file_specs = {n: s for n, s in binding.inputs.items() if isinstance(s, FileInputOf)}
     table_specs = {n: s for n, s in binding.inputs.items() if isinstance(s, TableInputOf)}
     file_index = {n: _index_files(lake, n, s) for n, s in file_specs.items()}
-    table_index = {n: _index_table(lake, n, s) for n, s in table_specs.items()}
+    # Association-keyed inputs bucket by the anchor's own `file_id`; entity-keyed ones by
+    # its entity tuple. Both are one query for the whole study.
+    table_index: dict[str, dict[Any, DataFrame]] = {
+        n: (
+            _index_table_by_association(lake, n, s)
+            if s.association is not None
+            else _index_table(lake, n, s)
+        )
+        for n, s in table_specs.items()
+    }
 
     units: list[Unit] = []
     for anchor in lake.get(table=binding.table, **binding.anchor):
@@ -446,7 +519,12 @@ def resolve(lake: BidsLake, binding: BindingOf[Any, Any]) -> list[Unit]:
                 )
 
         for name, spec in table_specs.items():
-            part = table_index[name].get(tuple(anchor.entities.get(k) for k in spec.join))
+            bucket = (
+                anchor.file_id
+                if spec.association is not None
+                else tuple(anchor.entities.get(k) for k in spec.join)
+            )
+            part = table_index[name].get(bucket)
             if part is None or part.is_empty():
                 unresolved.append(Unresolved(name, 0, "missing"))
             else:
