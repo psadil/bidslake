@@ -1,7 +1,10 @@
 {
   "IngestionSchemaVersion": "0.1.0",
   "tables": {
-    "fmriprep_confounds": { "undeclared": "catalog" },
+    "fmriprep_confounds": {
+      "undeclared": "catalog",
+      "describes": { "association": "fmriprep_confounds", "axis": "volume", "view": "timeseries" }
+    },
     "sidecars": {
       "undeclaredWhen": [
         {

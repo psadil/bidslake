@@ -154,5 +154,18 @@
         }
       }
     }
+  },
+  "meta": {
+    "associations": {
+      "fmriprep_confounds": {
+        "selectors": ["suffix == 'bold'", "extension != '.json'"],
+        "target": {
+          "suffix": "timeseries",
+          "extension": ".tsv",
+          "entities": ["desc"]
+        },
+        "inherit": false
+      }
+    }
   }
 }
