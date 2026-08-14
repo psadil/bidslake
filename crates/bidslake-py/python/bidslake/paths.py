@@ -38,13 +38,19 @@ def to_upath(uri: str) -> UPath:
     return UPath(uri)
 
 
-def to_local_path(uri: str) -> Path:
+def to_local_path(uri: str | UPath) -> Path:
     """The on-disk :class:`~pathlib.Path` for a ``file://`` URI.
 
     Raises :class:`RemotePathError` for any non-local scheme.
+
+    A :class:`~upath.UPath` is accepted as well as a string, because that is what
+    :meth:`BidsLake.resolve` and :func:`sibling_path` hand back and ``str()`` of one is
+    the URI — so requiring the string turned every call site into
+    ``to_local_path(str(lake.resolve(...)))``.
     """
-    if not uri.startswith("file://"):
+    text = str(uri)
+    if not text.startswith("file://"):
         raise RemotePathError(
-            f"{uri!r} is not a local file:// URI; use `.path` (a UPath) or `.open()`"
+            f"{text!r} is not a local file:// URI; use `.path` (a UPath) or `.open()`"
         )
-    return Path(uri[len("file://") :])
+    return Path(text[len("file://") :])

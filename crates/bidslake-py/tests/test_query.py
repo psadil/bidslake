@@ -19,9 +19,13 @@ BOLD = {"dataset_id": "eyetracking_fmri", "suffix": "bold", "extension": ".nii.g
 
 
 def _units(lake, *roles, **anchor):
-    """One row per anchor file, every role beside it."""
+    """One row per anchor file, every role beside it.
+
+    `root_uri` is selected alongside `dataset_id`/`file_path` so `sibling_path(row)` can
+    read the anchor the same way it reads a sibling.
+    """
     a = AllFiles.__table__.alias("a")
-    cols = [a.c.dataset_id, a.c.sub, a.c.ses, a.c.task, a.c.run, a.c.file_path]
+    cols = [a.c.dataset_id, a.c.root_uri, a.c.sub, a.c.ses, a.c.task, a.c.run, a.c.file_path]
     frm = a
     for name, join, where, via in roles:
         lat, sel = bidslake.sibling(a, name, join, where, via=via)
@@ -154,3 +158,58 @@ def test_many_siblings_are_still_one_query(lake) -> None:
     assert df.height == 2
     for i in range(8):
         assert df[f"r{i}__n"].to_list() == [1, 1]
+
+
+# -- reading the columns back ------------------------------------------------
+#
+# `sibling()` invented the `<name>__dataset_id/__root_uri/__file_path/__n` convention.
+# These two read it, so a consumer does not re-implement the unpack (which is what both
+# a2cps pipelines had done, identically).
+
+
+def test_sibling_path_resolves_a_role_and_the_anchor(lake) -> None:
+    """The three location columns are one path, and `name=None` means the anchor."""
+    df = _units(lake, ("anat", ("sub", "ses"), {"suffix": "T1w"}, None), **BOLD)
+    row = df.row(0, named=True)
+
+    anat = bidslake.sibling_path(lake, row, "anat")
+    assert anat.name.endswith("_T1w.nii.gz")
+    assert bidslake.to_local_path(anat).is_file(), "must resolve to the real file on disk"
+
+    anchor = bidslake.sibling_path(lake, row)
+    assert anchor.name.endswith("_bold.nii.gz")
+    assert str(anchor).endswith(row["file_path"])
+
+    # Same answer as the long form it replaces.
+    assert anat == lake.resolve(
+        row["anat__dataset_id"], row["anat__file_path"], row["anat__root_uri"]
+    )
+
+
+def test_to_local_path_takes_a_upath_as_well_as_a_str(lake) -> None:
+    """So a call site is not `to_local_path(str(lake.resolve(...)))`."""
+    df = _units(lake, ("anat", ("sub", "ses"), {"suffix": "T1w"}, None), **BOLD)
+    p = bidslake.sibling_path(lake, df.row(0, named=True), "anat")
+    assert bidslake.to_local_path(p) == bidslake.to_local_path(str(p))
+
+
+def test_unresolved_reports_only_the_siblings_that_are_not_exactly_one(lake) -> None:
+    """Empty when every role resolved; otherwise the count, which separates the two
+    failures — 0 is a subject to skip, 2+ is a query to fix."""
+    roles = (
+        ("anat", ("sub", "ses"), {"suffix": "T1w"}, None),  # resolves
+        ("nope", ("sub", "ses"), {"suffix": "T1w", "desc": "x"}, None),  # missing
+        ("both", ("sub", "ses"), {"suffix": "bold"}, None),  # both runs -> 2
+    )
+    row = _units(lake, *roles, **BOLD).row(0, named=True)
+
+    assert bidslake.unresolved(row, ["anat"]) == {}
+    assert bidslake.unresolved(row, ["nope"]) == {"nope": 0}
+    assert bidslake.unresolved(row, ["both"]) == {"both": 2}
+    assert bidslake.unresolved(row, [n for n, *_ in roles]) == {"nope": 0, "both": 2}
+
+
+def test_unresolved_accepts_any_iterable_of_names(lake) -> None:
+    """A dict of roles is the natural thing to pass, and iterating it yields its keys."""
+    row = _units(lake, ("anat", ("sub", "ses"), {"suffix": "T1w"}, None), **BOLD).row(0, named=True)
+    assert bidslake.unresolved(row, {"anat": "..."}) == {}

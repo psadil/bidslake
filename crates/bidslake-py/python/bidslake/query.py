@@ -8,18 +8,27 @@ each has three possible outcomes rather than two: resolved, missing, or ambiguou
 
 :func:`sibling` is that shape as one `LEFT JOIN LATERAL`. Everything else stays an
 ordinary SQLAlchemy statement the caller writes and can print.
+
+:func:`sibling_path` and :func:`unresolved` read back the columns :func:`sibling` writes.
+They exist because it invented that column convention and shipped nothing to decode it, so
+every consumer wrote the same unpack by hand.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from typing import Any, NamedTuple
+from collections.abc import Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from sqlalchemy import and_, func, select
 from sqlalchemy.sql import ColumnElement, FromClause
 from sqlalchemy.sql.selectable import LateralFromClause
 
 from .schema.models import DatasetLinkTargets
+
+if TYPE_CHECKING:
+    from upath import UPath
+
+    from .layout import BidsLake
 
 
 class Sibling(NamedTuple):
@@ -124,3 +133,38 @@ def sibling(
             func.coalesce(func.len(lat.c.p), 0).label(f"{name}__n"),
         ],
     )
+
+
+def sibling_path(lake: BidsLake, row: Mapping[str, Any], name: str | None = None) -> UPath:
+    """Where the sibling ``name`` of ``row`` is, or the anchor when ``name`` is None.
+
+    The read side of :func:`sibling`'s columns. A row carries
+    ``<name>__dataset_id``/``__root_uri``/``__file_path`` per sibling because a path only
+    means something together with the root it was walked from, and
+    :meth:`BidsLake.resolve` is what applies ``base_dir``/``root_override`` to the pair.
+    ``name=None`` reads the unprefixed columns — the anchor, when the caller selected them.
+
+    Returns a :class:`~upath.UPath`, like :meth:`BidsLake.resolve`; wrap it in
+    :func:`~bidslake.to_local_path` for a catalog you know is local.
+    """
+    p = f"{name}__" if name else ""
+    return lake.resolve(row[f"{p}dataset_id"], row[f"{p}file_path"], row[f"{p}root_uri"])
+
+
+def unresolved(row: Mapping[str, Any], names: Iterable[str]) -> dict[str, int]:
+    """The siblings of ``row`` that are not exactly one file, as ``{name: count}``.
+
+    ``0`` is missing — that unit is incomplete — and ``2+`` is ambiguous, meaning the
+    ``join``/``where`` given to :func:`sibling` under-specify. Both are data rather than
+    errors, and both are wrong to take silently, which is what this exists to make hard.
+    An empty result means every named sibling resolved::
+
+        if bad := unresolved(row, ROLES):
+            log.warning(f"skipping {label}: {bad}")
+            continue
+
+    The counts rather than a formatted reason, because callers phrase it differently and
+    the difference between *missing* and *ambiguous* is often the difference between a
+    subject to skip and a query to fix.
+    """
+    return {n: c for n in names if (c := row[f"{n}__n"]) != 1}
