@@ -47,8 +47,15 @@ def compile_statement(stmt: ClauseElement) -> tuple[str, list[Any]]:
     Compiled params come back as a *dict* under a positional paramstyle; `positiontup` is
     the order the `?`s expect, and pairing them any other way silently binds the wrong
     values to the wrong placeholders.
+
+    `render_postcompile` is what "compiled, never executed" costs. SQLAlchemy leaves the
+    *expanding* parameters `in_()` builds as a single `__[POSTCOMPILE_x]` token and only
+    expands them to one `?` per value at execution time — which never comes here. Without
+    the flag an `IN` clause emits that token verbatim and hands back one list-valued param,
+    so the SQL has no placeholder to bind and DuckDB rejects it. Setting it moves the
+    expansion into the compile step — the only step this function gets.
     """
-    compiled = stmt.compile(dialect=_DIALECT)
+    compiled = stmt.compile(dialect=_DIALECT, compile_kwargs={"render_postcompile": True})
     # `compile` is typed as returning the base `Compiled`; only the SQL compiler carries
     # `positiontup`. Narrowed rather than cast, so a statement that somehow compiled to
     # something else says so here instead of failing on a missing attribute.
