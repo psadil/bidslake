@@ -79,6 +79,37 @@ fn count(db: &BidsDb, sql: &str) -> i64 {
     db.conn.query_row(sql, [], |r| r.get(0)).unwrap()
 }
 
+/// Write a dataset whose `dataset_description.json` carries a BIDS `DatasetLinks` map —
+/// the *naming* half of `dataset_links` (`link_type='named'`).
+fn write_dataset_with_links(root: &Path, name: &str, links: &[(&str, &str)]) {
+    write_dataset(root, name, &[], None);
+    let path = root.join("dataset_description.json");
+    let mut desc: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    desc["DatasetLinks"] = links
+        .iter()
+        .map(|(k, v)| (k.to_string(), serde_json::json!(v)))
+        .collect::<serde_json::Map<_, _>>()
+        .into();
+    fs::write(&path, serde_json::to_string(&desc).unwrap()).unwrap();
+}
+
+/// All `(from, link_name, target)` rows of the naming resolver, sorted. `target` is `None`
+/// when nothing in the catalog holds the identity yet.
+fn link_targets(db: &BidsDb) -> Vec<(String, String, Option<String>)> {
+    let mut stmt = db
+        .conn
+        .prepare(
+            "SELECT from_dataset_id, link_name, target_dataset_id FROM dataset_link_targets \
+             ORDER BY from_dataset_id, link_name",
+        )
+        .unwrap();
+    stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
 #[tokio::test]
 async fn shares_source_by_shared_doi() -> anyhow::Result<()> {
     // fMRIPrep declares the DOI as a URL, MRIQC as the bare DOI — normalization must collide them.
@@ -369,5 +400,172 @@ async fn unparseable_source_is_opaque_not_dropped() -> anyhow::Result<()> {
         |r| r.get(0),
     )?;
     assert_eq!(kind, "opaque");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Naming links (`named`/`alias`) — the other half of `dataset_links`.
+//
+// `dataset_links` holds two kinds of statement: provenance ("came from") and naming
+// ("here, N refers to L"). Only provenance may reach `dataset_relations`; naming resolves
+// through `dataset_link_targets`. Keeping them apart is what lets a query name a dataset
+// without hardcoding an id, and is why these tests assert an *absence* as hard as a
+// presence.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_named_link_is_not_a_derivation() -> anyhow::Result<()> {
+    // studyA merely *references* studyB. Referencing is not deriving: a study pointing at a
+    // template, an atlas or a shared recon-all tree did not come from it. This regressed a
+    // real bug — the `derived_from`/`source_of` arms filtered no `link_type` at all, so every
+    // `DatasetLinks` entry read as a derivation.
+    let tmp = tempfile::tempdir()?;
+    let (a, b) = (tmp.path().join("a"), tmp.path().join("b"));
+    write_dataset_with_links(&a, "studyA", &[("fs", "dataset:studyB")]);
+    write_dataset(&b, "studyB", &[], None);
+    let db = empty_db();
+    ingest_into(&db, &b, "studyB", &[]).await;
+    ingest_into(&db, &a, "studyA", &[]).await;
+
+    assert_eq!(
+        count(
+            &db,
+            "SELECT count(*) FROM dataset_links WHERE dataset_id='studyA' AND link_type='named'"
+        ),
+        1,
+        "the DatasetLinks entry must still be stored"
+    );
+    assert!(
+        relations(&db).is_empty(),
+        "a named link must produce no relation, got {:?}",
+        relations(&db)
+    );
+    assert_eq!(
+        link_targets(&db),
+        vec![(
+            "studyA".to_string(),
+            "fs".to_string(),
+            Some("studyB".to_string())
+        )],
+        "it must resolve as a *name* instead"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_alias_survives_reindexing_and_makes_no_relation() -> anyhow::Result<()> {
+    // `alias` is the user-asserted counterpart of `DatasetLinks`, so it follows `declared`:
+    // never cleared by a re-ingest. A `named` link in its place would be wiped, which is the
+    // whole reason a separate link_type exists.
+    let tmp = tempfile::tempdir()?;
+    let (a, b) = (tmp.path().join("a"), tmp.path().join("b"));
+    write_dataset(&a, "studyA", &[], None);
+    write_dataset(&b, "studyB", &[], None);
+    let db = empty_db();
+    ingest_into(&db, &a, "studyA", &[]).await;
+    ingest_into(&db, &b, "studyB", &[]).await;
+
+    db.record_dataset_link(
+        "studyA",
+        "alias",
+        "fs",
+        "dataset:studyB",
+        &bidslake::links::canonicalize("dataset:studyB"),
+    )?;
+    assert_eq!(
+        link_targets(&db),
+        vec![(
+            "studyA".to_string(),
+            "fs".to_string(),
+            Some("studyB".to_string())
+        )]
+    );
+
+    ingest_into(&db, &a, "studyA", &[]).await; // re-index the dataset the alias lives in
+    assert_eq!(
+        link_targets(&db),
+        vec![(
+            "studyA".to_string(),
+            "fs".to_string(),
+            Some("studyB".to_string())
+        )],
+        "an alias must survive a re-index"
+    );
+    assert!(
+        relations(&db).is_empty(),
+        "an alias must produce no relation, got {:?}",
+        relations(&db)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_alias_may_name_a_target_indexed_later() -> anyhow::Result<()> {
+    // The property the view buys, and the reason the target is not stored: naming a dataset
+    // that is not in the catalog yet is a legitimate forward reference, not an error. It
+    // starts resolving when the target arrives — no re-index of the naming dataset, no
+    // re-running of `link alias`. Same argument as ADR 0003 §2's `ingest_order_does_not_matter`.
+    let tmp = tempfile::tempdir()?;
+    let (a, b) = (tmp.path().join("a"), tmp.path().join("b"));
+    write_dataset(&a, "studyA", &[], None);
+    write_dataset(&b, "studyB", &[], None);
+    let db = empty_db();
+    ingest_into(&db, &a, "studyA", &[]).await;
+    db.record_dataset_link(
+        "studyA",
+        "alias",
+        "fs",
+        "dataset:studyB",
+        &bidslake::links::canonicalize("dataset:studyB"),
+    )?;
+
+    assert_eq!(
+        link_targets(&db),
+        vec![("studyA".to_string(), "fs".to_string(), None)],
+        "the row exists but resolves to nothing — which is how a caller tells \
+         'not indexed yet' from 'misspelled name'"
+    );
+
+    ingest_into(&db, &b, "studyB", &[]).await;
+    assert_eq!(
+        link_targets(&db),
+        vec![(
+            "studyA".to_string(),
+            "fs".to_string(),
+            Some("studyB".to_string())
+        )],
+        "and resolves once the target is indexed, with nothing else re-run"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_root_relative_dataset_link_resolves_to_its_target() -> anyhow::Result<()> {
+    // The form BIDS actually writes. A `DatasetLinks` value is relative to the dataset root,
+    // so it only becomes an identity the target can hold once it is joined to that root —
+    // before that it canonicalized to `dataset:../freesurfer`, which nothing is.
+    let tmp = tempfile::tempdir()?;
+    let study = tmp.path().join("study");
+    let (deriv, fs_tree) = (study.join("fmriprep"), study.join("freesurfer"));
+    write_dataset_with_links(&deriv, "fmriprep", &[("fs", "../freesurfer")]);
+    write_dataset(&fs_tree, "freesurfer", &[], None);
+
+    let db = empty_db();
+    ingest_into(&db, &deriv, "fmriprep", &[]).await;
+    ingest_into(&db, &fs_tree, "freesurfer", &[]).await;
+
+    assert_eq!(
+        link_targets(&db),
+        vec![(
+            "fmriprep".to_string(),
+            "fs".to_string(),
+            Some("freesurfer".to_string())
+        )]
+    );
+    assert!(
+        relations(&db).is_empty(),
+        "and it is still not a derivation, got {:?}",
+        relations(&db)
+    );
     Ok(())
 }

@@ -569,8 +569,6 @@ impl Schema {
         // the relation they join through to answer "which subject/task is this row from?".
         // Filtering to data files here would leave that question unanswerable for them.
         //
-        // The one view. "Just the data files" is `WHERE kind = 'data'`, which is short enough
-        // not to earn a second view that could drift from this one's concept expressions.
         let concepts: Vec<String> = self
             .generated_bids_columns(project)
             .iter()
@@ -583,6 +581,9 @@ impl Schema {
                 concepts.join(",\n         ")
             ),
         );
+        // The one view. "Just the data files" is `WHERE kind = 'data'`, which is short
+        // enough not to earn a second view that could drift from this one's concept
+        // expressions.
     }
 
     /// Generate one table from a schema-derived [`TableSpec`]: DDL, the write-path

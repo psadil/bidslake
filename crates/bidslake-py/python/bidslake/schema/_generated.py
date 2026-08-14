@@ -207,6 +207,14 @@ COLUMNS: dict[str, dict[str, str]] = {
         "identity_kind": "VARCHAR",
         "source": "VARCHAR",
     },
+    "dataset_link_targets": {
+        "from_dataset_id": "VARCHAR",
+        "link_name": "VARCHAR",
+        "target_dataset_id": "VARCHAR",
+        "link_type": "VARCHAR",
+        "declared_ref": "VARCHAR",
+        "via_identity": "VARCHAR",
+    },
     "dataset_links": {
         "dataset_id": "VARCHAR",
         "link_type": "VARCHAR",
@@ -1123,6 +1131,14 @@ class C:
         identity: pl.Expr = pl.col("identity")
         identity_kind: pl.Expr = pl.col("identity_kind")
         source: pl.Expr = pl.col("source")
+
+    class dataset_link_targets:
+        from_dataset_id: pl.Expr = pl.col("from_dataset_id")
+        link_name: pl.Expr = pl.col("link_name")
+        target_dataset_id: pl.Expr = pl.col("target_dataset_id")
+        link_type: pl.Expr = pl.col("link_type")
+        declared_ref: pl.Expr = pl.col("declared_ref")
+        via_identity: pl.Expr = pl.col("via_identity")
 
     class dataset_links:
         dataset_id: pl.Expr = pl.col("dataset_id")

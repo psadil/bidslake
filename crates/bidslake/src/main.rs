@@ -173,14 +173,18 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum LinkAction {
-    /// Create the cross-dataset link tables + `dataset_relations` view on an existing
-    /// catalog and backfill declarations from the stored `dataset_description` rows — so a
-    /// catalog indexed before this feature gains links without a re-index.
+    /// Create the cross-dataset link tables and both resolver views — `dataset_relations`
+    /// (provenance) and `dataset_link_targets` (naming) — on an existing catalog, and
+    /// backfill declarations from the stored `dataset_description` rows, so a catalog
+    /// indexed before either existed gains them without a re-index.
     Init {
         #[arg(short, long, default_value = "bidslake.duckdb")]
         database: String,
     },
     /// Declare that a catalog dataset derives from a source. Repeatable `--source-dataset`.
+    ///
+    /// This is a *provenance* statement — "came from". To say "the name `freesurfer` means
+    /// that dataset", which is what a query names, use `link alias`.
     Add {
         #[arg(short, long, default_value = "bidslake.duckdb")]
         database: String,
@@ -191,19 +195,43 @@ enum LinkAction {
         #[arg(long = "source-dataset", required = true)]
         source_dataset: Vec<String>,
     },
-    /// List resolved relations, dangling declarations, and any version drift.
+    /// Name another dataset, so a query can refer to it without hardcoding a `dataset_id`.
+    ///
+    /// The hand-written counterpart of BIDS `DatasetLinks`, and a *naming* statement rather
+    /// than a provenance one: it creates no `dataset_relations` edge, because pointing at a
+    /// dataset is not deriving from it. Resolved through the `dataset_link_targets` view, so
+    /// naming a target that is not indexed yet is fine — it starts resolving when the target
+    /// arrives, with no re-index. Survives re-indexing, like `link add`.
+    Alias {
+        #[arg(short, long, default_value = "bidslake.duckdb")]
+        database: String,
+        /// The catalog dataset the name is being defined *in*.
+        #[arg(long)]
+        dataset: String,
+        /// The name a query will use, e.g. `freesurfer`.
+        #[arg(long = "as", value_name = "NAME")]
+        name: String,
+        /// What it refers to: a DOI, URL, path, or `dataset:<id>` (or a bare dataset id).
+        #[arg(long)]
+        target: String,
+    },
+    /// List resolved relations, named links, dangling declarations, and any version drift.
     List {
         #[arg(short, long, default_value = "bidslake.duckdb")]
         database: String,
     },
-    /// Remove a declared (`--source-dataset`/`link add`) link. Repeatable `--source-dataset`.
+    /// Remove a link this catalog's user added: a `--source-dataset` declaration, or — with
+    /// `--as` — a name created by `link alias`.
     Rm {
         #[arg(short, long, default_value = "bidslake.duckdb")]
         database: String,
         #[arg(long)]
         dataset: String,
-        #[arg(long = "source-dataset", required = true)]
+        #[arg(long = "source-dataset")]
         source_dataset: Vec<String>,
+        /// Remove the named link created by `link alias --as NAME`.
+        #[arg(long = "as", value_name = "NAME")]
+        name: Option<String>,
     },
 }
 
@@ -336,11 +364,54 @@ fn run_link(action: LinkAction) -> Result<()> {
             println!("Declared {} source(s) for {dataset}.", source_dataset.len());
             Ok(())
         }
+        LinkAction::Alias {
+            database,
+            dataset,
+            name,
+            target,
+        } => {
+            if name.trim().is_empty() {
+                anyhow::bail!("`--as` must be a non-empty name");
+            }
+            let db = BidsDb::new(&database)?;
+            ensure_link_tables(&db)?;
+            db.record_dataset_link(
+                &dataset,
+                "alias",
+                &name,
+                &target,
+                &links::canonicalize(&target),
+            )?;
+            // Report whether it resolves *now*, without implying it must: an unresolved
+            // alias is a legitimate forward reference that starts working when its target
+            // is indexed, so this is information rather than a warning.
+            let resolved: Option<String> = db
+                .conn
+                .query_row(
+                    "SELECT target_dataset_id FROM dataset_link_targets \
+                     WHERE from_dataset_id = ? AND link_name = ?",
+                    duckdb::params![dataset, name],
+                    |r| r.get(0),
+                )
+                .unwrap_or(None);
+            match resolved {
+                Some(target_id) => println!("{dataset}: `{name}` -> {target_id}"),
+                None => println!(
+                    "{dataset}: `{name}` -> {target} (not in this catalog yet; \
+                     it will resolve once that dataset is indexed)"
+                ),
+            }
+            Ok(())
+        }
         LinkAction::Rm {
             database,
             dataset,
             source_dataset,
+            name,
         } => {
+            if source_dataset.is_empty() && name.is_none() {
+                anyhow::bail!("`link rm` needs `--source-dataset <ref>` or `--as <name>`");
+            }
             let db = BidsDb::new(&database)?;
             let mut removed = 0usize;
             for reference in &source_dataset {
@@ -351,7 +422,14 @@ fn run_link(action: LinkAction) -> Result<()> {
                     duckdb::params![dataset, identity.value],
                 )?;
             }
-            println!("Removed {removed} declared link(s) for {dataset}.");
+            if let Some(name) = &name {
+                removed += db.conn.execute(
+                    "DELETE FROM dataset_links \
+                     WHERE dataset_id = ? AND link_type = 'alias' AND link_name = ?",
+                    duckdb::params![dataset, name],
+                )?;
+            }
+            println!("Removed {removed} user-added link(s) for {dataset}.");
             Ok(())
         }
         LinkAction::List { database } => {
@@ -361,11 +439,14 @@ fn run_link(action: LinkAction) -> Result<()> {
     }
 }
 
-/// Create the cross-dataset link tables + view on an existing catalog (idempotent).
+/// Create the cross-dataset link tables + both resolver views on an existing catalog
+/// (idempotent), so a catalog indexed before either view existed gains it with no re-index.
 fn ensure_link_tables(db: &BidsDb) -> Result<()> {
     db.conn.execute(schema::CREATE_DATASET_LINKS_TABLE, [])?;
     db.conn.execute(schema::CREATE_DATASET_IDENTITY_TABLE, [])?;
     db.conn.execute(schema::CREATE_DATASET_RELATIONS_VIEW, [])?;
+    db.conn
+        .execute(schema::CREATE_DATASET_LINK_TARGETS_VIEW, [])?;
     Ok(())
 }
 
@@ -430,15 +511,18 @@ fn backfill_links(db: &BidsDb) -> Result<usize> {
             && let Ok(serde_json::Value::Object(map)) =
                 serde_json::from_str::<serde_json::Value>(dl)
         {
+            // Resolved against a stored root, exactly as the ingest path does — a
+            // `DatasetLinks` value is usually relative to the dataset root. A dataset with
+            // several roots resolves against the first; a relative link is a statement about
+            // the tree it was written in, and every root of one dataset holds the same tree.
+            let root_uri = db.dataset_roots(dataset_id)?.into_iter().next();
             for (name, uri) in map {
                 if let Some(uri) = uri.as_str() {
-                    db.record_dataset_link(
-                        dataset_id,
-                        "named",
-                        &name,
-                        uri,
-                        &links::canonicalize(uri),
-                    )?;
+                    let identity = match &root_uri {
+                        Some(root) => links::canonicalize_relative_to(uri, root),
+                        None => links::canonicalize(uri),
+                    };
+                    db.record_dataset_link(dataset_id, "named", &name, uri, &identity)?;
                 }
             }
         }
@@ -465,6 +549,43 @@ fn list_links(db: &BidsDb) -> Result<()> {
     for row in rows {
         let (from, relation, to, via) = row?;
         println!("  {from}  {relation}  {to}  (via {via})");
+        any = true;
+    }
+    if !any {
+        println!("  (none)");
+    }
+
+    // The naming half of `dataset_links`. Listed apart from relations because it is a
+    // different kind of statement — "refers to", not "came from" — and an unresolved name is
+    // a forward reference rather than a fault, so it is reported without alarm.
+    println!("\nNamed links (what a query's `via=` resolves to):");
+    let mut stmt = db.conn.prepare(
+        "SELECT from_dataset_id, link_name, target_dataset_id, link_type, declared_ref \
+         FROM dataset_link_targets ORDER BY from_dataset_id, link_name",
+    )?;
+    let mut any = false;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, String>(4)?,
+        ))
+    })?;
+    for row in rows {
+        let (from, name, target, link_type, declared) = row?;
+        let origin = if link_type == "alias" {
+            "alias"
+        } else {
+            "DatasetLinks"
+        };
+        match target {
+            Some(target) => println!("  {from}  `{name}`  →  {target}  ({origin})"),
+            None => {
+                println!("  {from}  `{name}`  →  {declared}  ({origin}; not in this catalog yet)")
+            }
+        }
         any = true;
     }
     if !any {
