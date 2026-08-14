@@ -149,19 +149,31 @@ The `__n` columns are the point. A per-unit gap is data, not an exception, and t
 outcomes are distinguishable: `1` resolved, `0` missing (that subject is incomplete),
 `2+` ambiguous (the filter under-specifies — e.g. joining on `sub` alone across datasets
 whose subject labels collide). Incomplete subjects are visible before anything is
-submitted:
+submitted.
+
+`sibling()` writes those columns and `unresolved()` / `sibling_path()` read them back:
 
 ```python
+from bidslake import sibling_path, to_local_path, unresolved
+
 for row in units.iter_rows(named=True):
-    if bad := {r: row[f"{r}__n"] for r in ROLES if row[f"{r}__n"] != 1}:
-        print(row["sub"], bad)
+    if bad := unresolved(row, ROLES):        # {} when every role resolved
+        print(row["sub"], bad)               # {"wmparc": 0} missing, {"anat": 2} ambiguous
         continue
-    work(lake.resolve(row["dataset_id"], row["file_path"], row["root_uri"]))
+    work(to_local_path(sibling_path(lake, row, "anat")))
 ```
+
+`sibling_path` takes the whole row because a path only means something together with the
+root it was walked from — the three location columns are one answer, and it applies the
+same `base_dir`/`root_override` rebasing as `lake.resolve`. Passing no name reads the
+unprefixed columns, i.e. the anchor. It returns a `UPath`; `to_local_path` is the local
+catalog's shortcut.
 
 Adding filters to the anchor is what a scheduler launching one job per unit wants — it
 narrows the anchor query rather than the result, so the other units are never resolved
-at all.
+at all. Narrow the *table-slice* query below by the same anchor while you are at it: one
+ingested confounds file is associated with every image it describes, so an unrestricted
+fetch pulls the `space-*` resamplings your pipeline never opens.
 
 ### `via` names a link, not a dataset
 

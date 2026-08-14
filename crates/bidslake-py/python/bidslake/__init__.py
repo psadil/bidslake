@@ -35,7 +35,7 @@ from .file import BidsFile
 from .layout import BidsLake, Table
 from .layouts import Layout, LayoutAt, layout
 from .paths import RemotePathError, to_local_path
-from .query import Sibling, sibling
+from .query import Sibling, sibling, sibling_path, unresolved
 from .relations import Relation
 from .schema import C
 
@@ -55,7 +55,9 @@ __all__ = [
     "layout",
     "open",
     "sibling",
+    "sibling_path",
     "to_local_path",
+    "unresolved",
 ]
 
 
