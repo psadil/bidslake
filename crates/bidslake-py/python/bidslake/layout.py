@@ -12,21 +12,17 @@ from typing import Any, Unpack
 # Import the types by name: the `Table.pl`/`Table.lazy` methods would otherwise
 # shadow a `pl` module alias inside the class body's annotations.
 from polars import DataFrame, LazyFrame
+from sqlalchemy.sql import ClauseElement
 from upath import UPath
 
 from . import _bidslake
 from ._arrow import ipc_to_df
 from ._lazy import build_lazy
-from ._sql import ALL_FILES, DATAFILES, quote_ident
-from .binding import BindingOf, Unit, resolve
+from ._sql import ALL_FILES, compile_statement, quote_ident
 from .file import BidsFile
 from .paths import to_upath, to_uri
 from .relations import Relation
 from .schema._generated import SCHEMA_VERSION, GetFilters
-
-# Selected from rather than named directly so a caller's own `WHERE` composes with the
-# `kind` filter that narrows it to data files.
-_ALL_FILES_SQL = f"SELECT * FROM {ALL_FILES}"
 
 
 class Table:
@@ -101,16 +97,6 @@ class BidsLake:
     # -- table access ------------------------------------------------------
 
     @property
-    def datafiles(self) -> Table:
-        """One row per primary **data file**, with its BIDS concepts.
-
-        The surface :meth:`get` iterates. A filter over :attr:`all_files` rather than a
-        table of its own — "data file" is a `kind`, and narrowing to it is a `WHERE`
-        (docs/adr/0006).
-        """
-        return Table(self, DATAFILES, sql=f"{_ALL_FILES_SQL} WHERE kind = 'data'")
-
-    @property
     def all_files(self) -> Table:
         """One row per file the walk saw — every kind, with its BIDS concepts.
 
@@ -124,7 +110,7 @@ class BidsLake:
         """The BIDS ``scans.tsv`` table: acquisition metadata per data file.
 
         Not the file registry — that is :attr:`all_files`. Keyed by ``file_id``, so join it
-        to :attr:`datafiles` to see which file a row is about.
+        to :attr:`all_files` to see which file a row is about.
         """
         return Table(self, "scans")
 
@@ -289,7 +275,7 @@ class BidsLake:
     def get(
         self,
         *,
-        table: str = DATAFILES,
+        table: str = ALL_FILES,
         **filters: Unpack[GetFilters],
     ) -> Iterator[BidsFile]:
         """Yield :class:`BidsFile` for rows of ``table`` matching ``filters``.
@@ -299,6 +285,15 @@ class BidsLake:
         equality, a sequence by ``IN (...)``, and ``None`` by ``IS NULL`` (so
         ``ses=None`` selects sessionless files). With no filters, iterates the
         whole table across every dataset in the database.
+
+        **Every file the walk saw**, not only the imaging ones: a `*_bold.nii.gz` and
+        the `*_bold.json` beside it are both rows here. Narrow with ``kind="data"``
+        when you mean the primary data files, or with ``extension`` when you mean one
+        format. This used to default to the data files and no longer does — there is
+        one registry, and which slice of it you want is yours to say::
+
+            lake.get(task="rest", suffix="bold", kind="data")
+            lake.get(task="rest", suffix="bold", extension=".nii.gz")
 
         Note: the result set is materialized in full (the Arrow-IPC buffer is read
         into a Polars frame) before any row is yielded, so peak memory is the whole
@@ -321,41 +316,35 @@ class BidsLake:
                 self,
             )
 
-    def bind(self, binding: BindingOf[Any, Any]) -> list[Unit]:
-        """Resolve a :class:`~bidslake.binding.Binding` into units of work.
-
-        Returns one :class:`~bidslake.binding.Unit` per anchor file, each carrying its
-        resolved inputs and a tuple of :class:`~bidslake.binding.Unresolved` entries
-        for the inputs that did not match exactly one thing — a per-unit gap is data,
-        not an exception. Costs one query per declared input, not one per input per
-        unit::
-
-            for unit in lake.bind(MELODIC):
-                if unit.unresolved:
-                    continue
-                work(unit.anchor.local_path, unit.local("anat"))
-
-        Raises :class:`ValueError` for the two shapes that are never incomplete data:
-        an anchor matching no files at all, and an input resolving for *zero* units.
-        Both mean a filter value that matches nothing or a dataset that was never
-        indexed, rather than a missing subject.
-
-        See :mod:`bidslake.binding` for the declaration format and why it is typed
-        Python rather than a stamped JSON artifact.
-        """
-        return resolve(self, binding)
-
     # -- escape hatch ------------------------------------------------------
 
-    def sql(self, query: str | Template, params: Sequence[Any] | None = None) -> DataFrame:
-        """Run raw SQL and return the result as Polars.
+    def sql(
+        self, query: str | Template | ClauseElement, params: Sequence[Any] | None = None
+    ) -> DataFrame:
+        """Run a query and return the result as Polars.
 
-        Accepts either a plain SQL string (with optional positional ``params``)
-        or a PEP 750 t-string, whose interpolations are lowered to DuckDB bind
-        parameters — never string-concatenated — so values can't inject SQL::
+        Three forms. A plain SQL string with optional positional ``params``; a PEP 750
+        t-string, whose interpolations are lowered to DuckDB bind parameters — never
+        string-concatenated — so values can't inject SQL; or a SQLAlchemy statement::
 
             lake.sql(t"SELECT * FROM all_files WHERE suffix = {suffix}")
+
+            from sqlalchemy import select
+            from bidslake.schema.models import AllFiles, Sidecars
+            lake.sql(
+                select(AllFiles.file_path, Sidecars.RepetitionTime)
+                .join(Sidecars, Sidecars.file_id == AllFiles.file_id)
+                .where(AllFiles.task == "rest", AllFiles.kind == "data")
+            )
+
+        The statement is *compiled* here and executed by the same Rust engine as the
+        other two forms, so a query built this way opens no second connection and comes
+        back over the same Arrow bridge. That is the whole reason SQLAlchemy is a
+        dependency: it is the query builder :meth:`get` deliberately is not — joins,
+        `OR`, comparisons, subqueries — with none of its session or engine machinery.
         """
+        if isinstance(query, ClauseElement):
+            return self._query(*compile_statement(query))
         if isinstance(query, Template):
             text_parts: list[str] = []
             values: list[Any] = []
@@ -380,9 +369,9 @@ class BidsLake:
     def _columns(self, table: str) -> dict[str, str]:
         cached = self._col_cache.get(table)
         if cached is None:
-            # `datafiles` is `all_files` narrowed by `kind`, not an object in the database,
+            # A synthetic relation has no columns of its own,
             # so it has no columns of its own to introspect — it has exactly the view's.
-            cols = self._lake.columns(ALL_FILES if table == DATAFILES else table)
+            cols = self._lake.columns(table)
             if not cols:
                 raise KeyError(f"no table {table!r}; available: {sorted(self.tables())}")
             cached = dict(cols)
@@ -392,15 +381,12 @@ class BidsLake:
     def _relation(self, table: str) -> str:
         """`table` as a FROM item, widened with the file registry where it needs to be.
 
-        Three shapes. `datafiles` is a `kind` filter over `all_files` rather than an object
-        in the database, so it is spelled out. A file-keyed satellite (`scans`, `events`,
-        `sidecars`, an adapter's tables) holds a `file_id` and its own measurements — the
-        BIDS concepts live once, on the registry, instead of being copied onto all two
-        dozen of them (docs/adr/0006) — so it is joined back to them. Everything else,
-        including the registry itself and the entity-keyed tables, stands alone.
+        Two shapes. A file-keyed satellite (`scans`, `events`, `sidecars`, an adapter's
+        tables) holds a `file_id` and its own measurements — the BIDS concepts live once,
+        on the registry, instead of being copied onto all two dozen of them
+        (docs/adr/0006) — so it is joined back to them. Everything else, including the
+        registry itself and the entity-keyed tables, stands alone.
         """
-        if table == DATAFILES:
-            return f"({_ALL_FILES_SQL} WHERE kind = 'data')"
         own = self._columns(table)
         if table == ALL_FILES or "file_id" not in own:
             return quote_ident(table)
@@ -420,7 +406,7 @@ class BidsLake:
         database holds.
         """
         own = self._columns(table)
-        if table in (DATAFILES, ALL_FILES) or "file_id" not in own:
+        if table == ALL_FILES or "file_id" not in own:
             return own
         return {**self._columns(ALL_FILES), **own}
 
@@ -612,7 +598,7 @@ class BidsLake:
         parts = ["s.*", scan_sel, sidecar_sel, participant_sel, dataset_sel]
         select = ", ".join(p for p in parts if p)
         return (
-            f"SELECT {select} FROM ({_ALL_FILES_SQL} WHERE kind = 'data') s "
+            f"SELECT {select} FROM (SELECT * FROM {ALL_FILES} WHERE kind = 'data') s "
             "LEFT JOIN scans sn ON sn.file_id = s.file_id "
             "LEFT JOIN sidecars sc ON sc.file_id = s.file_id "
             "LEFT JOIN dataset_description dd ON dd.dataset_id = s.dataset_id "

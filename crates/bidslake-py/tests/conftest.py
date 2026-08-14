@@ -42,27 +42,43 @@ def lake_db(tmp_path_factory: pytest.TempPathFactory) -> Path:
         pytest.skip("bids-examples submodule not initialized")
 
     db = tmp_path_factory.mktemp("bidslake") / "test.duckdb"
-    for name in DATASETS:
+
+    def bidslake(*args: str) -> None:
         subprocess.run(
-            [
-                "cargo",
-                "run",
-                "-q",
-                "--release",
-                "-p",
-                "bidslake",
-                "--",
-                "index",
-                "--input",
-                str(examples / name),
-                "--output",
-                str(db),
-                "--dataset-id",
-                name,
-            ],
+            ["cargo", "run", "-q", "--release", "-p", "bidslake", "--", *args],
             cwd=repo,
             check=True,
         )
+
+    for name in DATASETS:
+        bidslake(
+            "index",
+            "--input",
+            str(examples / name),
+            "--output",
+            str(db),
+            "--dataset-id",
+            name,
+        )
+
+    # Let every dataset reach every dataset by name, so a binding can scope an input with
+    # `via=` instead of a hardcoded id. Declared in *each* dataset, including for itself,
+    # because a link is resolved relative to the dataset the anchors live in — a name
+    # declared only in a neighbour is not in scope for a binding anchored here.
+    for definer in DATASETS:
+        for name in DATASETS:
+            bidslake(
+                "link",
+                "alias",
+                "-d",
+                str(db),
+                "--dataset",
+                definer,
+                "--as",
+                name,
+                "--target",
+                f"dataset:{name}",
+            )
     return db
 
 

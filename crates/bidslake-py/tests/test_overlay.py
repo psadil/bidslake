@@ -59,9 +59,14 @@ def test_overlay_provenance_and_effective_schema(augmented_db: str) -> None:
 
 def test_augmented_columns_are_queryable_at_runtime(augmented_db: str) -> None:
     with bidslake.open(augmented_db) as lake:
-        # The preprocessed BOLD is found by its (base) entities.
-        files = list(lake.get(desc="preproc", suffix="bold"))
+        # The preprocessed BOLD is found by its (base) entities. `kind` because `get`
+        # iterates the whole registry: the image and its sidecar share every entity, and
+        # which of them you want is the caller's to say.
+        files = list(lake.get(desc="preproc", suffix="bold", kind="data"))
         assert len(files) == 1
+        assert len(list(lake.get(desc="preproc", suffix="bold"))) == 2, (
+            "unfiltered, the sidecar is a row too"
+        )
         # The overlay's confounds table exists with its typed columns, ordered.
         assert "trans_x" in lake.columns("fmriprep_confounds")
         rows = lake.sql("SELECT row_idx, trans_x FROM fmriprep_confounds ORDER BY row_idx")
@@ -76,32 +81,39 @@ def test_stubgen_types_the_augmented_schema(augmented_db: str) -> None:
     assert '"from"' in module, "augmented entity should reach GetFilters/Entity"
 
 
-GOOD_BINDING = '''\
-"""A binding over overlay-added vocabulary: must type-check."""
+GOOD_QUERY = '''\
+"""Queries over overlay-added vocabulary: must type-check."""
 
-from _bids_types import Binding, FileInput
+from sqlalchemy import select
 
-DENOISE = Binding(
-    anchor={"datatype": "func", "suffix": "bold", "desc": "preproc"},
-    key=("sub", "ses", "task", "run"),
-    inputs={
-        "xfm": FileInput(
-            join=("sub", "ses"),
-            where={"suffix": "xfm", "from": "boldref", "to": "T1w"},
-        ),
-    },
+from _bids_types import AllFiles, FmriprepConfounds, GetFilters
+
+# `from`/`to` are fMRIPrep's entities, not BIDS'; against the bundled `GetFilters`
+# neither key exists.
+preproc: GetFilters = {"datatype": "func", "suffix": "bold", "desc": "preproc"}
+xfm: GetFilters = {"suffix": "xfm", "from": "boldref", "to": "T1w"}
+
+# The models the same catalog generated. `from` is a Python keyword, so its column
+# is reachable as `from_`; every other entity keeps its own name.
+Q = (
+    select(AllFiles.file_path, AllFiles.to, FmriprepConfounds.trans_x)
+    .join(FmriprepConfounds, FmriprepConfounds.file_id == AllFiles.file_id)
+    .where(AllFiles.from_ == "boldref")
 )
 '''
 
-BAD_BINDING = '''\
-"""Bindings the augmented vocabulary must still reject."""
+BAD_QUERY = '''\
+"""Queries the augmented vocabulary must still reject."""
 
-from _bids_types import Binding, FileInput
+from sqlalchemy import select
 
-bad_key = FileInput(join=("sub",), where={"frm": "boldref"})
-bad_suffix = FileInput(join=("sub",), where={"suffix": "notarealsuffix"})
-bad_join = FileInput(join=("notanentity",), where={"from": "boldref"})
-bad_anchor = Binding(anchor={"datatype": "fnuc"}, key=("sub",), inputs={})
+from _bids_types import AllFiles, FmriprepConfounds, GetFilters
+
+bad_key: GetFilters = {"frm": "boldref"}
+bad_suffix: GetFilters = {"suffix": "notarealsuffix"}
+bad_datatype: GetFilters = {"datatype": "fnuc"}
+bad_column = select(AllFiles.notanentity)
+bad_overlay_column = select(FmriprepConfounds.notacolumn)
 '''
 
 
@@ -109,29 +121,32 @@ def _ty(path: Path, search: Path) -> subprocess.CompletedProcess[str]:
     ty = Path(sys.executable).with_name("ty")
     if not ty.exists():
         pytest.skip("ty not installed in this environment")
-    venv = Path(sys.executable).resolve().parents[1]
+    # `sys.prefix`, not `Path(sys.executable).resolve()`: resolving follows the venv's
+    # symlink back to the base interpreter, whose site-packages has none of the
+    # third-party imports the fixtures make (`sqlalchemy`), so every one of them would
+    # be reported unresolved and the "good" fixture would fail for the wrong reason.
     return subprocess.run(
-        [str(ty), "check", "--python", str(venv), "--extra-search-path", str(search), str(path)],
+        [str(ty), "check", "--python", sys.prefix, "--extra-search-path", str(search), str(path)],
         capture_output=True,
         text=True,
         cwd=Path(__file__).resolve().parents[1],
     )
 
 
-def test_stubgen_bindings_check_against_the_augmented_vocabulary(
+def test_stubgen_queries_check_against_the_augmented_vocabulary(
     augmented_db: str, tmp_path: Path
 ) -> None:
-    """The generated `Binding`/`FileInput` accept overlay entities — and only real ones.
+    """The generated filters and models accept overlay vocabulary — and only real ones.
 
-    The bundled dataclasses are pinned to the BIDS schema this build ships, so
-    `from`/`xfm` are type errors there; the point of re-emitting them from a catalog
-    is that they stop being errors *without* the vocabulary going untyped.
+    The bundled `GetFilters` and models are pinned to the BIDS schema this build ships,
+    so `from`/`to`/`trans_x` are type errors there; the point of re-emitting them from a
+    catalog is that they stop being errors *without* the vocabulary going untyped.
     """
     (tmp_path / "_bids_types.py").write_text(stubgen.generate(augmented_db))
-    good = tmp_path / "good_binding.py"
-    good.write_text(GOOD_BINDING)
-    bad = tmp_path / "bad_binding.py"
-    bad.write_text(BAD_BINDING)
+    good = tmp_path / "good_query.py"
+    good.write_text(GOOD_QUERY)
+    bad = tmp_path / "bad_query.py"
+    bad.write_text(BAD_QUERY)
 
     ok = _ty(good, tmp_path)
     assert ok.returncode == 0, ok.stdout + ok.stderr
@@ -139,5 +154,5 @@ def test_stubgen_bindings_check_against_the_augmented_vocabulary(
     rejected = _ty(bad, tmp_path)
     out = rejected.stdout + rejected.stderr
     assert rejected.returncode != 0
-    for expected in ("frm", "notarealsuffix", "notanentity", "fnuc"):
+    for expected in ("frm", "notarealsuffix", "fnuc", "notanentity", "notacolumn"):
         assert expected in out, f"{expected} was not flagged:\n{out}"

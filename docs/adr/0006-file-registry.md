@@ -3,7 +3,7 @@
 Status: accepted (2026-08-12)
 
 Relates to: `file_registry` / `all_files` (`schema/dynamic.rs`), `bids::file_id` and
-`bids::Kind` (`bids.rs`), and the query surface in `bidslake-py` (`layout.py`, `binding.py`).
+`bids::Kind` (`bids.rs`), and the query surface in `bidslake-py` (`layout.py`, `file.py`).
 Supersedes ADR 0002 §6's "a primary data file lands in `scans` … a tabular file lands in
 `tabular_files`" and §7's third row. Completes ADR 0005, which left `(dataset_id, file_path)`
 non-unique across a dataset's roots.
@@ -84,7 +84,7 @@ CREATE OR REPLACE VIEW all_files AS
 
 Every kind, not just data files, because the concepts are computed from `file_path` and are as
 meaningful for a `*_events.tsv` or a sidecar as for the image beside it. "Data files only" is
-then a `WHERE kind = 'data'` — which the Python layer spells `datafiles` and does *not*
+then a `WHERE kind = 'data'` — which the caller spells out and bidslake does *not*
 materialize as a second view, because it is a filter, not a thing.
 
 Three properties fall out of it being a **view over a table with no generated columns**:
@@ -187,7 +187,7 @@ a real table, and taking its name for the manifest would leave the BIDS concept 
 The satellites lost their concept columns; they did not lose the ability to be queried by
 concept. `BidsLake._relation` joins a file-keyed table back to `all_files` on `file_id`, and
 `_filter_columns` reports the union — so `lake.get(table="scans", suffix="bold")` and
-`TableInput(join=("sub","task","run"), table="events")` work exactly as before, against tables
+`Rows(join=("sub","task","run"), table="events")` work exactly as before, against tables
 that store neither `sub` nor `suffix`.
 
 This is what makes §3 a storage decision rather than an API break. `columns()` stays a faithful
