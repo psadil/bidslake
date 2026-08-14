@@ -141,10 +141,13 @@ impl BidsDb {
         for sql in schema.create_views_sql() {
             self.conn.execute(&sql, [])?;
         }
-        // The query-time relation view (docs/adr/0003), and `diffusion`, which composes the
-        // two generated gradient views and so must follow them (docs/adr/0007).
+        // The two query-time views over `dataset_links` — provenance and naming
+        // respectively (docs/adr/0003) — and `diffusion`, which composes the two generated
+        // gradient views and so must follow them (docs/adr/0007).
         self.conn
             .execute(schema::CREATE_DATASET_RELATIONS_VIEW, [])?;
+        self.conn
+            .execute(schema::CREATE_DATASET_LINK_TARGETS_VIEW, [])?;
         self.conn.execute(schema::CREATE_DIFFUSION_VIEW, [])?;
         self.stamp_meta(schema)?;
         self.stamp_schema(schema)?;
@@ -428,10 +431,15 @@ impl BidsDb {
         Ok(())
     }
 
-    /// Drop a dataset's ingest-derived links (`source`/`named`) and all its identities
-    /// before re-recording them, so a re-index reflects the current `dataset_description.json`.
-    /// User-provided `declared` links (`--source-dataset`, `bidslake link add`) are left
-    /// in place (docs/adr/0003).
+    /// Drop a dataset's ingest-derived links and all its identities before re-recording
+    /// them, so a re-index reflects the current `dataset_description.json`.
+    ///
+    /// The cut is *where the statement came from*, not what it says: `source` and `named`
+    /// are both read out of `dataset_description.json`, so they must track the file, while
+    /// `declared` (`--source-dataset`, `bidslake link add`) and `alias`
+    /// (`bidslake link alias`) are the user's and are never cleared here. That is one
+    /// column of the 2x2 documented on `CREATE_DATASET_LINKS_TABLE`, which is why `alias`
+    /// needs no rule of its own — it is simply not in the list.
     pub fn clear_derived_links(&self, dataset_id: &str) -> Result<()> {
         self.conn.execute(
             "DELETE FROM dataset_links WHERE dataset_id = ? AND link_type IN ('source', 'named')",

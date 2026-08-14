@@ -2029,9 +2029,16 @@ impl BidsParser {
                     }
                 }
             }
-            // DatasetLinks: a name → location map (stored now; the BIDS-URI resolver that
-            // reads them is a later slice).
+            // DatasetLinks: a name → location map. This is the *naming* half of
+            // `dataset_links` — "here, `fs` refers to that dataset" — and is resolved by the
+            // `dataset_link_targets` view, never by `dataset_relations`: a reference is not a
+            // derivation.
+            //
+            // Canonicalized against this run's root, because BIDS writes these values
+            // relative to the dataset root far more often than as absolute URIs, and a
+            // relative one has no meaning without it.
             if let Some(named) = desc.get("DatasetLinks").and_then(Value::as_object) {
+                let root_uri = self.fs.root();
                 for (name, uri) in named {
                     if let Some(uri) = uri.as_str() {
                         db.record_dataset_link(
@@ -2039,7 +2046,7 @@ impl BidsParser {
                             "named",
                             name,
                             uri,
-                            &links::canonicalize(uri),
+                            &links::canonicalize_relative_to(uri, &root_uri),
                         )?;
                     }
                 }

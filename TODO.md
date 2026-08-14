@@ -148,17 +148,21 @@ accessors; and the opt-in `python -m bidslake.stubgen`. Remaining follow-ups:
 
 ## Derivation layer
 
-- [ ] **Promote bindings to a stamped artifact**. `bidslake.binding` is deliberately typed
-  Python and not a JSON document: the dataclasses are a 1:1 match for what such a document
-  would hold, so promoting is writing a serializer, but the shape has not earned its
-  metaschema yet. ADR 0002 §1 records why the `x_bidslake` prototype was rejected — "one
-  artifact, three concerns, no standards path, bespoke parser" — and a work-unit language
-  invented before real pipelines exercise it would repeat that.
-  **Trigger:** two or three pipelines have used bindings without the shape moving. Then add
-  `data/bindings/*.json` + a hand-written `binding-metaschema.json`, stamp it as
-  `bidslake_bindings` beside the overlay/term-map/ingestion stamps, and write the ADR. Until
-  then, changing a field is a Python edit rather than a schema migration — which is the point
-  of waiting.
+- [x] **Promote unit specs to a stamped artifact** — dropped, along with the unit spec. The
+  entry asked when a `UnitSpec`/`Role`/`Rows` declaration should become a stamped JSON
+  document. The answer turned out to be that it should not become one, because it should not
+  exist: thirteen names that transfer nowhere outside bidslake, to express what SQLAlchemy
+  Core already expresses as one `LEFT JOIN LATERAL` per role. Users know SQL and ORMs; they
+  are not tolerant of learning a new kind of object. The query layer took its place — models
+  generated from the catalog, `lake.sql()` taking a statement, and `stubgen` emitting both for
+  an augmented catalog — and the resolver, the spec dataclasses and their type-pinning went
+  with it. The two `a2cps` pipelines that motivated the spec were ported as the acceptance
+  test, and each shrank. What survives is the *soundness* rule the spec enforced, now enforced
+  by the query instead: a cross-dataset sibling joins `dataset_link_targets` on a link name
+  (ADR 0003 §7), and a match count of 2+ is ambiguous rather than silently taken.
+  ADR 0002 §1's verdict on the `x_bidslake` prototype — "one artifact, three concerns, no
+  standards path, bespoke parser" — applies to a work-unit language too, which is the reason
+  this never shipped as one.
 
 - [ ] **A narrower later run silently strips concept columns off `all_files`.** The other edge
   of docs/adr/0006 §3's `CREATE OR REPLACE VIEW`. Widening is retroactive, which is the win;
@@ -217,4 +221,12 @@ accessors; and the opt-in `python -m bidslake.stubgen`. Remaining follow-ups:
 - [ ] **Layouts for the other bundled producers**. `data/layouts/feat.json` is the first;
   fMRIPrep, MRIQC, and QSIPrep have term maps or overlays but no write direction, so code
   producing files in their conventions still hardcodes paths. Each is a layout document
-  plus its `Examples`; the round-trip check does the rest.
+  plus its `Examples`; the round-trip check does the rest. The artifact itself is now
+  described by [ADR 0008](docs/adr/0008-layouts.md) rather than by ADR 0002 §12.
+
+- [ ] **Enrich the under-specified `feat` roles.** Four of the 23 roles declare no `Entities`
+  (`highres`, `example_func`, and the two `classification*` roles). Adding them — to the
+  layout *and* the `feat` term map together, since the round trip checks one against the
+  other — makes a written FEAT tree better classified when it is re-indexed. Note this does
+  **not** make roles usable as source selectors, which is a structural limit rather than a
+  gap ([ADR 0008](docs/adr/0008-layouts.md) §5).

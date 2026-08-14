@@ -13,26 +13,20 @@ Then ``from _bids_types import C, Suffix`` for typed Polars expressions and chec
 Runtime querying of augmented columns needs none of this — ``get`` and the table
 accessors validate against the live database.
 
-The module also re-pins the :mod:`bidslake.binding` dataclasses to *this catalog's*
-vocabulary, so a binding written against an augmented catalog is checked key by key::
+The module also emits the SQLAlchemy models for the *augmented* catalog, so a query
+against it sees the columns the overlay added::
 
-    from _bids_types import Binding, FileInput   # not `from bidslake import …`
+    from sqlalchemy import select
+    from _bids_types import AllFiles      # not `from bidslake.schema.models import …`
 
-    DENOISE = Binding(
-        anchor={"datatype": "func", "suffix": "bold", "space": None},
-        key=("sub", "ses", "task", "run"),
-        inputs={
-            "xfm": FileInput(
-                join=("sub", "ses"),
-                where={"suffix": "xfm", "from": "T1w", "to": "MNI152NLin6Asym"},
-            ),
-        },
+    lake.sql(
+        select(AllFiles.file_path)
+        .where(AllFiles.seg == "wmparc")  # a FreeSurfer term-map column
     )
 
-``bidslake.FileInput`` is ``FileInputOf[GetFilters, Entity]`` pinned to the shipped
-schema; these are the same generics pinned to the generated ones, so nothing about
-the declaration changes except which vocabulary ``from``/``xfm``/``seg`` are measured
-against. ``lake.bind`` accepts either.
+``bidslake.schema.models`` types the shipped schema; these are the same classes built
+from the augmented one, so nothing about a query changes except which vocabulary
+``from``/``xfm``/``seg`` are measured against.
 """
 
 from __future__ import annotations
@@ -55,37 +49,10 @@ from collections.abc import Sequence
 from typing import Literal, TypedDict
 
 import polars as pl
-from bidslake.binding import BindingOf as _BindingOf
-from bidslake.binding import FileInputOf as _FileInputOf
-from bidslake.binding import TableInputOf as _TableInputOf
+from sqlalchemy import BigInteger, Boolean, Float, String
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 '''
-
-_BINDINGS = """\
-# The binding dataclasses, pinned to *this catalog's* vocabulary instead of the one
-# the installed bidslake was built with. Import these rather than the ones on
-# `bidslake` and a binding's `where`/`anchor`/`join`/`key` are checked against the
-# entities, suffixes and datatypes above. `lake.bind` takes either, because
-# resolution tests against the generic bases these subclass.
-#
-# Subclasses rather than `FileInput = _FileInputOf[...]` aliases: a subscripted
-# generic cannot be used with `isinstance`, and an instance built from an alias is
-# not an instance of `bidslake.FileInput` either, so any code branching on the
-# public class would silently mishandle a binding written against this catalog.
-class FileInput(_FileInputOf[GetFilters, Entity]):
-    pass
-
-
-class TableInput(_TableInputOf[Entity]):
-    pass
-
-
-class Binding(_BindingOf[GetFilters, Entity]):
-    pass
-
-
-type Input = FileInput | TableInput
-"""
 
 
 def _literal_alias(name: str, values: list[str]) -> str:
@@ -107,7 +74,74 @@ def _is_identifier(name: str) -> bool:
     return name.isidentifier() and not keyword.iskeyword(name)
 
 
-def render(schema: dict[str, Any], columns: dict[str, dict[str, str]]) -> str:
+#: DuckDB type -> (SQLAlchemy type, Python annotation). Approximate on purpose: these
+#: models are compiled to SQL strings and executed by the Rust engine, never used to emit
+#: DDL, so the type only has to be close enough to render a literal. Mirrors `sa_type` in
+#: `src/bin/emit_types.rs`, which does the same job for the shipped models.
+_SA_TYPES = {
+    "BIGINT": ("BigInteger", "int"),
+    "INTEGER": ("BigInteger", "int"),
+    "HUGEINT": ("BigInteger", "int"),
+    "SMALLINT": ("BigInteger", "int"),
+    "TINYINT": ("BigInteger", "int"),
+    "UBIGINT": ("BigInteger", "int"),
+    "DOUBLE": ("Float", "float"),
+    "FLOAT": ("Float", "float"),
+    "REAL": ("Float", "float"),
+    "DECIMAL": ("Float", "float"),
+    "BOOLEAN": ("Boolean", "bool"),
+}
+
+
+def _class_name(table: str) -> str:
+    """``all_files`` -> ``AllFiles``."""
+    return "".join(p[:1].upper() + p[1:] for p in table.split("_") if p)
+
+
+def _model_pk(cols: dict[str, str], declared: list[str]) -> list[str]:
+    """A declarative mapper needs a key. Use the declared one; else ``file_id``; else
+    every column, which is always valid and only ever used for row identity — nothing
+    generated here persists."""
+    if declared:
+        return declared
+    if "file_id" in cols:
+        return ["file_id"]
+    return list(cols)
+
+
+def _render_models(columns: dict[str, dict[str, str]], pks: dict[str, list[str]]) -> str:
+    lines = [
+        "class Base(DeclarativeBase):",
+        '    """Declarative base for this catalog\'s models."""',
+        "",
+        "",
+    ]
+    for table, cols in sorted(columns.items()):
+        pk = _model_pk(cols, pks.get(table, []))
+        lines.append(f"class {_class_name(table)}(Base):")
+        lines.append(f"    __tablename__ = {json.dumps(table)}")
+        if not pks.get(table):
+            lines.append(
+                "    # A view has no declared key; this one exists only to satisfy the mapper."
+            )
+        lines.append("")
+        for col, ty in cols.items():
+            sa, py = _SA_TYPES.get(ty, ("String", "str"))
+            attr = col if _is_identifier(col) else f"{col}_"
+            optional = "" if col in pk else " | None"
+            arg = sa if attr == col else f"{json.dumps(col)}, {sa}"
+            key = ", primary_key=True" if col in pk else ""
+            lines.append(f"    {attr}: Mapped[{py}{optional}] = mapped_column({arg}{key})")
+        lines.append("")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def render(
+    schema: dict[str, Any],
+    columns: dict[str, dict[str, str]],
+    pks: dict[str, list[str]] | None = None,
+) -> str:
     """Render the typed module from an effective schema and per-table column maps."""
     objects = schema.get("objects", {})
     entities = sorted({e["name"] for e in objects.get("entities", {}).values() if "name" in e})
@@ -142,8 +176,6 @@ def render(schema: dict[str, Any], columns: dict[str, dict[str, str]]) -> str:
     out.append("\n".join(gf_lines))
     out.append("")
 
-    out.append(_BINDINGS)
-
     # COLUMNS: runtime column->type map per table.
     cols_lines = ["COLUMNS: dict[str, dict[str, str]] = {"]
     for table, cols in sorted(columns.items()):
@@ -165,6 +197,11 @@ def render(schema: dict[str, Any], columns: dict[str, dict[str, str]]) -> str:
         c_lines.append("")
     out.append("\n".join(c_lines))
 
+    # SQLAlchemy models, pinned to this catalog's tables. The shipped
+    # `bidslake.schema.models` covers the base schema only, so an adapter's tables — and
+    # an overlay's `from`/`to`/`seg` columns on `all_files` — are reachable only from here.
+    out.append(_render_models(columns, pks or {}))
+
     return "\n".join(out) + "\n"
 
 
@@ -177,7 +214,15 @@ def generate(db_path: str) -> str:
                 f"{db_path} has no stored effective schema (indexed by an older bidslake?)."
             )
         columns = {table: lake.columns(table) for table in lake.tables()}
-    return render(schema, columns)
+        # Declared primary keys, for the models. Views have none and get a synthetic one.
+        pks: dict[str, list[str]] = {}
+        rows = lake.sql(
+            "SELECT table_name, unnest(constraint_column_names) AS col "
+            "FROM duckdb_constraints() WHERE constraint_type = 'PRIMARY KEY'"
+        )
+        for table, col in zip(rows["table_name"], rows["col"], strict=True):
+            pks.setdefault(table, []).append(col)
+    return render(schema, columns, pks)
 
 
 def main(argv: list[str] | None = None) -> None:

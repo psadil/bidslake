@@ -11,6 +11,9 @@ requires-python = ">=3.14"
 license = { text = "MIT" }
 dependencies = [
     "polars>=1.9",
+    # Query building only. Statements are compiled to a string and run by the Rust engine
+    # that owns the connection, so this pulls in no database driver and opens nothing.
+    "sqlalchemy>=2.0",
     "universal_pathlib",
 ]
 
@@ -31,8 +34,12 @@ features = ["extension-module"]
 [tool.ruff]
 line-length = 100
 target-version = "py314"
-# `_generated.py` is machine-emitted (its own formatting); don't lint/format it.
-extend-exclude = ["python/bidslake/schema/_generated.py"]
+# Machine-emitted (their own formatting); don't lint or format them. Reformatting a
+# generated file makes the `codegen-drift` CI job fail on the next regeneration.
+extend-exclude = [
+    "python/bidslake/schema/_generated.py",
+    "python/bidslake/schema/models.py",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "C4", "RUF"]

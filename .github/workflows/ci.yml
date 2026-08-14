@@ -77,5 +77,5 @@ jobs:
       - name: Regenerate the typed schema module
         # PYO3_PYTHON points cargo's link step at the venv interpreter.
         run: PYO3_PYTHON=$PWD/crates/bidslake-py/.venv/bin/python cargo run -p bidslake-py --bin emit-types
-      - name: Fail if _generated.py drifted from the schema
-        run: git diff --exit-code crates/bidslake-py/python/bidslake/schema/_generated.py
+      - name: Fail if the generated schema modules drifted from the schema
+        run: git diff --exit-code crates/bidslake-py/python/bidslake/schema/

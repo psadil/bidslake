@@ -32,13 +32,19 @@ bidslake infers **dataset-to-dataset** relations from explicit `SourceDatasets`.
 infer file-to-file correspondence. Inferring which fMRIPrep file matches which MRIQC record by
 comparing entities is the unsound step, and bidslake never does it on its own initiative.
 
-It will do it *under direction*. A binding (`bidslake.binding`) lets a `FileInput` carry
-`dataset_id="freesurfer"` and `join=("sub", "ses")`, which is exactly a cross-dataset entity
-match — but the user named the dataset, and a match landing on more than one file comes back
-as `Unresolved(name, n, "ambiguous")` rather than being silently taken. `dataset_id` also takes
-a sequence, for a study whose derivative was produced one subject at a time and so occupies one
-dataset per subject rather than one dataset overall. What stays ruled out
-is bidslake *inferring* the correspondence: `resolve` never consults `dataset_relations`.
+It will do it *under direction*. A query may join `dataset_link_targets` on
+`link_name = 'freesurfer'` and then match `sub`/`ses`, which is exactly a cross-dataset entity
+match — but the user named the target, and the query counts its matches, so a match landing on
+more than one file is visible as ambiguous rather than silently taken. What stays ruled out is
+bidslake *inferring* the correspondence: nothing bidslake does on its own initiative consults
+`dataset_relations`.
+
+Such a query names a **link**, not a `dataset_id`, and the difference is what makes it
+portable across catalogs (§7). A dataset id is free text chosen at index time, and a study
+processed one subject at a time has one dataset *per subject* — the FreeSurfer trees are
+`sub-01-freesurfer`, `sub-02-freesurfer`, … — so there is frequently no id a reusable query
+could name. Each shard's own `DatasetLinks` already says which tree is its own, so the
+sharded study needs neither a hardcoded id nor a `link alias` command.
 
 What a consumer does with the relation is sound *because* of it: once two datasets are known to
 share a source, they share a subject/entity namespace, so matching `sub`/`ses`/`task`/`run`
@@ -131,6 +137,51 @@ now: it split only `bids::` and turned a named `bids:deriv:sub-01/x` into the ga
 `sub-01/bids:deriv:sub-01/x`. It now parses `bids:<name>:<path>` and *skips* (rather than
 fabricates) a target that names another dataset.
 
+### 7. A link is either provenance or naming — and a query may name a link, never a relation
+
+`dataset_links` holds two different kinds of statement, and only one of them is provenance:
+
+|  | derived from `dataset_description.json` *(cleared each index)* | asserted by the user *(kept)* |
+|---|---|---|
+| **provenance** — "came from S" | `source` (`SourceDatasets`) | `declared` (`--source-dataset`, `link add`) |
+| **naming** — "here, N refers to L" | `named` (`DatasetLinks`) | `alias` (`link alias`) |
+
+The columns are the rule `clear_derived_links` already applied: rows read out of the
+description must track the file, the user's must survive a re-ingest. `alias` therefore needs
+no rule of its own — it is simply the missing cell.
+
+The rows are what `dataset_relations` resolves; the naming row is resolved by
+**`dataset_link_targets`** (name → `target_dataset_id`, `NULL` until the target is indexed).
+A view for the same reason as §2: naming a dataset that is not in the catalog yet is a
+legitimate forward reference, and it starts resolving when the target arrives with no
+re-index and no bookkeeping. Unlike `dataset_relations`, self-references are kept — a
+dataset deriving from itself is nonsense, but a dataset *naming* itself is the only way a
+scope-by-name can mean "my own dataset".
+
+**A name is resolved relative to the dataset that declared it**, which is what BIDS
+`DatasetLinks` already means. Resolving catalog-wide instead — the union of every target
+anyone calls `fs` — is unsound, and the ambiguity check does not catch it. Two studies in
+one catalog, each naming its own recon-all tree `fs`, and a `sub-01` whose recon failed in
+study A: the union puts study B's tree in scope, the entity join finds exactly one match
+there, and the unit resolves to another person's anatomical, because one hit is never
+counted as ambiguous. The catalog holds the correct answer; a catalog-wide read discards
+it. Measured on a purpose-built catalog, and pinned by
+`test_via_never_answers_from_an_unrelated_study`.
+
+**Naming never produces a relation.** Pointing at a template, an atlas, or a shared
+FreeSurfer tree is not deriving from it, and two datasets that merely reference the same one
+are not co-derivatives. `shares_source` always said so; `derived_from`/`source_of` did not —
+they filtered no `link_type` at all, so every `DatasetLinks` entry read as a derivation. Both
+arms now take provenance links only.
+
+**A `DatasetLinks` value is resolved against the dataset root.** BIDS writes them relative
+(`derivatives/fmriprep`, `../freesurfer`) far more often than absolute, and `canonicalize`
+has no root context, so a relative one became the identity `dataset:derivatives/fmriprep` —
+a `Dataset` identity nothing can hold, stored and never resolving.
+`links::canonicalize_relative_to` joins it to the root first, which is what makes it equal
+the target's own `root_uri` identity. Absolute forms — a DOI, a URL, `dataset:<id>`, an
+absolute path — pass through untouched.
+
 ## Consequences
 
 - **Ingest order is irrelevant, and there is full S3 parity.** Everything is read from
@@ -141,7 +192,12 @@ fabricates) a target that names another dataset.
 - **`dataset_id` is a free-text, mutable `Name`.** The `shares_source` path keys on the DOI, not
   `dataset_id`, so it survives a rename; only `--source-dataset <id>` is fragile (documented; prefer
   a DOI). `Name`-collision-merges-datasets is a pre-existing hazard this feature does not fix.
-- **Public API.** Rust: `bidslake link init|add|list|rm`, `--source-dataset`. Python:
+- **Public API.** Rust: `bidslake link init|add|alias|list|rm`, `--source-dataset`. Python:
   `lake.datasets()`, `lake.dataset_relations()`, `lake.related_datasets(id, relation=…)`,
-  `BidsFile.related_datasets(…)`, and the `Relation` enum (`shares_source`/`derived_from`/`source_of`
-  — deliberately not DataLad's "sibling", which means a clone of the *same* dataset).
+  `BidsFile.related_datasets(…)`, the `Relation` enum (`shares_source`/`derived_from`/`source_of`
+  — deliberately not DataLad's "sibling", which means a clone of the *same* dataset), and the
+  `dataset_link_targets` view a cross-dataset query joins.
+- **A cross-dataset query is portable across catalogs.** Naming a link rather than an id is what
+  lets one query run against catalogs whose dataset ids differ — verified against a two-dataset
+  catalog where `../freesurfer` resolves to a dataset id of `fs-tree` and the script names
+  neither.

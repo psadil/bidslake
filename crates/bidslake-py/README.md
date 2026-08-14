@@ -10,20 +10,21 @@ import bidslake
 lake = bidslake.open("study.duckdb")
 
 # The headline: an iterable of every resting-state fMRI file, across all
-# datasets in the catalog.
+# datasets in the catalog. `get` iterates the whole registry, so say which slice
+# you mean -- an image and the sidecar beside it share every entity.
 for f in lake.get(task="rest", suffix="bold", extension=".nii.gz"):
     img = nib.load(f.local_path)     # resolved from root_uri
     tr = f.metadata["RepetitionTime"]  # sidecar metadata, BIDS-cased
     events = f.get_events()          # associated events (inheritance-resolved)
 
 # Whole tables as Polars (eager or lazy with projection pushdown):
-df = lake.datafiles.pl()             # the file registry, narrowed to primary data files
-all_of_it = lake.all_files.pl()      # every file the walk saw: sidecars, .bval, README, …
+df = lake.all_files.pl()             # every file the walk saw: images, sidecars, .bval, README
 lf = lake.sidecars.lazy().select("file_id", "RepetitionTime")
 
 # Typed per-table column expressions and the wide one-big-table view:
 from bidslake import C
-lake.datafiles.pl().filter((C.all_files.task == "rest") & (C.all_files.suffix == "bold"))
+lake.all_files.pl().filter(C.all_files.kind == "data")   # narrow it yourself
+lake.all_files.pl().filter((C.all_files.task == "rest") & (C.all_files.suffix == "bold"))
 lake.files.pl()                      # registry + sidecar__*/participant__*/dataset__*/scan__*
 
 # Safe raw SQL via t-strings:
@@ -68,102 +69,188 @@ working for a remote dataset.
 To store one of those columns instead, declare it in the overlay: it then gets a typed
 column and costs 8 bytes a row. Declared-ness is the dial.
 
-## Bindings: units of work
+## Composing queries
+
+`get()` is one table, conjunction-only, no joins. Past that — a join, a disjunction, an
+aggregate, a correlated subquery — build the statement with [SQLAlchemy
+Core](https://docs.sqlalchemy.org/en/20/core/) over the generated models and hand it to
+`sql()`:
+
+```python
+from sqlalchemy import select
+from bidslake.schema.models import AllFiles, Sidecars
+
+lake.sql(
+    select(AllFiles.file_path, Sidecars.RepetitionTime)
+    .join(Sidecars, Sidecars.file_id == AllFiles.file_id)
+    .where(AllFiles.task == "rest", AllFiles.kind == "data")
+)
+```
+
+The statement is *compiled* here and executed by the same Rust engine as the other two
+`sql()` forms, so it opens no second connection and comes back over the same Arrow
+bridge as Polars. `sqlalchemy` is a hard dependency; `duckdb-engine` deliberately is
+not, since it would pull in a second embedded DuckDB beside the one the extension
+bundles.
+
+One model per table and per view, `all_files` and `dataset_link_targets` included, named
+in CamelCase (`fmriprep_confounds` → `FmriprepConfounds`). A column whose name is a
+Python keyword — fMRIPrep's `from` — is reachable as `from_` and still emits `"from"`.
+
+### Units of work
 
 A pipeline step rarely operates on one file. It operates on a *unit* — a subject, a
 session, a run — and needs several sibling files that belong to it, each matched on a
-**different subset** of its entities. Written by hand that is one query per sibling per
-unit, each wrapped in a "there must be exactly one" check that raises; a subject missing
-one input then aborts the loop at whatever hour it is reached.
+**different subset** of its entities. `sibling()` is that shape as one `LEFT JOIN
+LATERAL`; everything around it stays a statement you wrote and can print.
 
 ```python
-from bidslake import Binding, FileInput, TableInput
+from bidslake import sibling
+from bidslake.schema.models import AllFiles
+from sqlalchemy import select, true
 
-DENOISE = Binding(
-    anchor={"datatype": "func", "suffix": "bold", "desc": "preproc",
-            "extension": ".nii.gz", "space": None},
-    key=("sub", "ses", "task", "run"),
-    inputs={
-        "brain": FileInput(join=("sub", "ses", "task", "run"),
-                           where={"datatype": "func", "suffix": "mask",
-                                  "desc": "brain", "extension": ".nii.gz", "space": None}),
-        # one T1w per session, so this joins on a *subset* of the key
-        "anat":  FileInput(join=("sub", "ses"),
-                           where={"datatype": "anat", "suffix": "T1w",
-                                  "desc": "preproc", "extension": ".nii.gz", "space": None}),
-        # a different dataset in the same catalog
-        "wmparc": FileInput(join=("sub", "ses"), dataset_id="freesurfer",
-                            where={"seg": "wmparc", "extension": ".mgz"}),
-        # not a file at all: six columns of an ingested table, in row order
-        "motion": TableInput(join=("sub", "ses", "task", "run"),
-                             table="fmriprep_confounds", order_by="row_idx",
-                             columns=("rot_x", "rot_y", "rot_z",
-                                      "trans_x", "trans_y", "trans_z")),
-    },
-)
+UNIT = ("sub", "ses", "task", "run")
+ROLES = {
+    # One mask per run, so this joins on the whole unit key. `space=None` is IS NULL —
+    # what separates a native-space image from its `space-*` resamplings.
+    "brain": (UNIT, None,
+              {"datatype": "func", "suffix": "mask", "desc": "brain", "space": None}),
+    # One T1w per session, so this matches on *less* than the key.
+    "anat": (("sub", "ses"), None,
+             {"datatype": "anat", "suffix": "T1w", "desc": "preproc", "space": None}),
+    # A different dataset, reached by the name the catalog gives it.
+    "wmparc": (("sub", "ses"), "freesurfer", {"seg": "wmparc", "extension": ".mgz"}),
+}
 
-for unit in lake.bind(DENOISE):
-    if unit.unresolved:
-        print(unit.key, unit.unresolved)   # a per-unit gap is data, not an exception
-        continue
-    work(unit.anchor.local_path, unit.local("anat"), unit.frame("motion"))
+a = AllFiles.__table__.alias("a")
+cols = [a.c[k] for k in UNIT] + [a.c.dataset_id, a.c.root_uri, a.c.file_path]
+frm = a
+for name, (join, via, where) in ROLES.items():
+    lat, sel = sibling(a, name, join, where, via=via)
+    cols += sel
+    frm = frm.outerjoin(lat, true())
+
+units = lake.sql(select(*cols).select_from(frm).where(
+    a.c.kind == "data", a.c.datatype == "func", a.c.suffix == "bold",
+    a.c.desc == "preproc", a.c.space.is_(None),
+))
 ```
 
-`local()` and `frame()` rather than `unit.inputs[...]`: `inputs` holds `UPath`s, which
-stringify back to `file://` URIs and are typed `UPath | DataFrame` — so indexing it hands a
-subprocess a filename nothing can open, and hands a type checker a union.
+`where` is a mapping rather than keyword arguments because `from` is a Python keyword and
+fMRIPrep uses it as an entity. `kind == "data"` is applied for you — `all_files` is the
+whole registry and every image has a `.json` sidecar carrying identical entities, so
+without it every sibling matches two files — and passing `kind` yourself overrides it.
 
-A per-unit gap is data. Two whole-binding failures are not, and raise: an anchor matching no
-files, and an input resolving for *zero* units — a filter value that matches nothing, or a
-dataset never indexed, either of which would otherwise read as a study where every subject
-is incomplete.
+One row per unit, every sibling beside it, in **one** query — not one per role per unit.
+DuckDB decorrelates the laterals (`EXPLAIN` shows `HASH_JOIN` + `HASH_GROUP_BY`, no
+nested loop).
 
-Two properties are the point. Resolution costs **one query per input**, not one per input
-per unit, so it does not scale with the study. And a unit whose inputs do not resolve is
-*returned*, carrying `Unresolved(name, n_matched, reason)` entries that separate *missing*
-(the unit is incomplete) from *ambiguous* (the binding under-specifies — e.g. joining on
-`sub` alone across datasets whose subject labels collide). Incomplete subjects are visible
-before anything is submitted.
+The `__n` columns are the point. A per-unit gap is data, not an exception, and the three
+outcomes are distinguishable: `1` resolved, `0` missing (that subject is incomplete),
+`2+` ambiguous (the filter under-specifies — e.g. joining on `sub` alone across datasets
+whose subject labels collide). Incomplete subjects are visible before anything is
+submitted:
 
-`Binding`, `FileInput` and `TableInput` check their filters against the BIDS schema this
-build ships, so a binding over an *overlay-augmented* catalog — fMRIPrep's `from`/`to` and
-`xfm`, a FreeSurfer adapter's `seg` — would be flagged key by key against a vocabulary that
-does not contain those words. Generate the catalog's own vocabulary and import the same
-three names from it instead; nothing else about the declaration changes, and `lake.bind`
-takes either:
+```python
+for row in units.iter_rows(named=True):
+    if bad := {r: row[f"{r}__n"] for r in ROLES if row[f"{r}__n"] != 1}:
+        print(row["sub"], bad)
+        continue
+    work(lake.resolve(row["dataset_id"], row["file_path"], row["root_uri"]))
+```
+
+Adding filters to the anchor is what a scheduler launching one job per unit wants — it
+narrows the anchor query rather than the result, so the other units are never resolved
+at all.
+
+### `via` names a link, not a dataset
+
+`via=` joins `dataset_link_targets` to resolve what *this catalog* calls `freesurfer`,
+from the dataset's BIDS `DatasetLinks` or from `bidslake link alias`. The same query then
+works against any catalog defining the name, which a hardcoded `dataset_id` cannot — ids
+are free text, and a study processed one subject at a time has one dataset *per subject*
+(`sub-01-freesurfer`, …) with no single id to write down.
+
+The name is resolved **in the anchor's own dataset**, which is what BIDS `DatasetLinks`
+already means. So a sharded study needs no ceremony — each shard's description already
+says which tree is its own — and, deliberately, a link declared in a *neighbouring*
+dataset is not in scope.
+
+```bash
+bidslake link alias -d study.duckdb --dataset fmriprep --as freesurfer --target ../freesurfer
+bidslake link list  -d study.duckdb    # what every link name resolves to
+```
+
+Dropping `via` and matching on entities catalog-wide would be unsound in a way the `__n`
+check cannot catch: two studies each naming their own recon-all tree `fs`, and a
+`sub-01` whose recon failed in one of them, leaves exactly one match — in the *other*
+study — and one match is never ambiguous.
+
+### Rows, not files
+
+A sibling is not always a file. Motion regressors are a *slice of an ingested table*,
+keyed to the image they describe through `file_associations` — hundreds of rows per unit,
+so a second query rather than another lateral column, and still one query for the whole
+study:
+
+```python
+from bidslake.schema.models import FileAssociations, FmriprepConfounds
+
+MOTION = ("rot_x", "rot_y", "rot_z", "trans_x", "trans_y", "trans_z")
+fa, t = FileAssociations.__table__.alias("fa"), FmriprepConfounds.__table__.alias("t")
+motion = {
+    key[0]: frame.select(MOTION)
+    for key, frame in lake.sql(
+        select(fa.c.source_file_id.label("file_id"), *[t.c[c] for c in MOTION])
+        .select_from(t.join(fa, fa.c.target_file_id == t.c.file_id))
+        .where(fa.c.association_type == "fmriprep_confounds")
+        .order_by(t.c.row_idx)
+    ).partition_by(["file_id"], as_dict=True).items()
+}
+```
+
+Keyed through the association rather than by matching entities. A confounds file happens
+to share `sub`/`ses`/`task`/`run` with the images it describes, so an entity match gets
+the right answer — but only by luck of naming, and it is simply wrong for a describing
+file one directory level up, which has no `sub` to join on. The associations come from
+the BIDS schema's own `meta.associations` ([ADR 0007](../../docs/adr/0007-within-dataset-file-associations.md)).
+
+### Querying an augmented catalog
+
+The bundled models and `GetFilters` are pinned to the BIDS schema this build ships, so a
+query over an *overlay-augmented* catalog — fMRIPrep's `from`/`to` and `xfm`, a
+FreeSurfer adapter's `seg`, an ingested confounds table — would be flagged column by
+column against a vocabulary that does not contain those words. Generate the catalog's own
+and import from it instead; nothing else about the query changes:
 
 ```console
 $ python -m bidslake.stubgen study.duckdb --out _bids_types.py
 ```
 
 ```python
-from _bids_types import Binding, FileInput   # instead of `from bidslake import …`
+from _bids_types import AllFiles, FmriprepConfounds   # instead of `bidslake.schema.models`
 
-"xfm": FileInput(join=("sub", "ses"),
-                 where={"suffix": "xfm", "from": "T1w", "to": "MNI152NLin6Asym"}),
+select(AllFiles.file_path).where(AllFiles.from_ == "T1w", AllFiles.to == "MNI152NLin6Asym")
 ```
 
-A binding is only a query; bidslake schedules nothing. The same declaration drives a
-`for` loop, a process pool, a SLURM array, or a Snakemake input function:
+### Scheduling
+
+A query is only a query; bidslake schedules nothing. The same statement drives a `for`
+loop, a process pool, a SLURM array, or a Snakemake input function:
 
 ```python
 import submitit
 
-units = [u for u in lake.bind(DENOISE) if not u.unresolved]
+ready = [r for r in units.iter_rows(named=True) if all(r[f"{x}__n"] == 1 for x in ROLES)]
 executor = submitit.AutoExecutor(folder="logs")
 executor.update_parameters(timeout_min=240, slurm_partition="normal", cpus_per_task=4)
-jobs = executor.map_array(run_one_unit, units)   # one job per unit
+jobs = executor.map_array(run_one_unit, ready)   # one job per unit
 ```
-
-`bidslake.binding` is deliberately typed Python rather than a stamped JSON artifact for
-now — the dataclasses match what such an artifact would hold, so promoting it later is a
-serializer rather than a redesign. The module docstring and `TODO.md` ("Derivation layer")
-record the reasoning and the trigger.
 
 ## Layouts: naming an output before it exists
 
-A binding resolves what a unit *consumes*. A layout is the other direction — where its
-outputs go. Nothing can query for a file a pipeline has not written yet, so without one
+The queries above resolve what a unit *consumes*. A layout is the other direction —
+where its outputs go. Nothing can query for a file a pipeline has not written yet, so without one
 every consumer hardcodes the convention, which is how a wrapper grows two dozen properties
 that are only string joins.
 
@@ -182,7 +269,14 @@ catch-alls — which name a *class* of files and so have no concept to render fr
 The two are kept honest by construction. Loading a layout renders every role under every
 declared example and feeds the result back through its term map; if `classify(render(role))`
 does not reproduce the declared concepts, it raises rather than loading
-([ADR 0002](../../docs/adr/0002-layout-adapters.md) §12).
+([ADR 0008](../../docs/adr/0008-layouts.md)).
+
+That check has a consequence worth knowing before you reach for a role as a query: a role's
+`Concepts`/`Entities` describe the file **at its destination**, not the file that will be copied
+or computed into the slot. `filtered_func` declares `desc: filtered` — what FEAT writes — but is
+filled from fMRIPrep's `desc-preproc` BOLD, and `highres`/`example_func` declare no entities at
+all. Adding source-side entities to a role makes it fail the round trip, by design
+([ADR 0008](../../docs/adr/0008-layouts.md) §5).
 
 ## Design
 

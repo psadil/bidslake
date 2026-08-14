@@ -446,8 +446,29 @@ CREATE TABLE IF NOT EXISTS dataset_roots (
 // its own rows. Like `file_associations`: best-effort, no foreign keys — a declared
 // source that is not in the catalog (the usual case for a derivative) is kept, not dropped.
 
-// What a dataset declares it came from: one row per `SourceDatasets` entry, per
-// `--source-dataset` flag, and per `DatasetLinks` mapping.
+// `dataset_links` holds two DIFFERENT kinds of statement, distinguished by `link_type`,
+// and it is worth naming them because only one of them is provenance:
+//
+//   PROVENANCE  "this dataset CAME FROM S"    -> feeds `dataset_relations`
+//   NAMING      "here, the name N REFERS TO L" -> feeds `dataset_link_targets`
+//
+// Crossed with where the statement came from, the table is a 2x2:
+//
+//              | derived from dataset_description.json | asserted by the user |
+//   provenance | 'source'   (SourceDatasets)           | 'declared'           |
+//   naming     | 'named'    (DatasetLinks)             | 'alias'              |
+//
+// `clear_derived_links` deletes exactly the left column on every re-index, so the
+// derived rows track the file while the user's survive. That is why 'alias' is grouped
+// with 'declared' rather than being given a rule of its own.
+//
+// A naming link must never produce a provenance edge: `derived_from`/`source_of` filter
+// both naming types out (see the relations view below). Conflating them is not
+// hypothetical — it was a live bug, since those arms originally filtered no `link_type`
+// at all and so read every `DatasetLinks` entry as a derivation.
+//
+// One row per `SourceDatasets` entry, per `--source-dataset` flag, per `DatasetLinks`
+// mapping, and per `bidslake link alias`.
 pub const CREATE_DATASET_LINKS_TABLE: &str = "
 CREATE TABLE IF NOT EXISTS dataset_links (
     dataset_id TEXT,
@@ -481,8 +502,14 @@ CREATE TABLE IF NOT EXISTS dataset_identity (
 //     from the catalog (the ds001761 fMRIPrep/MRIQC case).
 //   - `derived_from` / `source_of`: one dataset declares an identity that ANOTHER
 //     catalog dataset *is* (its DOI or its `dataset:<id>`).
-// `named` links (`DatasetLinks`) are excluded from `shares_source`: they name a
-// referenced dataset, not a shared origin.
+//
+// EVERY arm reads provenance links only. `named`/`alias` are naming statements — "here,
+// this word refers to that dataset" — and a reference is not a derivation: a study that
+// merely *points at* a template, an atlas, or a shared FreeSurfer tree did not come from
+// it, and two studies pointing at the same one are not co-derivatives. `shares_source`
+// always said so; `derived_from`/`source_of` did not, and filtered no `link_type` at all,
+// so every `DatasetLinks` entry read as a derivation. Naming is resolved separately, by
+// `dataset_link_targets` below.
 pub const CREATE_DATASET_RELATIONS_VIEW: &str = "
 CREATE OR REPLACE VIEW dataset_relations AS
   SELECT a.dataset_id AS from_dataset_id, b.dataset_id AS to_dataset_id,
@@ -495,9 +522,49 @@ CREATE OR REPLACE VIEW dataset_relations AS
   SELECT l.dataset_id, i.dataset_id, 'derived_from', l.identity
   FROM dataset_links l JOIN dataset_identity i ON i.identity = l.identity
   WHERE l.dataset_id <> i.dataset_id
+    AND l.link_type IN ('source', 'declared')
   UNION
   SELECT i.dataset_id, l.dataset_id, 'source_of', l.identity
   FROM dataset_links l JOIN dataset_identity i ON i.identity = l.identity
   WHERE l.dataset_id <> i.dataset_id
+    AND l.link_type IN ('source', 'declared')
+;
+";
+
+// The other half of `dataset_links`: what a *name* refers to, resolved at query time.
+//
+// `dataset_relations` answers "where did this dataset come from"; this answers "in this
+// dataset, which catalog dataset does the name `freesurfer` mean". A consumer names the
+// link and the catalog supplies the id, so a query is portable across catalogs whose
+// dataset ids differ — which they routinely do, since a study processed one subject at a
+// time has one dataset per subject (`sub-001-freesurfer`, ...) rather than one `freesurfer`.
+//
+// A view, not a stored column, for the reason ADR 0003 §2 gives for `dataset_relations`: a
+// resolved target is a cache whose correctness depends on what else is in the catalog, and
+// the catalog grows. Naming a link before its target is indexed is not an error here — the
+// row simply resolves to nothing until the target arrives, and then resolves, with no
+// re-index and no bookkeeping.
+//
+// `target_dataset_id` is NULL when nothing in the catalog holds the identity, which is how
+// a caller tells "you never indexed that" from "you misspelled the name": the row exists,
+// the target does not.
+//
+// Self-references are kept, unlike in `dataset_relations`. A dataset deriving from itself is
+// nonsense, so the relation arms drop it; a dataset *naming* itself is not — \"here, `anat`
+// means this dataset\" is a useful thing to say, and it is the only way a query scoped by
+// name can mean \"my own dataset\". Since a link is resolved relative to the dataset that
+// declared it, dropping the self case would make that unsayable rather than safer.
+pub const CREATE_DATASET_LINK_TARGETS_VIEW: &str = "
+CREATE OR REPLACE VIEW dataset_link_targets AS
+  SELECT l.dataset_id AS from_dataset_id,
+         l.link_name,
+         i.dataset_id AS target_dataset_id,
+         l.link_type,
+         l.declared_ref,
+         l.identity AS via_identity
+  FROM dataset_links l
+  LEFT JOIN dataset_identity i ON i.identity = l.identity
+  WHERE l.link_type IN ('named', 'alias')
+    AND l.link_name <> ''
 ;
 ";

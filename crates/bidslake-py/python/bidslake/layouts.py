@@ -1,6 +1,6 @@
 """Layouts: naming an output file before it exists.
 
-A binding resolves what a unit *consumes* — files the catalog already knows about. A
+A query resolves what a unit *consumes* — files the catalog already knows about. A
 layout is the other direction: where a unit's outputs *go*. Nothing can query for a file
 a pipeline has not written yet, so without this every consumer hardcodes the convention,
 which is how a script ends up with two dozen properties that are only string joins::

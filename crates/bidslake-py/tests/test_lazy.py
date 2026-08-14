@@ -10,8 +10,8 @@ def test_lazy_matches_eager_with_predicate(lake):
     # and eager results must be identical.
     cols = ["dataset_id", "file_path", "task"]
     pred = (pl.col("task") == "rest") & (pl.col("suffix") == "bold")
-    eager = lake.datafiles.pl().filter(pred).select(cols).sort("file_path")
-    lazy = lake.datafiles.lazy().filter(pred).select(cols).sort("file_path").collect()
+    eager = lake.all_files.pl().filter(pred).select(cols).sort("file_path")
+    lazy = lake.all_files.lazy().filter(pred).select(cols).sort("file_path").collect()
     assert eager.equals(lazy)
 
 
@@ -31,4 +31,4 @@ def test_lazy_over_files_view(lake):
 
 
 def test_lazy_returns_lazyframe(lake):
-    assert isinstance(lake.datafiles.lazy(), pl.LazyFrame)
+    assert isinstance(lake.all_files.lazy(), pl.LazyFrame)

@@ -5,7 +5,7 @@ Status: accepted (2026-08-13)
 Relates to: `file_associations` and the `bvals`/`bvecs`/`diffusion` DDL (`schema.rs`), the
 `describes` block (`schema/ingestion.rs`, `data/ingestion-metaschema.json`), the view
 generator (`schema/dynamic.rs`), `resolve_structural_associations` (`bids.rs`), and the
-query surface (`layout.py`, `file.py`, `binding.py`). Closes `TODO.md`'s inherited-gradient
+query surface (`layout.py`, `file.py`). Closes `TODO.md`'s inherited-gradient
 item. Extends ADR 0006 §4's file-keyed rule with *which* file. Scoped **within** one
 dataset; the cross-dataset case is ADR 0003's and stays there.
 
@@ -39,9 +39,8 @@ a both-present guard dropped **both** without a word.
 Meanwhile the *other* half of the problem was the mirror image. fMRIPrep's
 `*_desc-confounds_timeseries.tsv` is stored correctly — `fmriprep_confounds`, keyed on the
 TSV, `row_idx` being the volume index — but had no edges at all, because nothing declared
-the association. Consumers matched `sub`/`ses`/`task`/`run` by hand
-(`binding.py`), which is the same unsound entity match ADR 0003 abolished across the dataset
-boundary, and which is not merely unsound but *wrong* for an inherited describing file: a
+the association. Consumers matched `sub`/`ses`/`task`/`run` by hand,
+which is the same unsound entity match ADR 0003 abolished across the dataset boundary, and which is not merely unsound but *wrong* for an inherited describing file: a
 root-level `dwi.bval` has no `sub` to join on.
 
 So: one relation, already built, consumed in one place, missing in another, and reimplemented

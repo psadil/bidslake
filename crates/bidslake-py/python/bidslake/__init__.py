@@ -12,14 +12,18 @@ Open a database with :func:`open` and query it by BIDS concept::
     # Or work with whole tables as Polars.
     df = lake.scans.pl()
 
-Declare a pipeline's units of work — and what each one needs — with a
-:class:`~bidslake.binding.Binding`, which resolves siblings joined on any subset of a
-unit's entities and reports a unit's unresolved inputs as data rather than raising::
+Anything :func:`~bidslake.BidsLake.get` cannot express — a join, a disjunction, an
+aggregate — is an ordinary SQLAlchemy statement over the generated models, compiled
+here and run by the same engine::
 
-    for unit in lake.bind(DENOISE):
-        if unit.unresolved:
-            continue
-        work(unit.anchor.local_path, unit.local("anat"))
+    from sqlalchemy import select
+    from bidslake.schema.models import AllFiles, Sidecars
+
+    lake.sql(
+        select(AllFiles.file_path, Sidecars.RepetitionTime)
+        .join(Sidecars, Sidecars.file_id == AllFiles.file_id)
+        .where(AllFiles.task == "rest", AllFiles.kind == "data")
+    )
 """
 
 from __future__ import annotations
@@ -27,20 +31,11 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 
-from .binding import (
-    Binding,
-    BindingOf,
-    FileInput,
-    FileInputOf,
-    TableInput,
-    TableInputOf,
-    Unit,
-    Unresolved,
-)
 from .file import BidsFile
 from .layout import BidsLake, Table
 from .layouts import Layout, LayoutAt, layout
-from .paths import RemotePathError
+from .paths import RemotePathError, to_local_path
+from .query import Sibling, sibling
 from .relations import Relation
 from .schema import C
 
@@ -50,22 +45,17 @@ from .schema import C
 __all__ = [
     "BidsFile",
     "BidsLake",
-    "Binding",
-    "BindingOf",
     "C",
-    "FileInput",
-    "FileInputOf",
     "Layout",
     "LayoutAt",
     "Relation",
     "RemotePathError",
+    "Sibling",
     "Table",
-    "TableInput",
-    "TableInputOf",
-    "Unit",
-    "Unresolved",
     "layout",
     "open",
+    "sibling",
+    "to_local_path",
 ]
 
 

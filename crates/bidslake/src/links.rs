@@ -10,6 +10,13 @@
 //! single point that makes MRIQC's bare DOI and fMRIPrep's `https://doi.org/…` URL
 //! collide — the whole cross-dataset feature turns on that one normalization.
 //!
+//! [`canonicalize_relative_to`] is the same thing for a reference that is **not**
+//! self-contained. `dataset_links` holds two kinds of statement (see
+//! `CREATE_DATASET_LINKS_TABLE`): *provenance* — "came from S", always an absolute
+//! reference — and *naming* — "here, `fs` refers to L", which BIDS `DatasetLinks` usually
+//! writes as a path relative to the dataset root. A relative reference has no meaning
+//! without that root, so the two entry points differ only in whether one is supplied.
+//!
 //! Nothing is ever rejected: an unrecognizable reference becomes an [`IdentityKind::Opaque`]
 //! identity rather than an error, mirroring the best-effort, keep-everything contract
 //! of `file_associations` (see `schema.rs`).
@@ -62,6 +69,73 @@ const DOI_PREFIXES: [&str; 5] = [
     "http://dx.doi.org/",
     "doi:",
 ];
+
+/// Canonicalize a `DatasetLinks` value, which is **relative to the dataset root** unless it
+/// carries a scheme.
+///
+/// BIDS writes these as URIs, and in practice almost always as a path relative to the
+/// dataset root — `"derivatives/fmriprep"`, `"../sourcedata/freesurfer"`. [`canonicalize`]
+/// alone has no root to resolve against, so such a value falls through to its bare-token
+/// branch and becomes the identity `dataset:derivatives/fmriprep`: a `Dataset` identity no
+/// `dataset_identity` row can ever hold, so the link is stored and never resolves. Joining
+/// it to the root first is what makes it a `file://`/`s3://` identity that matches the
+/// target's own `root_uri`.
+///
+/// A value that *is* absolute — a DOI, an `http(s)`/`file`/`s3` URL, bidslake's own
+/// `dataset:<id>` escape hatch, or an absolute path — is passed through untouched, so the
+/// hand-written forms keep working exactly as before.
+pub fn canonicalize_relative_to(declared: &str, root_uri: &str) -> Identity {
+    let s = declared.trim();
+    if s.is_empty() {
+        return opaque("");
+    }
+    if is_absolute_reference(s) {
+        return canonicalize(s);
+    }
+    canonicalize(&join_uri(root_uri, s))
+}
+
+/// Whether a reference stands on its own, or needs a root to be meaningful.
+fn is_absolute_reference(s: &str) -> bool {
+    s.starts_with('/')
+        || s.contains("://")
+        || s.starts_with("dataset:")
+        || strip_doi_prefix(s).is_some()
+        || (s.starts_with("10.") && s.contains('/'))
+}
+
+/// Join a root URI and a relative path, resolving `.`/`..` textually.
+///
+/// Textually, not through the filesystem: the root may be `s3://`, and even a local one may
+/// name a path that does not exist on the machine reading the catalog. `..` that would climb
+/// above the root is dropped rather than escaping it.
+fn join_uri(root_uri: &str, rel: &str) -> String {
+    let root = root_uri.trim_end_matches('/');
+    let (scheme, rest) = match root.split_once("://") {
+        Some((scheme, rest)) => (Some(scheme), rest),
+        None => (None, root),
+    };
+    let mut segments: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+    // A leading empty segment is the root of an absolute `file:///…` path; remember whether
+    // to re-emit it so `file:///data/x` does not come back as `file://data/x`.
+    let absolute = rest.starts_with('/');
+    for part in rel.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            other => segments.push(other),
+        }
+    }
+    let joined = segments.join("/");
+    match (scheme, absolute) {
+        (Some(scheme), true) => format!("{scheme}:///{joined}"),
+        (Some(scheme), false) => format!("{scheme}://{joined}"),
+        (None, true) => format!("/{joined}"),
+        (None, false) => joined,
+    }
+}
 
 /// Canonicalize a declared source reference into a comparable [`Identity`].
 pub fn canonicalize(declared: &str) -> Identity {
@@ -257,5 +331,76 @@ mod tests {
             canonicalize("some free text"),
             canonicalize("  some free text ")
         );
+    }
+
+    // -- DatasetLinks: values are relative to the dataset root -------------------
+
+    #[test]
+    fn a_relative_dataset_link_resolves_against_the_root() {
+        // The case that motivated `canonicalize_relative_to`: bare `canonicalize` turns this
+        // into `dataset:derivatives/fmriprep`, an identity nothing can ever hold.
+        let id = canonicalize_relative_to("derivatives/fmriprep", "file:///data/study");
+        assert_eq!(id.value, "file:///data/study/derivatives/fmriprep");
+        assert_eq!(id.kind, IdentityKind::File);
+        assert_eq!(
+            canonicalize("derivatives/fmriprep").value,
+            "dataset:derivatives/fmriprep",
+            "and this is what it used to produce"
+        );
+    }
+
+    #[test]
+    fn a_relative_dataset_link_matches_the_target_root_uri() {
+        // The property that makes the whole thing work: the identity a *link* canonicalizes
+        // to must equal the identity the *target dataset* records for its own root.
+        let link = canonicalize_relative_to("../freesurfer", "file:///data/study/fmriprep");
+        let target_root = canonicalize("file:///data/study/freesurfer");
+        assert_eq!(link.value, target_root.value);
+    }
+
+    #[test]
+    fn dot_segments_resolve_and_cannot_climb_past_the_root() {
+        assert_eq!(
+            canonicalize_relative_to("./sourcedata/./freesurfer", "file:///data/s").value,
+            "file:///data/s/sourcedata/freesurfer"
+        );
+        // `..` past the top is dropped rather than escaping into nonsense.
+        assert_eq!(
+            canonicalize_relative_to("../../../../x", "file:///data/s").value,
+            "file:///x"
+        );
+    }
+
+    #[test]
+    fn s3_roots_join_without_growing_a_slash() {
+        assert_eq!(
+            canonicalize_relative_to("derivatives/fmriprep", "s3://bucket/prefix").value,
+            "s3://bucket/prefix/derivatives/fmriprep"
+        );
+        assert_eq!(
+            canonicalize_relative_to("derivatives/x", "s3://bucket/prefix/").value,
+            "s3://bucket/prefix/derivatives/x"
+        );
+    }
+
+    #[test]
+    fn absolute_references_pass_through_untouched() {
+        // Every form that stands on its own must be unaffected by the root, so the
+        // hand-written escape hatches keep working.
+        for reference in [
+            "dataset:studyB",
+            "10.18112/openneuro.ds001761.v2.0.1",
+            "https://doi.org/10.18112/openneuro.ds001761.v2.0.1",
+            "s3://bucket/other",
+            "file:///elsewhere/x",
+            "/elsewhere/x",
+            "https://example.org/repo",
+        ] {
+            assert_eq!(
+                canonicalize_relative_to(reference, "file:///data/study").value,
+                canonicalize(reference).value,
+                "{reference} must not be joined to the root"
+            );
+        }
     }
 }
