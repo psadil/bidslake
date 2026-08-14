@@ -7,7 +7,10 @@ from bidslake import BidsFile
 
 
 def test_metadata_is_bids_cased(lake):
-    md = next(lake.get(task="rest", suffix="bold", dataset_id="ds210")).metadata
+    # `kind="data"`, because `get()` yields sidecars too and the query has no ORDER BY:
+    # ds210's inherited `task-rest_echo-3_bold.json` can come back first, and a sidecar
+    # carries no metadata of its own, so `md` is then `{}` and there is nothing to check.
+    md = next(lake.get(task="rest", suffix="bold", dataset_id="ds210", kind="data")).metadata
     # Verbatim BIDS field names, not snake_case, with a numeric TR.
     assert (
         "RepetitionTime" in md
@@ -20,7 +23,10 @@ def test_metadata_excludes_the_join_key(lake):
     # `sidecars` keys on `file_id` now (docs/adr/0006). The key is plumbing, not a BIDS
     # metadata field, and it leaked into every `metadata` dict as a `Decimal` when this
     # skipped the `(dataset_id, file_path)` pair it replaced.
-    md = next(lake.get(task="rest", suffix="bold", dataset_id="ds210")).metadata
+    # `kind="data"` for the same reason as above, and here it is what gives the assertion
+    # teeth: against a sidecar's empty `metadata` the intersection is trivially empty.
+    md = next(lake.get(task="rest", suffix="bold", dataset_id="ds210", kind="data")).metadata
+    assert md, "an empty dict would satisfy the assertion below without testing anything"
     assert not {"file_id", "dataset_id", "file_path", "other_data"} & set(md)
 
 
