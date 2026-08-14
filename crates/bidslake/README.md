@@ -145,8 +145,10 @@ added**. Name every adapter the catalog uses on every run and order stops matter
 concept columns no longer have this problem — they live on a view, which a wider run simply
 redefines.
 
-Adding another layout is authoring those documents, not writing an ingester — see
-[ADR 0002](../../docs/adr/0002-layout-adapters.md).
+Adding another adapter is authoring those documents, not writing an ingester — see
+[ADR 0002](../../docs/adr/0002-layout-adapters.md). The write direction — naming a file a
+pipeline has not produced yet — is a fourth, separate artifact, the **layout**
+([ADR 0008](../../docs/adr/0008-layouts.md)).
 
 ## Documentation
 
