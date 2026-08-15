@@ -147,8 +147,16 @@ detected; it is the normal case, and it is further evidence for §5.
 - **Role names are the API.** `out["highres2standard_mat"]` is the whole consumer surface, plus
   `.mkdir(role)`, which creates a role's parent so `reg/` and `mc/` need no declarations of their
   own. A role with unbound `{placeholder}`s raises rather than rendering a plausible wrong path, so
-  `layout["classification"]` is an error and `path("classification", training=…, threshold=…)` is
-  the call.
+  `layout["classification"]` is an error where nothing has supplied `training`/`threshold`.
+
+  *Amended (2026-08):* those values are supplied either per call —
+  `path("classification", training=…, threshold=…)` — or **once, alongside the root**:
+  `layout("feat").under(root, training="UKBiobank", threshold="1")`. They are configuration for a
+  whole run, so requiring them per access made `for role in layout.roles: at[role]` an error and
+  drove every consumer that walked the role list to special-case the same two names by hand —
+  three separate hand-rolled shims in one pipeline. Binding at `under()` removes that without
+  weakening anything: a placeholder *nothing* has bound still raises, and a per-call keyword still
+  overrides a bound one. Only the moment of binding moved.
 - **A layout is not stamped into a catalog** (ADR 0002 §9), because it contributes nothing to the
   DDL and is consulted before a catalog exists. A catalog records how its files were *read*, not
   which layout named them. Recording a layout as provenance when one is used to *produce* a dataset
