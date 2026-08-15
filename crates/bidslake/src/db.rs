@@ -15,9 +15,30 @@
 
 use crate::links::Identity;
 use crate::schema::{self, Schema};
-use duckdb::{Connection, Result, params};
+use anyhow::{Context as _, Result};
+use duckdb::{Connection, params};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+
+/// A [`duckdb::Error`] as a *leaf* [`anyhow::Error`], discarding its `source()`.
+///
+/// `duckdb::Error`'s own `Display` is the complete diagnostic — the error class, the
+/// constraint or column at fault, and DuckDB's own suggestion. Its source is the raw FFI
+/// code, whose `Display` is the constant `Error code 1: Unknown error code`, so any
+/// rendering that walks the chain (`{:#}`, which is what `main` prints and what the Python
+/// bindings return) appends that to every message:
+///
+/// ```text
+/// upserting 1 rows into file_registry: moving staged rows into file_registry:
+/// Constraint Error: NOT NULL constraint failed: file_registry.file_id
+///                                              : Error code 1: Unknown error code  <- always
+/// ```
+///
+/// Re-wrapping the message as a fresh error truncates the chain where it stops being worth
+/// reading. Mirrors `duck` in `bidslake-py`, for the same reason and with the same effect.
+pub(crate) fn duck(e: duckdb::Error) -> anyhow::Error {
+    anyhow::anyhow!("{e}")
+}
 
 /// Lowercase-hex SHA-256 of `bytes` (overlay provenance digests in `stamp_schema`).
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -116,7 +137,7 @@ impl BidsDb {
     /// concept columns are not covered: they are select items of the `all_files` view, which
     /// is emitted `CREATE OR REPLACE`, so a wider run simply redefines them. See
     /// `check_registry_shape`, and the narrowing caveat recorded in `TODO.md`.
-    pub fn create_tables(&self, schema: &Schema) -> anyhow::Result<()> {
+    pub fn create_tables(&self, schema: &Schema) -> Result<()> {
         self.check_registry_shape(schema)?;
         // Tables first — all of them — then every view, because a view may select from a
         // static table (`bvals` through `file_associations`) just as easily as from a
@@ -170,7 +191,7 @@ impl BidsDb {
     ///
     /// The remedy is unchanged and now needed far less often: the adapter set describes the
     /// **catalog**, not the dataset being added.
-    fn check_registry_shape(&self, schema: &Schema) -> anyhow::Result<()> {
+    fn check_registry_shape(&self, schema: &Schema) -> Result<()> {
         let exists: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM duckdb_tables() WHERE table_name = 'file_registry'",
             [],
@@ -331,8 +352,7 @@ impl BidsDb {
     ///
     /// Replaces the former `tabular_files` table, whose `table_name`/`n_rows` are dropped:
     /// which table a file's rows landed in is recoverable by joining that table on `file_id`.
-    pub fn record_file_status(&self, file_id: &str, status: TabularStatus) -> anyhow::Result<()> {
-        use anyhow::Context as _;
+    pub fn record_file_status(&self, file_id: &str, status: TabularStatus) -> Result<()> {
         let mut stmt = self
             .conn
             .prepare_cached("UPDATE file_registry SET status = ? WHERE file_id = ?")?;
@@ -367,9 +387,13 @@ impl BidsDb {
         let mut stmt = self.conn.prepare_cached(
             "SELECT root_uri FROM dataset_roots WHERE dataset_id = ? ORDER BY root_uri",
         )?;
+        // `duckdb::Result`, not the crate's `Result` (now anyhow's): the iterator yields
+        // the driver's error type, and collecting it needs that spelled out.
         let rows = stmt
             .query_map(params![dataset_id], |r| r.get(0))?
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<duckdb::Result<Vec<_>>>()
+            .map_err(duck)
+            .with_context(|| format!("reading dataset_roots for {dataset_id}"))?;
         Ok(rows)
     }
 
@@ -503,14 +527,27 @@ impl BidsDb {
         if rows.is_empty() {
             return Ok(());
         }
-        let mut appender = self.conn.appender(table_name)?;
-        for row in rows {
+        let mut appender = self
+            .conn
+            .appender(table_name)
+            .map_err(duck)
+            .with_context(|| format!("opening an appender on {table_name}"))?;
+        for (i, row) in rows.iter().enumerate() {
+            // The row index, because a bulk append fails on *one* row out of thousands and
+            // the caller can only say how many it handed over. Without this the message is
+            // a bare "Conversion Error" for a batch, with nothing to look at.
             let values = schema.row_values(table_name, row)?;
             let refs: Vec<&dyn duckdb::ToSql> =
                 values.iter().map(|v| v as &dyn duckdb::ToSql).collect();
-            appender.append_row(refs.as_slice())?;
+            appender
+                .append_row(refs.as_slice())
+                .map_err(duck)
+                .with_context(|| format!("appending row {i} of {} to {table_name}", rows.len()))?;
         }
-        appender.flush()?;
+        appender
+            .flush()
+            .map_err(duck)
+            .with_context(|| format!("flushing {} appended rows to {table_name}", rows.len()))?;
         Ok(())
     }
 
@@ -538,14 +575,20 @@ impl BidsDb {
             return Ok(());
         }
         self.upsert_staged(table_name, |appender| {
-            for row in rows {
+            for (i, row) in rows.iter().enumerate() {
                 let values = schema.row_values(table_name, row)?;
                 let refs: Vec<&dyn duckdb::ToSql> =
                     values.iter().map(|v| v as &dyn duckdb::ToSql).collect();
-                appender.append_row(refs.as_slice())?;
+                appender
+                    .append_row(refs.as_slice())
+                    .map_err(duck)
+                    .with_context(|| {
+                        format!("staging row {i} of {} for {table_name}", rows.len())
+                    })?;
             }
             Ok(())
         })
+        .with_context(|| format!("upserting {} rows into {table_name}", rows.len()))
     }
 
     /// The staging machinery of [`Self::upsert_rows`], with the caller filling the stage.
@@ -586,17 +629,33 @@ impl BidsDb {
         // `table_name` is always an internal literal, never user input.
         let stage = format!("{table_name}_upsert_stage");
         // `OR REPLACE` so a previous run that died mid-flight leaves nothing to trip over.
-        self.conn.execute_batch(&format!(
-            "CREATE OR REPLACE TEMP TABLE {stage} AS SELECT * FROM {table_name} LIMIT 0"
-        ))?;
+        self.conn
+            .execute_batch(&format!(
+                "CREATE OR REPLACE TEMP TABLE {stage} AS SELECT * FROM {table_name} LIMIT 0"
+            ))
+            .map_err(duck)
+            .with_context(|| format!("creating the upsert stage for {table_name}"))?;
         {
-            let mut appender = self.conn.appender(&stage)?;
+            let mut appender = self
+                .conn
+                .appender(&stage)
+                .map_err(duck)
+                .with_context(|| format!("opening an appender on {stage}"))?;
             fill(&mut appender)?;
-            appender.flush()?;
+            appender
+                .flush()
+                .map_err(duck)
+                .with_context(|| format!("flushing the upsert stage for {table_name}"))?;
         }
-        self.conn.execute_batch(&format!(
-            "INSERT OR REPLACE INTO {table_name} SELECT * FROM {stage}; DROP TABLE {stage};"
-        ))?;
+        // The one that names a real constraint: this is where a duplicate primary key or a
+        // foreign key into `file_registry` is rejected, and the message otherwise says only
+        // which constraint, never which table it was moving rows into.
+        self.conn
+            .execute_batch(&format!(
+                "INSERT OR REPLACE INTO {table_name} SELECT * FROM {stage}; DROP TABLE {stage};"
+            ))
+            .map_err(duck)
+            .with_context(|| format!("moving staged rows into {table_name}"))?;
         Ok(())
     }
 
@@ -710,5 +769,9 @@ fn file_id_value(file_id: &str) -> Result<duckdb::types::Value> {
     file_id
         .parse::<i128>()
         .map(duckdb::types::Value::HugeInt)
-        .map_err(|e| duckdb::Error::ToSqlConversionFailure(Box::new(e)))
+        // The third `ToSqlConversionFailure` this pass removed, and the only one of the
+        // three that was honestly named -- but it still hid the value that failed, which
+        // is the single thing worth knowing when the docstring above says this can only
+        // happen through a bug.
+        .with_context(|| format!("file_id {file_id:?} is not an i128"))
 }

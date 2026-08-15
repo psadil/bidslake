@@ -6,7 +6,7 @@
 //! a `--no-default-features` build). All paths returned by `walk` are relative to the
 //! dataset root.
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use bids_core::filetree::FileTree;
 use futures::future::BoxFuture;
 use std::path::{Path, PathBuf};
@@ -113,10 +113,17 @@ impl BidsFileSystem for LocalFileSystem {
             // descended into. `read_file_tree` is synchronous, so run it on a blocking
             // thread. The returned paths are root-relative with a leading `/`, which we
             // strip to match the dataset-relative frame the rest of the pipeline expects.
+            // `with_context` on the walk, not only at the call site: a missing or
+            // unreadable input reports `No such file or directory (os error 2)` with no
+            // hint of *which* directory, and that is the first thing a mistyped `--input`
+            // produces. The root is the one fact the caller needs and the only one this
+            // frame has.
+            let root_for_msg = root.clone();
             let tree = tokio::task::spawn_blocking(move || {
                 bids_core::filetree::read_file_tree(&root, &pseudo, apply_bidsignore)
             })
-            .await??;
+            .await?
+            .with_context(|| format!("walking {}", root_for_msg.display()))?;
             // Flatten to the dataset-relative paths the pipeline expects (strip the
             // leading `/` each tree path carries).
             let paths: Vec<PathBuf> = tree
@@ -132,7 +139,9 @@ impl BidsFileSystem for LocalFileSystem {
     fn read_to_string(&self, path: &Path) -> BoxFuture<'_, Result<String>> {
         let full_path = self.root.join(path);
         Box::pin(async move {
-            let content = tokio::fs::read_to_string(full_path).await?;
+            let content = tokio::fs::read_to_string(&full_path)
+                .await
+                .with_context(|| format!("reading {}", full_path.display()))?;
             Ok(content)
         })
     }

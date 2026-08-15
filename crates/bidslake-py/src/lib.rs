@@ -46,8 +46,13 @@ impl PyLake {
         } else {
             AccessMode::ReadWrite
         };
-        let config = Config::default().access_mode(mode).map_err(anyhow_err)?;
+        let config = Config::default()
+            .access_mode(mode)
+            .map_err(duck)
+            .context("configuring DuckDB access mode")
+            .map_err(anyhow_err)?;
         let conn = Connection::open_with_flags(path, config)
+            .map_err(duck)
             .with_context(|| format!("opening DuckDB database at {path}"))
             .map_err(anyhow_err)?;
         Ok(PyLake {
@@ -89,50 +94,46 @@ impl PyLake {
     /// Base tables and views in the `main` schema, sorted.
     fn list_tables(&self) -> PyResult<Vec<String>> {
         let guard = self.locked_conn();
-        let conn = guard
-            .as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("operation on closed BidsLake"))?;
+        let conn = guard.as_ref().ok_or_else(closed)?;
         let mut stmt = conn
             .prepare(
                 "SELECT table_name FROM information_schema.tables \
                  WHERE table_schema = 'main' ORDER BY table_name",
             )
-            .map_err(anyhow_err_from)?;
+            .map_err(dberr("listing tables"))?;
         let rows = stmt
             .query_map([], |r| r.get::<_, String>(0))
-            .map_err(anyhow_err_from)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(anyhow_err_from)
+            .map_err(dberr("listing tables"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(dberr("listing tables"))
     }
 
     /// The `(column_name, data_type)` pairs of `table`, in ordinal order.
     /// Includes the generated virtual columns (they are real catalog columns).
     fn columns(&self, table: &str) -> PyResult<Vec<(String, String)>> {
         let guard = self.locked_conn();
-        let conn = guard
-            .as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("operation on closed BidsLake"))?;
+        let conn = guard.as_ref().ok_or_else(closed)?;
         let mut stmt = conn
             .prepare(
                 "SELECT column_name, data_type FROM information_schema.columns \
                  WHERE table_schema = 'main' AND table_name = ? \
                  ORDER BY ordinal_position",
             )
-            .map_err(anyhow_err_from)?;
+            .map_err(dberr(format!("reading columns of {table}")))?;
         let rows = stmt
             .query_map([table], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
             })
-            .map_err(anyhow_err_from)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(anyhow_err_from)
+            .map_err(dberr(format!("reading columns of {table}")))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(dberr(format!("reading columns of {table}")))
     }
 
     /// The `bidslake_meta` version stamp `(schema_version, bids_version,
     /// bidslake_version)`, or `None` if the DB predates the stamp.
     fn meta(&self) -> PyResult<Option<(String, String, String)>> {
         let guard = self.locked_conn();
-        let conn = guard
-            .as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("operation on closed BidsLake"))?;
+        let conn = guard.as_ref().ok_or_else(closed)?;
         let mut stmt = match conn.prepare(
             "SELECT schema_version, bids_version, bidslake_version \
              FROM bidslake_meta LIMIT 1",
@@ -151,7 +152,7 @@ impl PyLake {
         match row {
             Ok(v) => Ok(Some(v)),
             Err(duckdb::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(anyhow_err_from(e)),
+            Err(e) => Err(dberr("reading bidslake_meta")(e)),
         }
     }
 
@@ -161,9 +162,7 @@ impl PyLake {
     /// generate static types for augmented entities/suffixes/columns.
     fn effective_schema(&self) -> PyResult<Option<String>> {
         let guard = self.locked_conn();
-        let conn = guard
-            .as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("operation on closed BidsLake"))?;
+        let conn = guard.as_ref().ok_or_else(closed)?;
         let mut stmt =
             match conn.prepare("SELECT effective_schema::VARCHAR FROM bidslake_schema LIMIT 1") {
                 Ok(stmt) => stmt,
@@ -173,7 +172,7 @@ impl PyLake {
         match stmt.query_row([], |r| r.get::<_, String>(0)) {
             Ok(v) => Ok(Some(v)),
             Err(duckdb::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(anyhow_err_from(e)),
+            Err(e) => Err(dberr("reading bidslake_schema")(e)),
         }
     }
 
@@ -181,9 +180,7 @@ impl PyLake {
     /// or an empty list if the DB carries no augmentation.
     fn overlays(&self) -> PyResult<Vec<(i64, String, String)>> {
         let guard = self.locked_conn();
-        let conn = guard
-            .as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("operation on closed BidsLake"))?;
+        let conn = guard.as_ref().ok_or_else(closed)?;
         let mut stmt =
             match conn.prepare("SELECT idx, source, sha256 FROM bidslake_overlays ORDER BY idx") {
                 Ok(stmt) => stmt,
@@ -197,8 +194,9 @@ impl PyLake {
                     r.get::<_, String>(2)?,
                 ))
             })
-            .map_err(anyhow_err_from)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(anyhow_err_from)
+            .map_err(dberr("reading bidslake_overlays"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(dberr("reading bidslake_overlays"))
     }
 
     /// The applied term maps' provenance `(idx, source, sha256)` in application order, or an
@@ -217,9 +215,7 @@ impl PyLake {
     /// Read a `bidslake_<kind>` provenance table (empty if absent).
     fn provenance(&self, table: &str) -> PyResult<Vec<(i64, String, String)>> {
         let guard = self.locked_conn();
-        let conn = guard
-            .as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("operation on closed BidsLake"))?;
+        let conn = guard.as_ref().ok_or_else(closed)?;
         let sql = format!("SELECT idx, source, sha256 FROM {table} ORDER BY idx");
         let mut stmt = match conn.prepare(&sql) {
             Ok(stmt) => stmt,
@@ -233,8 +229,9 @@ impl PyLake {
                     r.get::<_, String>(2)?,
                 ))
             })
-            .map_err(anyhow_err_from)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(anyhow_err_from)
+            .map_err(dberr(format!("reading {table}")))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(dberr(format!("reading {table}")))
     }
 }
 
@@ -249,9 +246,10 @@ impl PyLake {
     fn query_ipc_bytes(&self, sql: &str, values: &[DuckValue]) -> anyhow::Result<Vec<u8>> {
         let guard = self.locked_conn();
         let conn = guard.as_ref().context("operation on closed BidsLake")?;
-        let mut stmt = conn.prepare(sql).context("preparing query")?;
+        let mut stmt = conn.prepare(sql).map_err(duck).context("preparing query")?;
         let arrow = stmt
             .query_arrow(params_from_iter(values.iter()))
+            .map_err(duck)
             .context("executing query")?;
         let schema = arrow.get_schema();
         let batches: Vec<RecordBatch> = arrow.collect();
@@ -307,12 +305,66 @@ fn py_to_duck_value(ob: &Bound<'_, PyAny>) -> PyResult<DuckValue> {
     )))
 }
 
-fn anyhow_err(e: impl std::fmt::Display) -> PyErr {
-    PyRuntimeError::new_err(e.to_string())
+/// An [`anyhow::Error`] as a Python exception, **with its whole context chain**.
+///
+/// `{:#}` rather than `{}`, and the difference is the entire point. anyhow's plain
+/// `Display` prints only the outermost `.context()`, so a chain like
+/// `duckdb::Error(…) -> .context("preparing query")` rendered as exactly
+/// `preparing query`, discarding the message that said what was actually wrong. Every SQL
+/// error a caller could make arrived identical:
+///
+/// ```text
+/// 'select * from nope'              -> RuntimeError: preparing query
+/// 'select nosuchcol from all_files' -> RuntimeError: preparing query
+/// 'select * from all_files where'   -> RuntimeError: preparing query
+/// ```
+///
+/// while DuckDB had said "Table with name nope does not exist! Did you mean …", "Binder
+/// Error: Referenced column … not found" and "Parser Error: syntax error at or near"
+/// respectively. `PyLake` is the only way to run a statement and `sibling()`-shaped
+/// queries are wide and hand-composed, so this was the error a user met most often and
+/// the one that told them least.
+///
+/// The alternate form walks the chain and joins it with `: `, outermost first, so the
+/// caller gets both what bidslake was doing and what the engine said.
+fn anyhow_err(e: anyhow::Error) -> PyErr {
+    PyRuntimeError::new_err(format!("{e:#}"))
 }
 
-fn anyhow_err_from(e: duckdb::Error) -> PyErr {
-    PyRuntimeError::new_err(e.to_string())
+/// A `map_err` for a bare [`duckdb::Error`], naming what bidslake was doing.
+///
+/// The queries these guard are bidslake's own and fixed, so DuckDB's message is the
+/// diagnostic part — but on its own it says "Catalog Error: Table with name
+/// bidslake_meta does not exist" with no hint of which accessor asked for it. One
+/// prefix is the whole fix, and it keeps the call sites to a single combinator.
+fn dberr(what: impl Into<String>) -> impl FnOnce(duckdb::Error) -> PyErr {
+    let what = what.into();
+    move |e| PyRuntimeError::new_err(format!("{what}: {e}"))
+}
+
+/// `operation on closed BidsLake`, the one error that is not the engine's.
+fn closed() -> PyErr {
+    PyRuntimeError::new_err("operation on closed BidsLake")
+}
+
+/// A [`duckdb::Error`] as a *leaf* [`anyhow::Error`], discarding its `source()`.
+///
+/// `duckdb::Error`'s own `Display` is the complete engine diagnostic — the error class,
+/// the offending identifier, the "Did you mean …" suggestion and the `LINE n:` caret.
+/// Its source is the raw FFI code, whose `Display` is `Error code 1: Unknown error code`.
+/// So walking the whole chain (which is what `{:#}` does, and what we want everywhere
+/// else) appends that to every message:
+///
+/// ```text
+/// preparing query: Catalog Error: Table with name nope does not exist! …
+///     ^ useful                                                          ^
+///     : Error code 1: Unknown error code   <- always, and never informative
+/// ```
+///
+/// Re-wrapping the message as a fresh error truncates the chain exactly where it stops
+/// being worth reading, and keeps `{:#}` honest for the contexts above it.
+fn duck(e: duckdb::Error) -> anyhow::Error {
+    anyhow::anyhow!("{e}")
 }
 
 /// A compiled, validated bidslake **layout**: the concepts-to-path direction, for
