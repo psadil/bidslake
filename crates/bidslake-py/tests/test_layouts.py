@@ -9,6 +9,7 @@ actual index of a tree built from those very paths.
 from __future__ import annotations
 
 import subprocess
+import time
 from pathlib import Path
 
 import bidslake
@@ -215,3 +216,98 @@ def test_under_without_bindings_is_unchanged(feat: bidslake.Layout) -> None:
     at = feat.under(Path("/work") / UNIT)
     assert at["filtered_func"] == Path(f"/work/{UNIT}/filtered_func_data.nii.gz")
     assert at["highres2standard_mat"] == Path(f"/work/{UNIT}/reg/highres2standard.mat")
+
+
+# ---------------------------------------------------------------------------
+# Presence and identity
+#
+# "Is this role's file there, and has it changed" is the question every consumer that
+# tracks progress through a tree has to answer, and before these it was answered four
+# separate times in one spike: a pipeline's own done-check, a workflow engine's completion
+# rule, an asset check comparing a ledger against disk, and a progress count for a UI.
+#
+# The work is in Rust so this and `bidslake verify` share one meaning of "changed" — the
+# same size/mtime pair the ingest records in `all_files`.
+# ---------------------------------------------------------------------------
+
+
+def test_presence_is_false_before_anything_is_written(feat, tmp_path):
+    at = feat.under(tmp_path / UNIT, **BINDINGS)
+    assert at.has("filtered_func") is False
+    assert set(at.present().values()) == {False}
+
+
+def test_presence_follows_the_filesystem(feat, tmp_path):
+    at = feat.under(tmp_path / UNIT, **BINDINGS)
+    at.mkdir("filtered_func").write_bytes(b"x" * 1234)
+    assert at.has("filtered_func") is True
+    assert at.present()["filtered_func"] is True
+    assert at.present()["melodic_mix"] is False
+
+
+def test_state_carries_size_and_mtime(feat, tmp_path):
+    at = feat.under(tmp_path / UNIT, **BINDINGS)
+    at.mkdir("filtered_func").write_bytes(b"x" * 1234)
+    st = at.state("filtered_func")
+    assert (st.role, st.exists, st.size_bytes) == ("filtered_func", True, 1234)
+    assert st.mtime_ns is not None
+    absent = at.state("melodic_mix")
+    assert (absent.exists, absent.size_bytes, absent.mtime_ns) == (False, None, None)
+
+
+def test_an_unrenderable_role_is_omitted_not_reported_absent(feat, tmp_path):
+    """Unaddressable and missing are different answers.
+
+    Conflating them would report a finished tree as incomplete because a caller forgot a
+    keyword — which is exactly the confusion the raise on `path()` exists to prevent.
+    """
+    at = feat.under(tmp_path / UNIT, training="UKBiobank", threshold="1")  # no `rater`
+    present = at.present()
+    assert "classification" in present, "bound placeholders make this one renderable"
+    assert "classification_by_rater" not in present, "unbound `{rater}` — omitted, not False"
+    # With `rater` supplied, it joins the rest.
+    assert "classification_by_rater" in feat.under(tmp_path / UNIT, **BINDINGS).present()
+
+
+def test_has_answers_false_rather_than_raising(feat, tmp_path):
+    """`path()` raises for an unrenderable role; `has()` deliberately does not.
+
+    A caller asking "is it there" wants an answer.
+    """
+    at = feat.under(tmp_path / UNIT, training="UKBiobank", threshold="1")
+    with pytest.raises(KeyError):
+        at["classification_by_rater"]
+    assert at.has("classification_by_rater") is False
+
+
+def test_digest_changes_when_a_file_appears(feat, tmp_path):
+    at = feat.under(tmp_path / UNIT, **BINDINGS)
+    before = at.digest()
+    at.mkdir("filtered_func").write_bytes(b"x" * 1234)
+    assert at.digest() != before
+
+
+def test_digest_changes_on_a_size_preserving_rewrite(feat, tmp_path):
+    """The case a size-only check misses, and the reason mtime is in the digest."""
+    at = feat.under(tmp_path / UNIT, **BINDINGS)
+    at.mkdir("filtered_func").write_bytes(b"x" * 1234)
+    before = at.digest()
+    time.sleep(0.01)
+    at["filtered_func"].write_bytes(b"y" * 1234)  # same size, new mtime
+    assert at.digest() != before
+
+
+def test_digest_is_stable_when_nothing_moves(feat, tmp_path):
+    at = feat.under(tmp_path / UNIT, **BINDINGS)
+    at.mkdir("filtered_func").write_bytes(b"x" * 1234)
+    assert at.digest() == at.digest()
+
+
+def test_digest_can_be_scoped_to_one_step_s_roles(feat, tmp_path):
+    """What a per-step cache key needs: only the roles that step writes."""
+    at = feat.under(tmp_path / UNIT, **BINDINGS)
+    at.mkdir("filtered_func").write_bytes(b"x")
+    scoped = at.digest("filtered_func")
+    at.mkdir("melodic_mix").write_bytes(b"y")
+    assert at.digest("filtered_func") == scoped, "an unrelated role must not move it"
+    assert at.digest() != scoped, "but the whole-tree digest did move"

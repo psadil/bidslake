@@ -43,6 +43,7 @@ async fn ingest_s3(dataset: &str) -> anyhow::Result<BidsDb> {
             anonymous: true,
         }),
         true,
+        true,
     );
 
     let txn = db.conn.unchecked_transaction()?;

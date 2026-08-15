@@ -72,6 +72,8 @@ COLUMNS: dict[str, dict[str, str]] = {
         "file_path": "VARCHAR",
         "kind": "VARCHAR",
         "status": "VARCHAR",
+        "size_bytes": "UBIGINT",
+        "mtime_ns": "BIGINT",
         "acq": "VARCHAR",
         "atlas": "VARCHAR",
         "ce": "VARCHAR",
@@ -339,6 +341,8 @@ COLUMNS: dict[str, dict[str, str]] = {
         "file_path": "VARCHAR",
         "kind": "VARCHAR",
         "status": "VARCHAR",
+        "size_bytes": "UBIGINT",
+        "mtime_ns": "BIGINT",
     },
     "ieeg_channels": {
         "file_id": "UBIGINT",
@@ -997,6 +1001,8 @@ class C:
         file_path: pl.Expr = pl.col("file_path")
         kind: pl.Expr = pl.col("kind")
         status: pl.Expr = pl.col("status")
+        size_bytes: pl.Expr = pl.col("size_bytes")
+        mtime_ns: pl.Expr = pl.col("mtime_ns")
         acq: pl.Expr = pl.col("acq")
         atlas: pl.Expr = pl.col("atlas")
         ce: pl.Expr = pl.col("ce")
@@ -1264,6 +1270,8 @@ class C:
         file_path: pl.Expr = pl.col("file_path")
         kind: pl.Expr = pl.col("kind")
         status: pl.Expr = pl.col("status")
+        size_bytes: pl.Expr = pl.col("size_bytes")
+        mtime_ns: pl.Expr = pl.col("mtime_ns")
 
     class ieeg_channels:
         file_id: pl.Expr = pl.col("file_id")

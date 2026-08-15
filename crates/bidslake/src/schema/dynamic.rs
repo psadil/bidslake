@@ -526,6 +526,18 @@ impl Schema {
             // stored none of its rows). NULL for a file there was never any reading to
             // report on — `kind` is what says an image is an image.
             "status TEXT".to_string(),
+            // What the walk observed about the file itself, as opposed to what its name or
+            // contents say. Both NULL when the run was given `--no-stat`, and on a backend
+            // that could not stat a particular file — a walk and a stat are two moments,
+            // and a dataset can change between them.
+            //
+            // Deliberately not a checksum: hashing means *reading* every file, which is a
+            // different order of cost from stat-ing it. Size and mtime answer "has this
+            // changed since I looked", which is what a content-addressed workflow engine
+            // and `verify` both actually ask.
+            "size_bytes UBIGINT".to_string(),
+            // Nanoseconds since the epoch, signed because a pre-1970 mtime is legal.
+            "mtime_ns BIGINT".to_string(),
         ];
         let mut fields: Vec<(String, String, String)> = [
             ("file_id", "UBIGINT"),
@@ -534,6 +546,8 @@ impl Schema {
             ("file_path", "TEXT"),
             ("kind", "TEXT"),
             ("status", "TEXT"),
+            ("size_bytes", "UBIGINT"),
+            ("mtime_ns", "BIGINT"),
         ]
         .iter()
         .map(|(n, t)| (n.to_string(), t.to_string(), n.to_string()))

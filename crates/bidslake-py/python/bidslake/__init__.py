@@ -33,7 +33,7 @@ from collections.abc import Mapping
 
 from .file import BidsFile
 from .layout import BidsLake, Table
-from .layouts import Layout, LayoutAt, layout
+from .layouts import Layout, LayoutAt, RoleState, layout
 from .paths import RemotePathError, to_local_path
 from .query import Sibling, sibling, sibling_path, unresolved
 from .relations import Relation
@@ -50,6 +50,7 @@ __all__ = [
     "LayoutAt",
     "Relation",
     "RemotePathError",
+    "RoleState",
     "Sibling",
     "Table",
     "layout",

@@ -122,6 +122,16 @@ as issues. Roughly ordered by value.
   `INSERT OR REPLACE`. Worth doing before anyone points bidslake at a catalog of that size,
   rather than widening the key again.
 
+- [ ] **`verify` cannot detect a rewrite that preserved size and mtime.** It compares the
+  registry's `size_bytes`/`mtime_ns` against the tree, which catches a file that was deleted,
+  truncated, replaced or rewritten — the failures a derivative tree actually suffers — and
+  misses a forgery, or a second write inside one timestamp tick on a filesystem with coarse
+  mtime. A checksum column would close it and is deliberately not there: hashing means
+  *reading* every file, which is a different order of cost from stat-ing one, and an index
+  that read every byte of a study to build itself would not be an index. If it is ever wanted,
+  it belongs behind a flag on `verify` (hash on demand, for the files whose stat already
+  matched) rather than in the ingest.
+
 - [ ] **CI enhancements**. The initial `.github/workflows/ci.yml` covers fmt/clippy/test, the
   Python suite, and the codegen drift guard on a single Linux runner. Later: an OS/Python/Rust
   matrix, benchmark-regression tracking (`cargo bench` in `bidslake` and `bids-validator-rs`), a

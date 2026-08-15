@@ -420,6 +420,50 @@ impl PyLayout {
         self.layout.render(role, &bindings)
     }
 
+    /// Every role that renders under `root`, with what the filesystem says about it.
+    ///
+    /// Returns `(role, exists, size_bytes, mtime_ns)` per role, in the layout's own order.
+    /// A role whose placeholders `bindings` does not supply is **omitted** rather than
+    /// reported absent: unaddressable and missing are different answers, and a caller that
+    /// conflated them would report a tree incomplete because it forgot a binding.
+    ///
+    /// One `stat` per role, here rather than in Python, so that "is this role present, and
+    /// has it changed" has one implementation — the same question `bidslake verify` asks of
+    /// a catalog's registry rows, against the same `FileStat` meaning of size and mtime.
+    /// Twenty-three sequential stats is not worth overlapping; `verify`'s million are, and
+    /// that path uses the concurrent `BidsFileSystem::stat_many`.
+    fn present(
+        &self,
+        root: &str,
+        bindings: BTreeMap<String, String>,
+    ) -> Vec<(String, bool, Option<u64>, Option<i64>)> {
+        let root = std::path::Path::new(root);
+        self.layout
+            .roles()
+            .iter()
+            .filter_map(|role| {
+                let rel = self.layout.render(role, &bindings)?;
+                let path = root.join(rel);
+                let stat = std::fs::metadata(&path)
+                    .ok()
+                    .as_ref()
+                    .and_then(bidslake::fs::FileStat::from_metadata);
+                Some(match stat {
+                    Some(st) => (
+                        (*role).to_string(),
+                        true,
+                        Some(st.size_bytes),
+                        Some(st.mtime_ns),
+                    ),
+                    // `exists` is false for anything that could not be stat-ed, which
+                    // folds "absent" together with "there but unreadable". For a tree this
+                    // process just wrote, that distinction has no consumer.
+                    None => ((*role).to_string(), false, None, None),
+                })
+            })
+            .collect()
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "PyLayout({:?}, roles={})",

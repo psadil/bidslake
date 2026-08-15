@@ -92,6 +92,19 @@ enum Commands {
         #[arg(long)]
         no_bidsignore: bool,
 
+        /// Do not record each file's size and modification time in the registry.
+        ///
+        /// Those two columns are what lets a consumer ask "has this changed since I looked"
+        /// — a workflow engine's staleness check, and what `verify` compares against. They
+        /// cost nothing on S3 (the object listing already carries both) and roughly two
+        /// microseconds per file locally; the stats are issued concurrently so that a
+        /// parallel filesystem's per-file latency is overlapped rather than paid in turn.
+        ///
+        /// Mostly here for measuring what that pass costs. With it, `size_bytes` and
+        /// `mtime_ns` are NULL, and `verify` falls back to checking presence alone.
+        #[arg(long)]
+        no_stat: bool,
+
         /// Declare that this dataset derives from a source: a DOI, URL, filesystem/S3 path,
         /// or another catalog dataset's id (`dataset:<id>` or a bare id). The escape hatch
         /// for datasets whose `dataset_description.json` has no `SourceDatasets` DOI to link
@@ -250,6 +263,7 @@ async fn main() -> Result<()> {
             adapter,
             dry_run,
             no_bidsignore,
+            no_stat,
             source_dataset,
             temp_dir,
         } => {
@@ -292,6 +306,7 @@ async fn main() -> Result<()> {
                 bundle.ingestion_provenance,
                 dry_run,
                 !no_bidsignore,
+                !no_stat,
                 source_dataset,
                 temp_dir,
             )
@@ -316,10 +331,13 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Verify { database } => {
-            anyhow::bail!(
-                "`verify` is not yet implemented (managed mode). \
-                 See the README on managed mode. (database: {database})"
-            )
+            let problems = bidslake::verify::run(&database).await?;
+            if problems > 0 {
+                // A nonzero exit, so this composes into a cron job or a CI step without
+                // anyone having to grep the output for the word "missing".
+                std::process::exit(1);
+            }
+            Ok(())
         }
         Commands::Transcode { database, to } => {
             anyhow::bail!(
@@ -871,6 +889,7 @@ async fn run_indexer(
     ingestion_provenance: Vec<(String, serde_json::Value)>,
     dry_run: bool,
     apply_bidsignore: bool,
+    stat_files: bool,
     declared_sources: Vec<String>,
     temp_dir: Option<PathBuf>,
 ) -> Result<()> {
@@ -911,10 +930,16 @@ async fn run_indexer(
 
     let (fs, s3_httpfs_cfg) = open_backend(&input, no_sign_request, &db).await?;
 
-    let mut parser: BidsParser =
-        BidsParser::new(fs, dataset_id, schema, s3_httpfs_cfg, apply_bidsignore)
-            .with_term_maps(term_maps)
-            .with_declared_sources(declared_sources);
+    let mut parser: BidsParser = BidsParser::new(
+        fs,
+        dataset_id,
+        schema,
+        s3_httpfs_cfg,
+        apply_bidsignore,
+        stat_files,
+    )
+    .with_term_maps(term_maps)
+    .with_declared_sources(declared_sources);
 
     parser.parse(&db).await?;
     {

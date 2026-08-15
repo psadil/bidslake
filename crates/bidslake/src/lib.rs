@@ -39,7 +39,8 @@
 //!
 //! let dataset = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/bids-examples/ds001");
 //! let fs = Box::new(LocalFileSystem::new(dataset));
-//! BidsParser::new(fs, None, schema, None, true).parse(&db).await?;
+//! // The two flags: honour `.bidsignore`, and record each file's size and mtime.
+//! BidsParser::new(fs, None, schema, None, true, true).parse(&db).await?;
 //!
 //! let mut stmt = db.conn.prepare(
 //!     "SELECT s.file_path \
@@ -83,7 +84,7 @@
 //! for name in ["ds001", "ds114"] {
 //!     let path = format!("{}/tests/bids-examples/{}", env!("CARGO_MANIFEST_DIR"), name);
 //!     let fs = Box::new(LocalFileSystem::new(path));
-//!     BidsParser::new(fs, Some(name.to_string()), schema.clone(), None, true).parse(&db).await?;
+//!     BidsParser::new(fs, Some(name.to_string()), schema.clone(), None, true, true).parse(&db).await?;
 //! }
 //!
 //! // Functional BOLD runs across both datasets — by concept, not by path.
@@ -108,7 +109,7 @@
 //! # let schema = Schema::load(None)?;
 //! # db.create_tables(&schema)?;
 //! # let dataset = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/bids-examples/ds001");
-//! # BidsParser::new(Box::new(LocalFileSystem::new(dataset)), None, schema, None, true).parse(&db).await?;
+//! # BidsParser::new(Box::new(LocalFileSystem::new(dataset)), None, schema, None, true, true).parse(&db).await?;
 //! db.conn.execute(
 //!     "UPDATE participants SET participant_id = 'sub-001' WHERE participant_id = 'sub-01'",
 //!     [],
@@ -135,7 +136,7 @@
 //! # let schema = Schema::load(None)?;
 //! # db.create_tables(&schema)?;
 //! # let dataset = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/bids-examples/2d_mb_pcasl");
-//! # BidsParser::new(Box::new(LocalFileSystem::new(dataset)), None, schema, None, true).parse(&db).await?;
+//! # BidsParser::new(Box::new(LocalFileSystem::new(dataset)), None, schema, None, true, true).parse(&db).await?;
 //! let mut stmt = db.conn.prepare(
 //!     "SELECT a.target_file_path, src.file_path \
 //!      FROM file_associations a JOIN all_files src ON src.file_id = a.source_file_id \
@@ -170,3 +171,4 @@ pub mod readers;
 pub mod s3;
 pub mod schema;
 pub mod timing;
+pub mod verify;

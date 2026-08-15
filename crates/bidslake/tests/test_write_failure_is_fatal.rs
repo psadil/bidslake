@@ -59,7 +59,7 @@ async fn a_failed_sidecars_write_fails_the_parse() -> anyhow::Result<()> {
     narrow_the_sidecars_table(&db)?;
 
     let fs = Box::new(LocalFileSystem::new(ds.clone()));
-    let mut parser = BidsParser::new(fs, Some("raw".to_string()), schema, None, true);
+    let mut parser = BidsParser::new(fs, Some("raw".to_string()), schema, None, true, true);
 
     // Exactly `main.rs`'s shape: one transaction around the parse, committed only on Ok.
     let txn = db.conn.unchecked_transaction()?;

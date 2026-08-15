@@ -26,7 +26,7 @@ pub async fn ingest(dataset_path: impl AsRef<Path>) -> Result<BidsDb> {
     db.create_tables(&schema)?;
 
     let fs = Box::new(LocalFileSystem::new(dataset_path.as_ref().to_path_buf()));
-    let mut parser = BidsParser::new(fs, None, schema, None, true);
+    let mut parser = BidsParser::new(fs, None, schema, None, true, true);
     let txn = db.conn.unchecked_transaction()?;
     parser.parse(&db).await?;
     txn.commit()?;
@@ -44,7 +44,7 @@ pub async fn ingest_into(
     let schema = Schema::load(None).unwrap();
     db.create_tables(&schema)?;
     let fs = Box::new(LocalFileSystem::new(dataset_path.as_ref().to_path_buf()));
-    let mut parser = BidsParser::new(fs, Some(dataset_id.to_string()), schema, None, true);
+    let mut parser = BidsParser::new(fs, Some(dataset_id.to_string()), schema, None, true, true);
     let txn = db.conn.unchecked_transaction()?;
     parser.parse(db).await?;
     txn.commit()?;
@@ -60,7 +60,7 @@ pub async fn ingest_inferred_into(db: &BidsDb, dataset_path: impl AsRef<Path>) -
     let schema = Schema::load(None).unwrap();
     db.create_tables(&schema)?;
     let fs = Box::new(LocalFileSystem::new(dataset_path.as_ref().to_path_buf()));
-    let mut parser = BidsParser::new(fs, None, schema, None, true);
+    let mut parser = BidsParser::new(fs, None, schema, None, true, true);
     let txn = db.conn.unchecked_transaction()?;
     parser.parse(db).await?;
     txn.commit()?;
@@ -80,7 +80,7 @@ pub async fn ingest_with_schema(dataset_path: impl AsRef<Path>, schema: Schema) 
     let db = BidsDb::new(":memory:")?;
     db.create_tables(&schema)?;
     let fs = Box::new(LocalFileSystem::new(dataset_path.as_ref().to_path_buf()));
-    let mut parser = BidsParser::new(fs, None, schema, None, true);
+    let mut parser = BidsParser::new(fs, None, schema, None, true, true);
     let txn = db.conn.unchecked_transaction()?;
     parser.parse(&db).await?;
     txn.commit()?;
@@ -155,7 +155,7 @@ pub async fn ingest_with_adapters_into(
     db.stamp_ingestion(&ingestion_prov)?;
 
     let fs = Box::new(LocalFileSystem::new(dataset_path.as_ref().to_path_buf()));
-    let mut parser = BidsParser::new(fs, dataset_id.map(str::to_string), schema, None, true)
+    let mut parser = BidsParser::new(fs, dataset_id.map(str::to_string), schema, None, true, true)
         .with_term_maps(term_maps);
     let txn = db.conn.unchecked_transaction()?;
     parser.parse(db).await?;

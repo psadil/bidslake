@@ -46,6 +46,8 @@ class AllFiles(Base):
     file_path: Mapped[str | None] = mapped_column(String)
     kind: Mapped[str | None] = mapped_column(String)
     status: Mapped[str | None] = mapped_column(String)
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    mtime_ns: Mapped[int | None] = mapped_column(BigInteger)
     acq: Mapped[str | None] = mapped_column(String)
     atlas: Mapped[str | None] = mapped_column(String)
     ce: Mapped[str | None] = mapped_column(String)
@@ -405,6 +407,8 @@ class FileRegistry(Base):
     file_path: Mapped[str | None] = mapped_column(String)
     kind: Mapped[str | None] = mapped_column(String)
     status: Mapped[str | None] = mapped_column(String)
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    mtime_ns: Mapped[int | None] = mapped_column(BigInteger)
 
 
 class IeegChannels(Base):
