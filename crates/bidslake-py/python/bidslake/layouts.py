@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+from collections.abc import Mapping
 from pathlib import Path
 
 from . import _bidslake
@@ -57,6 +58,9 @@ class LayoutAt:
 
     layout: Layout
     root: Path
+    #: Placeholder values every lookup through this binding inherits — see
+    #: :meth:`Layout.under`. A per-call keyword to :meth:`path` overrides one.
+    bindings: Mapping[str, str] = dataclasses.field(default_factory=dict)
 
     def __getitem__(self, role: str) -> Path:
         return self.path(role)
@@ -67,16 +71,25 @@ class LayoutAt:
         Raises rather than returning a guess: an unknown role is a typo, and an unbound
         ``{placeholder}`` would otherwise render as a plausible path pointing at the
         wrong file.
+
+        Keywords here are merged over whatever :meth:`Layout.under` bound, and win — so a
+        run-wide value is stated once and a per-call one still overrides it.
         """
-        rel = self.layout._inner.render(role, dict(bindings))
+        merged = {**self.bindings, **bindings}
+        rel = self.layout._inner.render(role, merged)
         if rel is None:
             known = ", ".join(self.layout.roles)
             if role not in self.layout.roles:
                 msg = f"unknown role {role!r}; this layout declares: {known}"
             else:
+                # Naming what *is* bound is what makes a mistyped binding visible. Without
+                # it, `under(root, trainng=…)` fails with "unbound placeholders" for a
+                # caller who is certain they bound it.
+                have = ", ".join(f"{k}={v!r}" for k, v in sorted(merged.items())) or "nothing"
                 msg = (
-                    f"role {role!r} has unbound placeholders; "
-                    f"pass them as keywords, e.g. path({role!r}, training='UKBiobank')"
+                    f"role {role!r} has unbound placeholders; bound here: {have}. "
+                    f"Pass them as keywords, e.g. path({role!r}, training='UKBiobank'), "
+                    f"or bind them once with layout.under(root, training='UKBiobank')"
                 )
             raise KeyError(msg)
         return self.root / rel
@@ -108,9 +121,28 @@ class Layout:
         """What a role is, for a human reading the layout rather than the tree."""
         return self._inner.description(role)
 
-    def under(self, root: str | os.PathLike[str]) -> LayoutAt:
-        """Bind this layout to one unit's output root."""
-        return LayoutAt(self, Path(root))
+    def under(self, root: str | os.PathLike[str], **bindings: str) -> LayoutAt:
+        """Bind this layout to one unit's output root, and optionally its placeholders.
+
+        Most roles are fully determined by the root, so ``under(root)`` is the whole call.
+        A few are not: `feat`'s two `classification` roles render
+        ``fix4melview_{training}_thr{threshold}.txt``, and those values are the pipeline's
+        configuration — which FIX model, which threshold — not something the layout can
+        know. Such a role raises rather than guessing (docs/adr/0008), which is right.
+
+        What was wrong is *when* the values had to be supplied. They are constant for a
+        whole run, and requiring them per access made
+        ``for role in layout.roles: at[role]`` an error, so every consumer that walked the
+        role list special-cased the same two names by hand::
+
+            out = layout("feat").under(dst / stem, training="UKBiobank", threshold="1")
+            out["classification"]                                  # now just works
+            out.path("classification_by_rater", rater="psadil")    # merged over the above
+
+        The guarantee is unchanged: a placeholder *nothing* has bound still raises. Only
+        the moment of binding moved.
+        """
+        return LayoutAt(self, Path(root), dict(bindings))
 
     def __repr__(self) -> str:
         return f"Layout({self.name!r}, {len(self.roles)} roles)"

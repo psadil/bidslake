@@ -273,6 +273,27 @@ out["filtered_func_clean"]    # <dst>/<stem>/filtered_func_data_clean.nii.gz
 out.mkdir("melodic_mix")      # the same, with the parent directory created
 ```
 
+A few roles are not determined by the root alone — `feat`'s two `classification` roles render
+`fix4melview_{training}_thr{threshold}.txt`, and which FIX model and threshold ran is the
+pipeline's configuration, not something the layout can know. Bind those once, where the root is
+bound, and every role is then reachable by name:
+
+```python
+out = bidslake.layout("feat").under(dst / stem, training="UKBiobank", threshold="1")
+out["classification"]                                # fix4melview_UKBiobank_thr1.txt
+out.path("classification_by_rater", rater="psadil")  # merged over the above; a keyword wins
+```
+
+A placeholder nothing has bound still raises rather than rendering a plausible wrong path — so
+`out["classification_by_rater"]` above is still an error, `rater` being per-file rather than
+per-run. Bind every placeholder a layout uses and the whole role list becomes walkable without
+knowing which roles are special:
+
+```python
+out = bidslake.layout("feat").under(dst / stem, training="UKBiobank", threshold="1", rater="ab")
+[out[role] for role in out.layout.roles]             # all 23, no special-casing
+```
+
 A layout is a separate artifact from the adapter's term map because a term map cannot be run
 backwards: on a real recon-all tree of 657 files its 8 PCRE mappings recognize all of them,
 while a pure-`{var}` rewrite needs 12, recognizes 430, and loses the 227 matched by
