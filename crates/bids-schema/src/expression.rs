@@ -1125,6 +1125,55 @@ mod tests {
         EvalContext::file_only(v, &NULL)
     }
 
+    /// A regex escape in a selector is written with **one** backslash, and writing two
+    /// silently produces a pattern that never matches.
+    ///
+    /// `compile_uncached` doubles every backslash before handing the source to the JS
+    /// parser, precisely so the parser's own string-literal unescaping gives the regex back
+    /// what the author wrote (`\S` would otherwise decode to a bare `S`). An author who
+    /// pre-doubles defeats that: `"\\.touch$"` survives as the regex `\\.` — a literal
+    /// backslash followed by any character — which is a perfectly valid regex that matches
+    /// no path bidslake will ever see.
+    ///
+    /// Nothing catches that. The expression compiles, the rule loads, the selector evaluates
+    /// to `false` forever, and the only symptom is a rule that appears to do nothing. It
+    /// cost an hour once; this is here so it costs a test failure instead.
+    ///
+    /// Note the neighbouring convention that differs: a term map's `Template` is compiled as
+    /// a regex *directly*, with no doubling, so it takes the escape as written.
+    #[test]
+    fn one_backslash_is_the_regex_escape_two_is_a_literal_backslash() {
+        let path = serde_json::json!({ "path": "/sub-01_ses-V1/touch/segstats.touch" });
+        let ctx = ec(&path);
+
+        // One backslash: `\.` reaches the regex engine as an escaped dot.
+        assert_eq!(
+            evaluate(r#"match(path, "\.touch$")"#, &ctx),
+            Ok(Value::Bool(true)),
+            "a single backslash must survive as a regex escape"
+        );
+
+        // Two: `\\.` reaches it as a literal backslash, and matches nothing.
+        assert_eq!(
+            evaluate(r#"match(path, "\\.touch$")"#, &ctx),
+            Ok(Value::Bool(false)),
+            "a pre-doubled backslash matches a literal backslash, not a dot"
+        );
+
+        // The escape is doing real work: without it the dot is `any character`, so a path
+        // that has some *other* character there still matches. This is what makes the
+        // mistake hard to see -- both spellings are valid regexes.
+        let other = serde_json::json!({ "path": "/sub-01/touchXtouch" });
+        assert_eq!(
+            evaluate(r#"match(path, ".touch$")"#, &ec(&other)),
+            Ok(Value::Bool(true))
+        );
+        assert_eq!(
+            evaluate(r#"match(path, "\.touch$")"#, &ec(&other)),
+            Ok(Value::Bool(false))
+        );
+    }
+
     /// Ordering comparisons coerce `null` to `0`, as JavaScript does — they neither propagate
     /// null nor uniformly return `false`.
     ///
