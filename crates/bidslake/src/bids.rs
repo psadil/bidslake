@@ -26,12 +26,12 @@
 //! through the DuckDB `Appender` (see [`BidsDb::append_rows`]). And the entire parse runs
 //! inside a single transaction (opened by the caller in `main`), so it commits atomically.
 
-use crate::db::{BidsDb, BvecFile, FileAssociation, TabularStatus};
+use crate::db::{BidsDb, BvalFile, BvecFile, FileAssociation, TabularStatus};
 use crate::fs::BidsFileSystem;
 use crate::links;
 use crate::readers::{self, ContentReader};
 use crate::schema::Schema;
-use crate::schema::dynamic::{quote_ident, sql_in_list, sql_lit};
+use crate::schema::dynamic::{quote_ident, sql_lit};
 use crate::schema::ingestion::{Disposition, Undeclared};
 use crate::schema::tabular::{ColumnSpec, FileContext, RowIdentity, TableSpec};
 use crate::timing::{self, Counter, Phase};
@@ -569,7 +569,7 @@ impl BidsParser {
     ///
     /// `root_uri` is the run's, because a run walks exactly one root and every path it hands
     /// this is relative to that root.
-    fn file_key(&self, dataset_id: &str, rel_path: &str) -> String {
+    fn file_key(&self, dataset_id: &str, rel_path: &str) -> u64 {
         file_id(dataset_id, &self.root_uri, rel_path)
     }
 
@@ -588,7 +588,10 @@ impl BidsParser {
         let mut row = serde_json::Map::new();
         row.insert(
             "file_id".to_string(),
-            Value::String(file_id(dataset_id, &self.root_uri, file_path)),
+            // A JSON *number*, not a string: a `u64` is exactly what
+            // `serde_json::Number` holds, so the id needs no decimal-string detour to
+            // reach the writer (see [`file_id`]).
+            Value::Number(file_id(dataset_id, &self.root_uri, file_path).into()),
         );
         row.insert(
             "dataset_id".to_string(),
@@ -1096,7 +1099,7 @@ impl BidsParser {
         // check it (see `BidsDb::upsert_staged`). It holds because `pending_gradients` takes
         // one entry per walked gradient file and the walk yields a path once, so no two
         // entries share a `file_key`.
-        let mut bvals: Vec<(String, &[f64])> = Vec::new();
+        let mut bvals: Vec<BvalFile<'_>> = Vec::new();
         let mut bvecs: Vec<BvecFile<'_>> = Vec::new();
         for (dataset, path, gradient) in &self.pending_gradients {
             let file_id = self.file_key(dataset, path);
@@ -1248,7 +1251,7 @@ impl BidsParser {
         // `.json` it was read from, which has a registry row of its own.
         sidecar_entry
             .entry("file_id".to_string())
-            .or_insert_with(|| Value::String(self.file_key(dataset_id, file_path)));
+            .or_insert_with(|| Value::Number(self.file_key(dataset_id, file_path).into()));
         Some(Value::Object(sidecar_entry))
     }
 
@@ -1848,7 +1851,7 @@ impl BidsParser {
             eprintln!("Warning: reader `{reader_name}` is not registered; skipping {rel_path}");
             return Ok(());
         };
-        match rdr.read(&self.file_key(dataset_id, rel_path), &content, &facts) {
+        match rdr.read(self.file_key(dataset_id, rel_path), &content, &facts) {
             Ok(batches) => {
                 for batch in &batches {
                     // Clear this file's prior rows before re-inserting them. These tables are
@@ -1857,7 +1860,7 @@ impl BidsParser {
                     // table. Scoped per file, exactly as the batched tabular path scopes its own
                     // pre-`DELETE` for the same class of table.
                     if let Err(e) =
-                        db.clear_file_rows(&batch.table, &self.file_key(dataset_id, rel_path))
+                        db.clear_file_rows(&batch.table, self.file_key(dataset_id, rel_path))
                     {
                         eprintln!(
                             "Warning: clearing previous {} rows for {rel_path}: {e}",
@@ -2341,11 +2344,13 @@ impl BidsParser {
                     // Scoped by `file_id`, which already carries the dataset and the root —
                     // so a re-index of one root of a multi-root dataset cannot reach another
                     // root's rows, even where the two hold the same relative path.
-                    let keys: Vec<String> = members
+                    // Unsigned integer literals: no quoting, and nothing for
+                    // `sql_in_list`'s escaping to do.
+                    let id_list = members
                         .iter()
-                        .map(|m| self.file_key(&dataset_id, &m.rel_path))
-                        .collect();
-                    let id_list = sql_in_list(keys.iter().map(String::as_str));
+                        .map(|m| self.file_key(&dataset_id, &m.rel_path).to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
                     let del = format!("DELETE FROM {} WHERE file_id IN ({id_list})", spec.table);
                     db.conn.execute(&del, [])?;
                 }
@@ -2413,7 +2418,7 @@ impl BidsParser {
                     TabularStatus::Ingested
                 };
                 for m in &members {
-                    db.record_file_status(&self.file_key(&dataset_id, &m.rel_path), status)?;
+                    db.record_file_status(self.file_key(&dataset_id, &m.rel_path), status)?;
                 }
             }
         }
@@ -2509,7 +2514,7 @@ impl BidsParser {
             } else {
                 TabularStatus::Skipped
             };
-            db.record_file_status(&self.file_key(&rec.dataset_id, &rec.rel_path), status)?;
+            db.record_file_status(self.file_key(&rec.dataset_id, &rec.rel_path), status)?;
         }
         Ok(())
     }
@@ -2584,7 +2589,7 @@ impl BidsParser {
         let del = format!(
             "DELETE FROM {} WHERE file_id = {}",
             table,
-            sql_lit(&self.file_key(&rec.dataset_id, &rec.rel_path))
+            self.file_key(&rec.dataset_id, &rec.rel_path)
         );
         db.conn.execute(&del, [])?;
 
@@ -2594,7 +2599,7 @@ impl BidsParser {
         let (sql, undeclared) = build_tabular_insert_sql(
             &spec,
             &source,
-            &self.file_key(&rec.dataset_id, &rec.rel_path),
+            self.file_key(&rec.dataset_id, &rec.rel_path),
             &colnames,
             &read_opts,
             preserve_order,
@@ -2662,7 +2667,7 @@ impl BidsParser {
         // `_channels.tsv`'s line order maps onto the columns of the recording beside it.
         let sql = format!(
             "SELECT name FROM motion_channels WHERE file_id = {} ORDER BY row_idx",
-            sql_lit(&self.file_key(&rec.dataset_id, &channels_path))
+            self.file_key(&rec.dataset_id, &channels_path)
         );
         let mut stmt = db.conn.prepare(&sql)?;
         let names = stmt
@@ -2907,7 +2912,7 @@ fn needs_try_cast(sql_type: &str) -> bool {
             | "FLOAT"
             | "REAL"
             | "INTEGER"
-            | "HUGEINT"
+            | "UBIGINT"
             | "BOOLEAN"
             | "TIMESTAMP"
             | "DATE"
@@ -2938,7 +2943,7 @@ fn needs_try_cast(sql_type: &str) -> bool {
 fn build_tabular_insert_sql(
     spec: &TableSpec,
     source: &str,
-    file_id: &str,
+    file_id: u64,
     colnames: &[String],
     read_opts: &str,
     preserve_order: bool,
@@ -2952,7 +2957,8 @@ fn build_tabular_insert_sql(
     let present: HashSet<&str> = colnames.iter().map(|s| s.as_str()).collect();
     let mut selects: Vec<String> = Vec::new();
 
-    selects.push(format!("{}::HUGEINT AS file_id", sql_lit(file_id)));
+    // An unsigned integer literal needs no quoting and no cast.
+    selects.push(format!("{file_id} AS file_id"));
     // `row_number() OVER ()` numbers rows in physical read order; under the `parallel=false`
     // read forced below, that is file line order — which for a recording is sample order, so it
     // is load-bearing rather than cosmetic. Gated on the same flag as the column's existence in
@@ -3205,11 +3211,13 @@ fn build_tabular_batch_select(
         .iter()
         .map(|(l, r, aux)| {
             format!(
-                "({}, {}, {}, {}::HUGEINT)",
+                // The id is an unsigned integer literal now, so it needs no quoting
+                // and no cast to get out of a string.
+                "({}, {}, {}, {})",
                 sql_lit(l),
                 sql_lit(r),
                 sql_lit(aux),
-                sql_lit(&file_id(dataset_id, root_uri, r))
+                file_id(dataset_id, root_uri, r)
             )
         })
         .collect::<Vec<_>>()
@@ -3361,8 +3369,8 @@ impl Kind {
     }
 }
 
-/// The stable identity of one file in the catalog: the first 128 bits of
-/// `SHA-256(dataset_id \x1f root_uri \x1f file_path)`, as a decimal string.
+/// The stable identity of one file in the catalog: the first **64 bits** of
+/// `SHA-256(dataset_id \x1f root_uri \x1f file_path)`, stored as a `UBIGINT`.
 ///
 /// This is a **stored** primary key that every satellite table foreign-keys to, so it must be
 /// reproducible from the three identity columns alone — across runs, machines, ingest orders and
@@ -3374,10 +3382,43 @@ impl Kind {
 /// `\x1f` (ASCII unit separator) delimits the parts because it cannot occur in a path or URI, so
 /// no combination of the three can be confused for another.
 ///
-/// Returned as a decimal string rather than an integer because `serde_json::Number` tops out at
-/// 64 bits, and the row travels to the writer as JSON. [`Schema::row_values`] parses it back for
-/// the `HUGEINT` column.
-pub(crate) fn file_id(dataset_id: &str, root_uri: &str, file_path: &str) -> String {
+/// # Why 64 bits and not 128
+///
+/// It used to be 128, stored as `HUGEINT`. That does not survive the trip to Python: the Arrow
+/// bridge maps `HUGEINT` to `Decimal128(38, 0)`, whose maximum is `10^38 - 1` while `HUGEINT`
+/// reaches `2^127 - 1 ≈ 1.7 × 10^38` — so **41% of the id space was outside the type the value
+/// was handed over in**. The value read back fine but could not be used to build a new frame:
+///
+/// ```text
+/// >>> pl.DataFrame([{"file_id": df["file_id"][0]}])
+/// RuntimeError: BindingsError: "Decimal is too large to fit in Decimal128"
+/// ```
+///
+/// Serializing a query result is an ordinary thing to do, and it failed for about two files in
+/// five, chosen by hash — so it presented as flakiness rather than as a type error. Widening the
+/// decimal is not available: polars caps precision at 38 (`precision must be between 1 and 38`),
+/// because its `Decimal` is Decimal128-backed, so the ceiling is upstream of both crates.
+///
+/// `UBIGINT` crosses as `UInt64` and arrives as a plain Python `int` — no decimal, no rounding,
+/// no range to fall off. It also fits `serde_json::Number` exactly, which is why this returns an
+/// integer rather than the decimal string the 128-bit version needed, and why
+/// [`Schema::row_values`] no longer parses an id back out of a string.
+///
+/// The cost is collision resistance, and it is worth stating rather than assuming. By the
+/// birthday bound the probability of any collision in a catalog of `n` files is `≈ n² / 2^65`:
+///
+/// | files in one catalog | P(collision) |
+/// |---|---|
+/// | 10⁴ | 3 × 10⁻¹² |
+/// | 10⁶ | 3 × 10⁻⁸ |
+/// | 10⁷ | 3 × 10⁻⁶ |
+/// | 10⁸ | 3 × 10⁻⁴ |
+///
+/// A million-file catalog — a study of ~10,000 fMRI runs, counting its FreeSurfer trees — is at
+/// one in thirty million, below the rate at which the disk under it corrupts a block. It stops
+/// being comfortable somewhere past 10⁸ files, which is where this decision should be revisited;
+/// `TODO.md` carries the note.
+pub(crate) fn file_id(dataset_id: &str, root_uri: &str, file_path: &str) -> u64 {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(dataset_id.as_bytes());
@@ -3386,10 +3427,8 @@ pub(crate) fn file_id(dataset_id: &str, root_uri: &str, file_path: &str) -> Stri
     hasher.update(b"\x1f");
     hasher.update(file_path.as_bytes());
     let digest = hasher.finalize();
-    let bytes: [u8; 16] = digest[..16].try_into().expect("sha256 yields 32 bytes");
-    // As `i128` to match DuckDB's signed `HUGEINT`; the sign carries no meaning, and the
-    // mapping is still injective on the 128 bits.
-    i128::from_be_bytes(bytes).to_string()
+    let bytes: [u8; 8] = digest[..8].try_into().expect("sha256 yields 32 bytes");
+    u64::from_be_bytes(bytes)
 }
 
 /// Classify a walked file.
@@ -3573,7 +3612,7 @@ mod tests {
             build_tabular_insert_sql(
                 spec,
                 "/t/f.tsv",
-                "12345",
+                12345,
                 &[],
                 HEADER_READ_OPTS,
                 preserve,
@@ -3644,7 +3683,7 @@ mod tests {
             let (single, dropped_single) = build_tabular_insert_sql(
                 &spec,
                 "/t/f.tsv",
-                "12345",
+                12345,
                 &header,
                 HEADER_READ_OPTS,
                 true,
@@ -3811,14 +3850,14 @@ mod tests {
         use super::file_id;
         // Cross-checked against an independent implementation:
         //   int.from_bytes(sha256(b"ds001\x1ffile:///data/ds001\x1fsub-01/anat/sub-01_T1w.nii.gz")
-        //                  .digest()[:16], "big", signed=True)
+        //                  .digest()[:8], "big")
         assert_eq!(
             file_id(
                 "ds001",
                 "file:///data/ds001",
                 "sub-01/anat/sub-01_T1w.nii.gz"
             ),
-            "75622530741324318000087019144433844903"
+            4_099_505_605_929_783_485
         );
 
         // Same three parts, same id — whatever else is in the catalog.

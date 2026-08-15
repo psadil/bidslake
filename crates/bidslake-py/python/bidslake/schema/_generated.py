@@ -66,7 +66,7 @@ class GetFilters(TypedDict, total=False):
 
 COLUMNS: dict[str, dict[str, str]] = {
     "all_files": {
-        "file_id": "HUGEINT",
+        "file_id": "UBIGINT",
         "dataset_id": "VARCHAR",
         "root_uri": "VARCHAR",
         "file_path": "VARCHAR",
@@ -114,20 +114,20 @@ COLUMNS: dict[str, dict[str, str]] = {
         "modality": "VARCHAR",
     },
     "asl_context": {
-        "file_id": "HUGEINT",
+        "file_id": "UBIGINT",
         "row_idx": "BIGINT",
         "volume_type": "VARCHAR",
         "other_data": "JSON",
     },
     "asl_volumes": {
-        "file_id": "HUGEINT",
+        "file_id": "UBIGINT",
         "volume_idx": "BIGINT",
         "volume_type": "VARCHAR",
         "other_data": "JSON",
-        "source_file_id": "HUGEINT",
+        "source_file_id": "UBIGINT",
     },
     "behavioral": {
-        "file_id": "HUGEINT",
+        "file_id": "UBIGINT",
         "row_idx": "BIGINT",
         "HED": "VARCHAR",
         "response_time": "DOUBLE",
@@ -146,7 +146,7 @@ COLUMNS: dict[str, dict[str, str]] = {
         "overlay_digest": "VARCHAR",
     },
     "blood": {
-        "file_id": "HUGEINT",
+        "file_id": "UBIGINT",
         "row_idx": "BIGINT",
         "time": "DOUBLE",
         "hplc_recovery_fractions": "DOUBLE",
@@ -157,26 +157,26 @@ COLUMNS: dict[str, dict[str, str]] = {
         "other_data": "JSON",
     },
     "bval_volumes": {
-        "file_id": "HUGEINT",
+        "file_id": "UBIGINT",
         "volume_idx": "BIGINT",
         "b": "DOUBLE",
-        "source_file_id": "HUGEINT",
+        "source_file_id": "UBIGINT",
     },
     "bvals": {
-        "file_id": "HUGEINT",
+        "file_id": "UBIGINT",
         "row_idx": "BIGINT",
         "b": "DOUBLE",
     },
     "bvec_volumes": {
-        "file_id": "HUGEINT",
+        "file_id": "UBIGINT",
         "volume_idx": "BIGINT",
         "x": "DOUBLE",
         "y": "DOUBLE",
         "z": "DOUBLE",
-        "source_file_id": "HUGEINT",
+        "source_file_id": "UBIGINT",
     },
     "bvecs": {
-        "file_id": "HUGEINT",
+        "file_id": "UBIGINT",
         "row_idx": "BIGINT",
         "x": "DOUBLE",
         "y": "DOUBLE",
@@ -235,24 +235,24 @@ COLUMNS: dict[str, dict[str, str]] = {
         "root_uri": "VARCHAR",
     },
     "descriptions": {
-        "file_id": "HUGEINT",
+        "file_id": "UBIGINT",
         "row_idx": "BIGINT",
         "desc_id": "VARCHAR",
         "description": "VARCHAR",
         "other_data": "JSON",
     },
     "diffusion": {
-        "file_id": "HUGEINT",
+        "file_id": "UBIGINT",
         "volume_idx": "BIGINT",
         "bval": "DOUBLE",
         "bvec_x": "DOUBLE",
         "bvec_y": "DOUBLE",
         "bvec_z": "DOUBLE",
-        "bval_file_id": "HUGEINT",
-        "bvec_file_id": "HUGEINT",
+        "bval_file_id": "UBIGINT",
+        "bvec_file_id": "UBIGINT",
     },
     "eeg_channels": {
-        "file_id": "HUGEINT",
+        "file_id": "UBIGINT",
         "row_idx": "BIGINT",
         "name": "VARCHAR",
         "type": "VARCHAR",
@@ -268,7 +268,7 @@ COLUMNS: dict[str, dict[str, str]] = {
         "other_data": "JSON",
     },
     "eeg_electrodes": {
-        "file_id": "HUGEINT",
+        "file_id": "UBIGINT",
         "row_idx": "BIGINT",
         "name": "VARCHAR",
         "x": "DOUBLE",
@@ -280,7 +280,7 @@ COLUMNS: dict[str, dict[str, str]] = {
         "other_data": "JSON",
     },
     "emg_channels": {
-        "file_id": "HUGEINT",
+        "file_id": "UBIGINT",
         "row_idx": "BIGINT",
         "name": "VARCHAR",
         "type": "VARCHAR",
@@ -302,7 +302,7 @@ COLUMNS: dict[str, dict[str, str]] = {
         "other_data": "JSON",
     },
     "emg_electrodes": {
-        "file_id": "HUGEINT",
+        "file_id": "UBIGINT",
         "row_idx": "BIGINT",
         "name": "VARCHAR",
         "x": "DOUBLE",
@@ -316,7 +316,7 @@ COLUMNS: dict[str, dict[str, str]] = {
         "other_data": "JSON",
     },
     "events": {
-        "file_id": "HUGEINT",
+        "file_id": "UBIGINT",
         "onset": "DOUBLE",
         "duration": "DOUBLE",
         "HED": "VARCHAR",
@@ -327,13 +327,13 @@ COLUMNS: dict[str, dict[str, str]] = {
         "other_data": "JSON",
     },
     "file_associations": {
-        "source_file_id": "HUGEINT",
-        "target_file_id": "HUGEINT",
+        "source_file_id": "UBIGINT",
+        "target_file_id": "UBIGINT",
         "target_file_path": "VARCHAR",
         "association_type": "VARCHAR",
     },
     "file_registry": {
-        "file_id": "HUGEINT",
+        "file_id": "UBIGINT",
         "dataset_id": "VARCHAR",
         "root_uri": "VARCHAR",
         "file_path": "VARCHAR",
@@ -341,7 +341,7 @@ COLUMNS: dict[str, dict[str, str]] = {
         "status": "VARCHAR",
     },
     "ieeg_channels": {
-        "file_id": "HUGEINT",
+        "file_id": "UBIGINT",
         "row_idx": "BIGINT",
         "name": "VARCHAR",
         "type": "VARCHAR",
@@ -358,7 +358,7 @@ COLUMNS: dict[str, dict[str, str]] = {
         "other_data": "JSON",
     },
     "ieeg_electrodes": {
-        "file_id": "HUGEINT",
+        "file_id": "UBIGINT",
         "row_idx": "BIGINT",
         "name": "VARCHAR",
         "x": "DOUBLE",
@@ -375,7 +375,7 @@ COLUMNS: dict[str, dict[str, str]] = {
         "other_data": "JSON",
     },
     "meg_channels": {
-        "file_id": "HUGEINT",
+        "file_id": "UBIGINT",
         "row_idx": "BIGINT",
         "name": "VARCHAR",
         "type": "VARCHAR",
@@ -391,12 +391,12 @@ COLUMNS: dict[str, dict[str, str]] = {
         "other_data": "JSON",
     },
     "motion": {
-        "file_id": "HUGEINT",
+        "file_id": "UBIGINT",
         "row_idx": "BIGINT",
         "other_data": "JSON",
     },
     "motion_channels": {
-        "file_id": "HUGEINT",
+        "file_id": "UBIGINT",
         "row_idx": "BIGINT",
         "name": "VARCHAR",
         "component": "VARCHAR",
@@ -412,7 +412,7 @@ COLUMNS: dict[str, dict[str, str]] = {
         "other_data": "JSON",
     },
     "nirs_channels": {
-        "file_id": "HUGEINT",
+        "file_id": "UBIGINT",
         "row_idx": "BIGINT",
         "name": "VARCHAR",
         "type": "VARCHAR",
@@ -433,7 +433,7 @@ COLUMNS: dict[str, dict[str, str]] = {
         "other_data": "JSON",
     },
     "nirs_optodes": {
-        "file_id": "HUGEINT",
+        "file_id": "UBIGINT",
         "row_idx": "BIGINT",
         "name": "VARCHAR",
         "type": "VARCHAR",
@@ -461,14 +461,14 @@ COLUMNS: dict[str, dict[str, str]] = {
         "other_data": "JSON",
     },
     "phenotype": {
-        "file_id": "HUGEINT",
+        "file_id": "UBIGINT",
         "row_idx": "BIGINT",
         "participant_id": "VARCHAR",
         "HED": "VARCHAR",
         "other_data": "JSON",
     },
     "physio": {
-        "file_id": "HUGEINT",
+        "file_id": "UBIGINT",
         "row_idx": "BIGINT",
         "cardiac": "DOUBLE",
         "respiratory": "DOUBLE",
@@ -480,7 +480,7 @@ COLUMNS: dict[str, dict[str, str]] = {
         "other_data": "JSON",
     },
     "physio_events": {
-        "file_id": "HUGEINT",
+        "file_id": "UBIGINT",
         "row_idx": "BIGINT",
         "onset": "DOUBLE",
         "duration": "DOUBLE",
@@ -489,7 +489,7 @@ COLUMNS: dict[str, dict[str, str]] = {
         "other_data": "JSON",
     },
     "samples": {
-        "file_id": "HUGEINT",
+        "file_id": "UBIGINT",
         "row_idx": "BIGINT",
         "derived_from": "VARCHAR",
         "participant_id": "VARCHAR",
@@ -499,13 +499,13 @@ COLUMNS: dict[str, dict[str, str]] = {
         "other_data": "JSON",
     },
     "scans": {
-        "file_id": "HUGEINT",
+        "file_id": "UBIGINT",
         "HED": "VARCHAR",
         "acq_time": "TIMESTAMP",
         "other_data": "JSON",
     },
     "segmentation_lookup": {
-        "file_id": "HUGEINT",
+        "file_id": "UBIGINT",
         "row_idx": "BIGINT",
         "abbreviation": "VARCHAR",
         "color": "VARCHAR",
@@ -524,7 +524,7 @@ COLUMNS: dict[str, dict[str, str]] = {
         "other_data": "JSON",
     },
     "sidecars": {
-        "file_id": "HUGEINT",
+        "file_id": "UBIGINT",
         "ACCELChannelCount": "BIGINT",
         "ANGACCELChannelCount": "BIGINT",
         "Acknowledgements": "VARCHAR",
@@ -976,7 +976,7 @@ COLUMNS: dict[str, dict[str, str]] = {
         "other_data": "JSON",
     },
     "stim": {
-        "file_id": "HUGEINT",
+        "file_id": "UBIGINT",
         "row_idx": "BIGINT",
         "other_data": "JSON",
     },

@@ -514,7 +514,7 @@ impl Schema {
         // so it is stable across runs and machines and needs no second UNIQUE constraint —
         // which DuckDB would anyway refuse to upsert against.
         let mut columns = vec![
-            "file_id HUGEINT PRIMARY KEY".to_string(),
+            "file_id UBIGINT PRIMARY KEY".to_string(),
             "dataset_id TEXT".to_string(),
             "root_uri TEXT".to_string(),
             "file_path TEXT".to_string(),
@@ -528,7 +528,7 @@ impl Schema {
             "status TEXT".to_string(),
         ];
         let mut fields: Vec<(String, String, String)> = [
-            ("file_id", "HUGEINT"),
+            ("file_id", "UBIGINT"),
             ("dataset_id", "TEXT"),
             ("root_uri", "TEXT"),
             ("file_path", "TEXT"),
@@ -610,13 +610,13 @@ impl Schema {
                 columns.push(format!("{} TEXT", name));
                 fields.push((name.to_string(), "TEXT".to_string(), name.to_string()));
             };
-        // The surrogate key every file-keyed table points at (docs/adr/0006). `HUGEINT`
+        // The surrogate key every file-keyed table points at (docs/adr/0006). `UBIGINT`
         // rather than `TEXT`, matching `file_registry.file_id`.
         let file_key = |columns: &mut Vec<String>, fields: &mut Vec<(String, String, String)>| {
-            columns.push("file_id HUGEINT".to_string());
+            columns.push("file_id UBIGINT".to_string());
             fields.push((
                 "file_id".to_string(),
-                "HUGEINT".to_string(),
+                "UBIGINT".to_string(),
                 "file_id".to_string(),
             ));
         };
@@ -943,10 +943,10 @@ impl Schema {
         // Keyed by the file its metadata describes. Note *which* file: a sidecar row is the
         // merged metadata for a **data** file, not for the `.json` it was read from — the
         // JSON has its own registry row, under its own path (docs/adr/0006).
-        sidecar_columns.push("file_id HUGEINT".to_string());
+        sidecar_columns.push("file_id UBIGINT".to_string());
         sidecar_fields.push((
             "file_id".to_string(),
-            "HUGEINT".to_string(),
+            "UBIGINT".to_string(),
             "file_id".to_string(),
         ));
         seen_lowercase_names.insert("file_id".to_string());
@@ -1295,32 +1295,25 @@ impl Schema {
                 // that row — store NULL for the mismatched value and keep the row.
                 let is_numeric_col = matches!(
                     col_type.as_str(),
-                    "DOUBLE" | "BIGINT" | "FLOAT" | "REAL" | "INTEGER" | "HUGEINT"
+                    "DOUBLE" | "BIGINT" | "FLOAT" | "REAL" | "INTEGER" | "UBIGINT"
                 );
                 let is_bool_col = col_type == "BOOLEAN";
                 match val {
                     // A number can't go into a BOOLEAN column.
                     Some(Value::Number(_)) if is_bool_col => params.push(None),
-                    // A 128-bit column, before the generic numeric arm. An `i64`/`u64`
-                    // literal is exact and widens losslessly; anything larger has ALREADY
-                    // been rounded — `serde_json` parses an integer literal too big for
-                    // `u64` as an `f64`, so the precision is gone before this function sees
-                    // it and no re-parse can recover it. Store NULL rather than a silently
-                    // wrong value: on `file_registry.file_id` that is a NOT NULL primary
-                    // key, so the row fails loudly instead of landing under a corrupted id.
-                    // A caller with a true 128-bit value passes a decimal string; see
-                    // [`crate::bids::file_id`].
-                    Some(Value::Number(n)) if col_type == "HUGEINT" => {
-                        match (n.as_i64(), n.as_u64()) {
-                            (Some(i), _) => {
-                                params.push(Some(duckdb::types::Value::HugeInt(i as i128)))
-                            }
-                            (_, Some(u)) => {
-                                params.push(Some(duckdb::types::Value::HugeInt(u as i128)))
-                            }
-                            _ => params.push(None),
-                        }
-                    }
+                    // The registry key, before the generic numeric arm. A `u64` is exactly
+                    // what `serde_json::Number` holds, so an id makes the trip as a JSON
+                    // *number* and arrives needing no parse — which is most of the
+                    // simplification of moving off `HUGEINT` (see [`crate::bids::file_id`]).
+                    //
+                    // A negative or fractional value is not an id and cannot be coerced into
+                    // one. NULL rather than a wrap-around: `file_registry.file_id` is a NOT
+                    // NULL primary key, so such a row fails loudly instead of landing under
+                    // a corrupted id.
+                    Some(Value::Number(n)) if col_type == "UBIGINT" => match n.as_u64() {
+                        Some(u) => params.push(Some(duckdb::types::Value::UBigInt(u))),
+                        None => params.push(None),
+                    },
                     Some(Value::Number(n)) => {
                         if n.is_i64() {
                             params.push(Some(duckdb::types::Value::BigInt(n.as_i64().unwrap())));
@@ -1330,13 +1323,12 @@ impl Schema {
                             params.push(Some(duckdb::types::Value::Text(n.to_string())));
                         }
                     }
-                    // A 128-bit column, before the generic numeric arm below. `file_id` is
-                    // a 128-bit hash and reaches here as a decimal *string*, because
-                    // `serde_json::Number` tops out at 64 bits — and the generic arm would
-                    // fail `parse::<i64>()`, then succeed at `parse::<f64>()`, silently
-                    // rounding a primary key to 53 bits of mantissa.
-                    Some(Value::String(s)) if col_type == "HUGEINT" => match s.parse::<i128>() {
-                        Ok(i) => params.push(Some(duckdb::types::Value::HugeInt(i))),
+                    // An id that still arrives as a string — a hand-built row, or a caller
+                    // outside the ingest. Kept because the generic arm below would try
+                    // `parse::<i64>()`, fall through to `parse::<f64>()`, and silently round
+                    // a primary key to 53 bits of mantissa for any id above 2^53.
+                    Some(Value::String(s)) if col_type == "UBIGINT" => match s.parse::<u64>() {
+                        Ok(u) => params.push(Some(duckdb::types::Value::UBigInt(u))),
                         Err(_) => params.push(None),
                     },
                     Some(Value::String(s)) if is_numeric_col => {
@@ -1435,16 +1427,6 @@ pub(crate) fn quote_ident(name: &str) -> String {
 /// [`quote_ident`] so one place owns SQL literal- and identifier-escaping.
 pub(crate) fn sql_lit(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
-}
-
-/// The comma-joined SQL string-literal list for an `IN (…)` clause, each item
-/// escaped via [`sql_lit`].
-pub(crate) fn sql_in_list<'a>(items: impl IntoIterator<Item = &'a str>) -> String {
-    items
-        .into_iter()
-        .map(sql_lit)
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 /// Map a BIDS schema field/column definition to a DuckDB column type.

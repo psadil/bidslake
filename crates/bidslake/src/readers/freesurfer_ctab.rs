@@ -15,7 +15,7 @@ pub struct FreeSurferCtab;
 impl ContentReader for FreeSurferCtab {
     fn read(
         &self,
-        file_id: &str,
+        file_id: u64,
         content: &str,
         facts: &FileFacts,
     ) -> anyhow::Result<Vec<ReaderRows>> {

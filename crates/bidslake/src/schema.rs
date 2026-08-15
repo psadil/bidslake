@@ -38,7 +38,7 @@
 //!   `file_registry` holds `(dataset_id, root_uri, file_path)` and everything else refers
 //!   to a file by `file_id` (docs/adr/0006).
 //! - **`file_id`** — the surrogate key for a file: the first 128 bits of
-//!   `SHA-256(dataset_id ␟ root_uri ␟ file_path)`, as a `HUGEINT`. Content-derived, so it
+//!   `SHA-256(dataset_id ␟ root_uri ␟ file_path)`, as a `UBIGINT`. Content-derived, so it
 //!   is stable across runs and machines and a re-index upserts onto the same rows. Every
 //!   file-keyed table keys on it. Four of them — `scans`, `sidecars`, `bvals`, `bvecs` —
 //!   declare an actual `FOREIGN KEY`; the per-row tables and `file_associations` do not (see
@@ -334,7 +334,7 @@ CREATE TABLE IF NOT EXISTS tabular_undeclared_columns (
 // declared in the ingestion schema and surfaced by the view as `volume_idx`.
 pub const CREATE_BVALS_TABLE: &str = "
 CREATE TABLE IF NOT EXISTS bvals (
-    file_id HUGEINT,
+    file_id UBIGINT,
     row_idx BIGINT,
     b DOUBLE,
     PRIMARY KEY (file_id, row_idx),
@@ -344,7 +344,7 @@ CREATE TABLE IF NOT EXISTS bvals (
 
 pub const CREATE_BVECS_TABLE: &str = "
 CREATE TABLE IF NOT EXISTS bvecs (
-    file_id HUGEINT,
+    file_id UBIGINT,
     row_idx BIGINT,
     x DOUBLE,
     y DOUBLE,
@@ -401,8 +401,8 @@ LEFT JOIN bvec_volumes c USING (file_id, volume_idx);
 // side is already guaranteed by construction.
 pub const CREATE_FILE_ASSOCIATIONS_TABLE: &str = "
 CREATE TABLE IF NOT EXISTS file_associations (
-    source_file_id HUGEINT,
-    target_file_id HUGEINT,
+    source_file_id UBIGINT,
+    target_file_id UBIGINT,
     target_file_path TEXT,
     association_type TEXT,
     PRIMARY KEY (source_file_id, target_file_path, association_type)

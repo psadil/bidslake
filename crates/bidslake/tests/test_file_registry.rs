@@ -121,12 +121,13 @@ async fn the_view_computes_concepts_for_every_kind() -> anyhow::Result<()> {
          VALUES (?, ?, ?, ?, ?, ?)",
     )?;
     for (id, path, kind) in [
-        (1i64, "sub-01/func/sub-01_task-x_run-2_bold.nii.gz", "data"),
+        (1u64, "sub-01/func/sub-01_task-x_run-2_bold.nii.gz", "data"),
         (2, "sub-01/anat/sub-01_T1w.json", "sidecar"),
         (3, "README", "other"),
-        // A negative id is ordinary: `file_id` is the top 128 bits of a SHA-256, read as a
-        // signed HUGEINT, so half of all ids are negative.
-        (-4, "sub-02/dwi/sub-02_dwi.nii.gz", "data"),
+        // Ids are unsigned now (`UBIGINT`), so a large one is the interesting case rather
+        // than a negative one. Under the old signed `HUGEINT` half of all ids were
+        // negative; nothing downstream has to allow for that any more.
+        (u64::MAX, "sub-02/dwi/sub-02_dwi.nii.gz", "data"),
         // The case the single view exists for: a per-row table keys on this, and it is not
         // a data file.
         (5, "sub-01/func/sub-01_task-x_run-2_events.tsv", "tabular"),
@@ -279,12 +280,13 @@ async fn bidsignored_files_are_absent_from_the_registry() -> anyhow::Result<()> 
     Ok(())
 }
 
-/// `file_id` is 128-bit, and the write path shapes values from JSON — which cannot represent
-/// 128 bits. Both routes into the column are pinned here, because getting this wrong corrupts
-/// a primary key *silently*: `HUGEINT` sits in the same `is_numeric_col` set as the 64-bit
-/// types, whose fallback is `parse::<f64>()`, and an f64 holds 53 bits of mantissa.
+/// `file_id` is a `UBIGINT`, and the write path shapes values from JSON — which represents a
+/// `u64` exactly, so unlike the 128-bit version it needs no decimal-string detour. Every route
+/// into the column is pinned here, because getting this wrong corrupts a primary key
+/// *silently*: `UBIGINT` sits in the same `is_numeric_col` set as the float types, whose
+/// fallback is `parse::<f64>()`, and an f64 holds 53 bits of mantissa.
 #[test]
-fn a_128_bit_id_survives_the_write_path_or_is_refused() -> anyhow::Result<()> {
+fn a_64_bit_id_survives_the_write_path_or_is_refused() -> anyhow::Result<()> {
     let schema = Schema::load(None)?;
     let id_at = |row: &serde_json::Value| -> Option<duckdb::types::Value> {
         let cols = schema
@@ -294,30 +296,45 @@ fn a_128_bit_id_survives_the_write_path_or_is_refused() -> anyhow::Result<()> {
         schema.row_values("file_registry", row).unwrap()[idx].clone()
     };
 
-    // The supported route: a decimal string, preserved exactly.
-    let big = "170141183460469231731687303715884105727"; // i128::MAX
-    let row = serde_json::json!({ "file_id": big, "dataset_id": "d" });
-    assert_eq!(
-        id_at(&row),
-        Some(duckdb::types::Value::HugeInt(i128::MAX)),
-        "a decimal string must round-trip every one of its 128 bits"
-    );
-
-    // Exactly representable JSON numbers widen losslessly.
-    for n in [0i64, -1, i64::MAX] {
-        let row = serde_json::json!({ "file_id": n });
-        assert_eq!(id_at(&row), Some(duckdb::types::Value::HugeInt(n as i128)));
+    // The route the ingest uses: a plain JSON number, preserved exactly to the top of the
+    // range. This is the whole point of moving off `HUGEINT` — `u64::MAX` is representable
+    // in JSON, in `serde_json::Number`, in DuckDB, and in polars, with nothing in between
+    // rounding or refusing it.
+    for n in [0u64, 1, i64::MAX as u64, u64::MAX] {
+        let row = serde_json::json!({ "file_id": n, "dataset_id": "d" });
+        assert_eq!(
+            id_at(&row),
+            Some(duckdb::types::Value::UBigInt(n)),
+            "a JSON number must round-trip every one of its 64 bits"
+        );
     }
 
-    // The trap: `serde_json` parses an integer literal too large for u64 as an f64, so the
-    // precision is gone before the write path sees it. It must refuse rather than store a
-    // rounded id — NULL fails the primary key loudly instead of corrupting it quietly.
-    let rounded: serde_json::Value = serde_json::from_str(&format!(r#"{{"file_id": {big}}}"#))?;
+    // A decimal string still works, for a hand-built row or a caller outside the ingest.
+    let row = serde_json::json!({ "file_id": u64::MAX.to_string() });
+    assert_eq!(id_at(&row), Some(duckdb::types::Value::UBigInt(u64::MAX)));
+
+    // A negative number is not an id. It must be refused rather than wrapped around into a
+    // huge positive one, which would be a different file's key.
+    let row = serde_json::json!({ "file_id": -1i64 });
+    assert_eq!(
+        id_at(&row),
+        None,
+        "a negative id must be refused, not wrapped"
+    );
+
+    // The trap that survives the width change: `serde_json` parses an integer literal too
+    // large for `u64` as an `f64`, so the precision is gone before the write path sees it.
+    // NULL fails the primary key loudly instead of corrupting it quietly.
+    let too_big = "170141183460469231731687303715884105727"; // i128::MAX, well past u64
+    let rounded: serde_json::Value = serde_json::from_str(&format!(r#"{{"file_id": {too_big}}}"#))?;
     assert_eq!(
         id_at(&rounded),
         None,
         "an already-rounded literal must be refused, not stored"
     );
+    // …and the same value as a string, which reaches the parse rather than the number arm.
+    let row = serde_json::json!({ "file_id": too_big });
+    assert_eq!(id_at(&row), None, "an out-of-range string must be refused");
 
     // Non-numeric text is refused too, rather than becoming 0 or a partial parse.
     let row = serde_json::json!({ "file_id": "not-a-number" });
