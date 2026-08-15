@@ -1,6 +1,7 @@
 {
   "IngestionSchemaVersion": "0.1.0",
   "rules": [
+    { "selectors": ["match(path, \"/touch/\")"], "disposition": "ignore" },
     { "selectors": ["intersects([suffix], [\"segstats\", \"parcstats\"])"], "disposition": "read", "reader": "fs_stats" },
     { "selectors": ["suffix == \"fslabels\""], "disposition": "read", "reader": "fs_ctab" },
     { "selectors": ["datatype == \"anat\""], "disposition": "catalog" }
