@@ -29,7 +29,7 @@ pub struct ReaderRows {
 pub trait ContentReader: Send + Sync {
     fn read(
         &self,
-        file_id: &str,
+        file_id: u64,
         content: &str,
         facts: &FileFacts,
     ) -> anyhow::Result<Vec<ReaderRows>>;
@@ -41,7 +41,7 @@ pub trait ContentReader: Send + Sync {
 ///
 /// `file_id` rather than `(dataset_id, file_path)`: a data table points at the registry, and
 /// the path it points to is a column of that (docs/adr/0006).
-pub(crate) fn seed_row(file_id: &str, facts: &FileFacts) -> Map<String, Value> {
+pub(crate) fn seed_row(file_id: u64, facts: &FileFacts) -> Map<String, Value> {
     let mut obj = Map::new();
     obj.insert("file_id".to_string(), Value::String(file_id.to_string()));
     for (k, v) in &facts.entities {

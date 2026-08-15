@@ -78,11 +78,11 @@ impl TabularStatus {
 /// `IntendedFor`). Written to the `file_associations` table.
 #[derive(Debug, Clone)]
 pub struct FileAssociation {
-    pub source_file_id: String,
+    pub source_file_id: u64,
     /// `None` when the target names a file this dataset does not ship — a dangling
     /// `IntendedFor`. Kept rather than dropped (see the table's DDL), which is why the
     /// path below travels alongside the id.
-    pub target_file_id: Option<String>,
+    pub target_file_id: Option<u64>,
     pub target_file_path: String,
     pub assoc_type: String,
 }
@@ -352,7 +352,7 @@ impl BidsDb {
     ///
     /// Replaces the former `tabular_files` table, whose `table_name`/`n_rows` are dropped:
     /// which table a file's rows landed in is recoverable by joining that table on `file_id`.
-    pub fn record_file_status(&self, file_id: &str, status: TabularStatus) -> Result<()> {
+    pub fn record_file_status(&self, file_id: u64, status: TabularStatus) -> Result<()> {
         let mut stmt = self
             .conn
             .prepare_cached("UPDATE file_registry SET status = ? WHERE file_id = ?")?;
@@ -502,7 +502,7 @@ impl BidsDb {
     /// Note the scope: rows belonging to a file that has since been *deleted* are not reached,
     /// because this only runs for files the walk still finds. Pruning those is an integrity
     /// question, deliberately not one the write path answers.
-    pub fn clear_file_rows(&self, table: &str, file_id: &str) -> Result<()> {
+    pub fn clear_file_rows(&self, table: &str, file_id: u64) -> Result<()> {
         // `table` is always an internal literal, never user input.
         self.conn.execute(
             &format!("DELETE FROM {table} WHERE file_id = ?"),
@@ -616,7 +616,9 @@ impl BidsDb {
     ///   Conflicts with rows *already in the table* are a different matter: those are the
     ///   point, and `OR REPLACE` resolves them as intended.
     /// - **The Appender writes physical columns**, bypassing the planner, so none of the
-    ///   implicit casting an `INSERT` performs happens (see [`file_id_value`]).
+    ///   implicit casting an `INSERT` performs happens — which is why the gradient and
+    ///   association writers hand it a `duckdb::types::Value::UBigInt` directly rather than
+    ///   letting a JSON number find its own way to the column.
     ///
     /// Requires `table_name` to have a primary key (nothing to upsert on otherwise) and no
     /// generated columns (`SELECT *` would materialize them, and inserting into a generated
@@ -690,9 +692,14 @@ impl BidsDb {
         }
         self.upsert_staged("file_associations", |appender| {
             for assoc in assocs {
-                let source = file_id_value(&assoc.source_file_id)?;
-                let target = match &assoc.target_file_id {
-                    Some(id) => file_id_value(id)?,
+                // Straight to the physical value: a `u64` *is* what the column
+                // holds, so there is nothing to parse and nothing that can fail. The
+                // helper this replaces existed only to turn a decimal string back into an
+                // `i128`, and was the last of three fabricated
+                // `ToSqlConversionFailure`s.
+                let source = duckdb::types::Value::UBigInt(assoc.source_file_id);
+                let target = match assoc.target_file_id {
+                    Some(id) => duckdb::types::Value::UBigInt(id),
                     None => duckdb::types::Value::Null,
                 };
                 appender.append_row(params![
@@ -715,13 +722,13 @@ impl BidsDb {
     /// `INSERT OR REPLACE` for the same reason as the associations above — a re-index
     /// recomputes these rows — and upserting keeps the write self-contained, with no clearing
     /// step whose scope has to be kept in step with what the run produces.
-    pub fn upsert_bvals(&self, files: &[(String, &[f64])]) -> Result<()> {
+    pub fn upsert_bvals(&self, files: &[BvalFile<'_>]) -> Result<()> {
         if files.is_empty() {
             return Ok(());
         }
         self.upsert_staged("bvals", |appender| {
             for (file_id, bvals) in files {
-                let id = file_id_value(file_id)?;
+                let id = duckdb::types::Value::UBigInt(*file_id);
                 for (i, &b) in bvals.iter().enumerate() {
                     appender.append_row(params![id, i as i64, b])?;
                 }
@@ -743,7 +750,7 @@ impl BidsDb {
         }
         self.upsert_staged("bvecs", |appender| {
             for (file_id, x, y, z) in files {
-                let id = file_id_value(file_id)?;
+                let id = duckdb::types::Value::UBigInt(*file_id);
                 for i in 0..x.len() {
                     appender.append_row(params![id, i as i64, x[i], y[i], z[i]])?;
                 }
@@ -753,25 +760,10 @@ impl BidsDb {
     }
 }
 
+/// One `.bval` file's row of b-values, alongside the id of the gradient file it came from.
+/// Borrowed from the parse, so a batch costs no copy of the values.
+pub type BvalFile<'a> = (u64, &'a [f64]);
+
 /// One `.bvec` file's three direction rows — `x`, `y`, `z` — alongside the id of the gradient
 /// file they came from. Borrowed from the parse, so a batch costs no copy of the values.
-pub type BvecFile<'a> = (String, &'a [f64], &'a [f64], &'a [f64]);
-
-/// A `file_id` as the Appender needs it: the physical `HUGEINT`, not the decimal string the
-/// SQL planner used to cast on our behalf.
-///
-/// [`crate::bids::file_id`] always renders an `i128`, so a parse failure is a bug rather than
-/// bad data — surfaced here rather than turned into the NULL that `Schema::row_values`
-/// substitutes for a value it cannot shape. A NULL would be rejected by these tables'
-/// `PRIMARY KEY` anyway, and in `target_file_id` it would silently read as "target not in the
-/// catalog", which is a claim about the dataset rather than about the write.
-fn file_id_value(file_id: &str) -> Result<duckdb::types::Value> {
-    file_id
-        .parse::<i128>()
-        .map(duckdb::types::Value::HugeInt)
-        // The third `ToSqlConversionFailure` this pass removed, and the only one of the
-        // three that was honestly named -- but it still hid the value that failed, which
-        // is the single thing worth knowing when the docstring above says this can only
-        // happen through a bug.
-        .with_context(|| format!("file_id {file_id:?} is not an i128"))
-}
+pub type BvecFile<'a> = (u64, &'a [f64], &'a [f64], &'a [f64]);

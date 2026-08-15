@@ -101,6 +101,27 @@ as issues. Roughly ordered by value.
   queryable fact. Currently the invariant is asserted by test instead
   (`test_adapter_freesurfer.rs`: every registry `sub` resolves to a `participants` row).
 
+- [ ] **`file_id` is 64-bit, and that has a ceiling worth revisiting past ~10⁸ files.** The key
+  moved from a 128-bit `HUGEINT` to a `UBIGINT` because `HUGEINT` does not survive the trip to
+  Python: the Arrow bridge hands it over as `Decimal128(38, 0)`, whose maximum is `10^38 - 1`
+  against `HUGEINT`'s `2^127 - 1 ≈ 1.7 × 10^38`, so 41% of the id space was outside its own
+  declared type and any attempt to rebuild a frame from such a value raised. Widening was not
+  available — polars caps decimal precision at 38 because its `Decimal` is Decimal128-backed.
+
+  The cost is collision resistance. By the birthday bound a catalog of `n` files collides with
+  probability `≈ n² / 2^65`: 3 × 10⁻⁸ at a million files, 3 × 10⁻⁶ at ten million, 3 × 10⁻⁴ at a
+  hundred million. A million-file catalog — roughly a 10,000-run study counting its FreeSurfer
+  trees — sits below the rate at which the disk under it corrupts a block, so this is the right
+  trade today. It stops being obviously right somewhere past 10⁸.
+
+  **A collision would be silent**, which is the part that decides when to act on this. `file_id`
+  is a primary key with replace-on-conflict, so two files sharing one would quietly become one
+  row rather than an error. Making it loud is cheap and self-contained: `file_registry` already
+  stores `(dataset_id, root_uri, file_path)` beside the id, so a collision is exactly "this id is
+  present with a different triple" — one join against the upsert stage before the
+  `INSERT OR REPLACE`. Worth doing before anyone points bidslake at a catalog of that size,
+  rather than widening the key again.
+
 - [ ] **CI enhancements**. The initial `.github/workflows/ci.yml` covers fmt/clippy/test, the
   Python suite, and the codegen drift guard on a single Linux runner. Later: an OS/Python/Rust
   matrix, benchmark-regression tracking (`cargo bench` in `bidslake` and `bids-validator-rs`), a

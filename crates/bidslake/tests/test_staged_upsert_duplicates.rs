@@ -23,10 +23,10 @@ fn db() -> anyhow::Result<BidsDb> {
     Ok(db)
 }
 
-fn assoc(target_id: &str) -> FileAssociation {
+fn assoc(target_id: u64) -> FileAssociation {
     FileAssociation {
-        source_file_id: "1".to_string(),
-        target_file_id: Some(target_id.to_string()),
+        source_file_id: 1,
+        target_file_id: Some(target_id),
         target_file_path: "sub-01/func/sub-01_task-rest_bold.nii.gz".to_string(),
         assoc_type: "events".to_string(),
     }
@@ -39,7 +39,7 @@ fn a_duplicate_within_one_batch_is_dropped_silently_keeping_the_first() -> anyho
 
     // Same primary key, different `target_file_id` — the column that sits outside the key and
     // is the one a re-index legitimately changes.
-    db.upsert_file_associations(&[assoc("100"), assoc("200")])?;
+    db.upsert_file_associations(&[assoc(100), assoc(200)])?;
 
     let (rows, target): (i64, i64) = db.conn.query_row(
         "SELECT COUNT(*), MAX(target_file_id) FROM file_associations",
@@ -61,7 +61,7 @@ fn a_duplicate_within_one_batch_is_dropped_silently_keeping_the_first() -> anyho
 fn a_conflict_with_an_existing_row_replaces_it() -> anyhow::Result<()> {
     let db = db()?;
 
-    let mut dangling = assoc("0");
+    let mut dangling = assoc(0);
     dangling.target_file_id = None;
     db.upsert_file_associations(&[dangling])?;
     let unresolved: Option<i64> =
@@ -72,7 +72,7 @@ fn a_conflict_with_an_existing_row_replaces_it() -> anyhow::Result<()> {
     assert_eq!(unresolved, None, "the target was not in the catalog yet");
 
     // A second run, with the target now resolvable.
-    db.upsert_file_associations(&[assoc("42")])?;
+    db.upsert_file_associations(&[assoc(42)])?;
 
     let (rows, target): (i64, Option<i64>) = db.conn.query_row(
         "SELECT COUNT(*), MAX(target_file_id) FROM file_associations",
