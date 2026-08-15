@@ -26,6 +26,16 @@ def to_uri(location: str | os.PathLike[str]) -> str:
     A value with a scheme (``file://``, ``s3://``) is returned as-is; a bare
     filesystem path becomes an absolute ``file://`` URI. Used to rebase
     ``root_uri`` when a dataset has moved (``open(..., base_dir=/root_override=)``).
+
+    Also the write direction of :func:`to_local_path`, and the thing to reach for when a
+    query must be scoped to one tree — ``WHERE root_uri = to_uri(dst)``. Scoping matters:
+    a catalog holds many roots, and a completion query that names only a ``dataset_id``
+    answers about whichever of them happens to be indexed rather than about the directory
+    the caller has in mind (``docs/adr/0009``).
+
+    Symlinks are resolved, matching how the ingester canonicalizes a root before recording
+    it — on macOS ``/tmp`` is ``/private/tmp``, so the two spellings are not
+    interchangeable and the unresolved one matches no row at all.
     """
     text = os.fspath(location)
     if "://" in text:

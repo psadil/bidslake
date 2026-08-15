@@ -260,6 +260,22 @@ accessors; and the opt-in `python -m bidslake.stubgen`. Remaining follow-ups:
   the machinery for — but the blast radius is now larger, not smaller: 25 tables carry a foreign
   key to `file_registry`, not just `sidecars`. Regression tests: `test_registry_shape.rs`.
 
+- [ ] **A catalog snapshot id, so a claim about it can be dated**.
+  [ADR 0009](docs/adr/0009-root-tenure.md) makes an `attached` root's rows *trustworthy* — the
+  indexer asserted the files would stay put, and `bidslake verify` audits that. What it cannot
+  make them is **citable**: nothing records *when* the catalog last agreed with the tree, so
+  "this unit is done" is a claim with no timestamp, and a consumer that wants to skip work has
+  to re-check the filesystem itself. DuckLake's answer is five columns — `snapshot_id`,
+  `snapshot_time`, `schema_version`, two allocator counters — plus `begin_snapshot`/`end_snapshot`
+  on the file table, which turns "as of" into one predicate. For bidslake that would buy three
+  things: a citable catalog version (the difference between a reproducible analysis and "as of
+  whenever we ran it"), a `changes(a, b)` feed so a downstream step learns what is new rather
+  than re-deriving it, and a non-destructive re-index, so the narrowing-run degradation recorded
+  above becomes inspectable rather than merely regrettable. It would also let `verify` record its
+  result, which is what a caller deciding on a node that never mounted the tree actually needs —
+  see the `--trust-catalog` limitation in `a2cps/melodic`'s `spikes/findings.md` §16. Re-indexing
+  is `DELETE` + re-insert today, so this is a real piece of work, not a column.
+
 - [ ] **A reader for headerless numeric matrices**. FSL writes several
   (`filtered_func_data.ica/melodic_mix`, `mc/prefiltered_func_data_mcf.par`): whitespace-
   delimited, no header, and in `melodic_mix`'s case a column count that varies per run. The

@@ -21,6 +21,25 @@ use std::sync::{Arc, OnceLock};
 /// size and mtime affordable there at all.
 const STAT_CONCURRENCY: usize = 16;
 
+/// A local absolute path as the `root_uri` the catalog stores.
+///
+/// The inverse of [`local_root`], and the reason both live here rather than at either call
+/// site: a stored `root_uri` is the only route from a registry row back to an openable file,
+/// so a consumer that spells the conversion itself is one typo away from a query that
+/// silently matches nothing. `LocalFileSystem::root` is the original of this format.
+pub fn root_uri(path: &Path) -> String {
+    format!("file://{}", path.display())
+}
+
+/// A `file://` root as a local path, or `None` for a root this build cannot reach — an
+/// `s3://` one, or anything whose path is not absolute.
+pub fn local_root(root_uri: &str) -> Option<PathBuf> {
+    root_uri
+        .strip_prefix("file://")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+}
+
 /// What a walk can learn about a file besides its path.
 ///
 /// Deliberately not a checksum. Hashing every file would mean *reading* every file, which

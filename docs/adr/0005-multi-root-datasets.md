@@ -133,3 +133,7 @@ without a row an adapter-ingested dataset would be absent from both.
   user asserting an id is a claim bidslake has no standing to overrule.
 - **`(dataset_id, file_path)` is no longer unique** across a dataset's roots. Nothing in this
   ADR fixes that — every file-keyed table still assumes it. That is the subject of ADR 0006.
+- **A root is registered but not characterized.** `dataset_roots` says a root exists and that
+  paths resolve through it, and says nothing about whether it will still be there tomorrow — so
+  a row here supports no conclusion about what has been produced. ADR 0009 adds the `tenure`
+  column that does.

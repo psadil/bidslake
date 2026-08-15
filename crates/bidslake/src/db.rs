@@ -154,6 +154,14 @@ impl BidsDb {
             .execute(schema::CREATE_TABULAR_UNDECLARED_COLUMNS_TABLE, [])?;
         // The ingest roots a dataset was built from (see docs/adr/0005).
         self.conn.execute(schema::CREATE_DATASET_ROOTS_TABLE, [])?;
+        // `CREATE TABLE IF NOT EXISTS` leaves an already-existing table alone, so a catalog
+        // built before docs/adr/0009 keeps a two-column `dataset_roots` and every read of
+        // `tenure` fails on it. Adding the column here is the same courtesy `link init`
+        // extends — an old catalog gains the concept without a re-index — and the default
+        // is the honest answer for a root indexed before tenure existed: `attached`.
+        self.conn
+            .execute(schema::ADD_DATASET_ROOTS_TENURE, [])
+            .context("adding dataset_roots.tenure to an existing catalog")?;
         // Cross-dataset links (see docs/adr/0003).
         self.conn.execute(schema::CREATE_DATASET_LINKS_TABLE, [])?;
         self.conn
@@ -397,14 +405,85 @@ impl BidsDb {
         Ok(rows)
     }
 
-    /// Bind one ingest root to a dataset (`dataset_roots`). `INSERT OR REPLACE` so
-    /// re-indexing the same root is a no-op rather than a primary-key violation.
-    pub fn register_dataset_root(&self, dataset_id: &str, root_uri: &str) -> Result<()> {
-        let mut stmt = self.conn.prepare_cached(
-            "INSERT OR REPLACE INTO dataset_roots (dataset_id, root_uri) VALUES (?, ?)",
-        )?;
+    /// Bind one ingest root to a dataset (`dataset_roots`), at the tenure this run asserts.
+    ///
+    /// Re-indexing the same root is a no-op rather than a primary-key violation, and
+    /// deliberately **not** a plain `INSERT OR REPLACE`: `--managed` is an assertion, and its
+    /// absence on a later run is not a retraction. So asserting `Managed` upserts, while the
+    /// default leaves an existing row's tenure alone — otherwise every routine re-index would
+    /// silently demote a managed root and quietly withdraw the authority its rows carry
+    /// (docs/adr/0009).
+    pub fn register_dataset_root(
+        &self,
+        dataset_id: &str,
+        root_uri: &str,
+        tenure: schema::Tenure,
+    ) -> Result<()> {
+        let sql = match tenure {
+            schema::Tenure::Managed => {
+                "INSERT INTO dataset_roots (dataset_id, root_uri, tenure) \
+                 VALUES (?, ?, 'managed') \
+                 ON CONFLICT (dataset_id, root_uri) DO UPDATE SET tenure = 'managed'"
+            }
+            schema::Tenure::Attached => {
+                "INSERT INTO dataset_roots (dataset_id, root_uri, tenure) \
+                 VALUES (?, ?, 'attached') \
+                 ON CONFLICT (dataset_id, root_uri) DO NOTHING"
+            }
+        };
+        let mut stmt = self.conn.prepare_cached(sql)?;
         stmt.execute(params![dataset_id, root_uri])?;
         Ok(())
+    }
+
+    /// Does `table` carry `column` in *this* catalog?
+    ///
+    /// Catalogs outlive the schema that built them. A column added to an existing table only
+    /// reaches an older file through [`Self::create_tables`], which only `index` runs — so a
+    /// read command that assumes the current shape fails with a `Binder Error` against a
+    /// catalog whose only fault is predating this build. Asking first is what lets those
+    /// commands degrade instead.
+    pub fn has_column(&self, table: &str, column: &str) -> Result<bool> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT 1 FROM duckdb_columns() WHERE table_name = ? AND column_name = ? LIMIT 1",
+        )?;
+        let found = stmt
+            .query_map(params![table, column], |_| Ok(()))?
+            .next()
+            .transpose()
+            .map_err(duck)
+            .with_context(|| format!("looking for {table}.{column}"))?;
+        Ok(found.is_some())
+    }
+
+    /// The tenure recorded for one root, or `None` if it is not registered.
+    pub fn dataset_root_tenure(
+        &self,
+        dataset_id: &str,
+        root_uri: &str,
+    ) -> Result<Option<schema::Tenure>> {
+        // Same reason as [`Self::has_column`]'s: an older catalog has no such column, and a
+        // root registered before tenure existed promised exactly what `attached` means.
+        if !self.has_column("dataset_roots", "tenure")? {
+            let known = self.dataset_roots(dataset_id)?;
+            return Ok(known
+                .iter()
+                .any(|uri| uri == root_uri)
+                .then_some(schema::Tenure::Attached));
+        }
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT tenure FROM dataset_roots WHERE dataset_id = ? AND root_uri = ?",
+        )?;
+        let mut rows = stmt
+            .query_map(params![dataset_id, root_uri], |r| r.get::<_, String>(0))?
+            .collect::<duckdb::Result<Vec<_>>>()
+            .map_err(duck)
+            .with_context(|| format!("reading tenure for {root_uri}"))?;
+        Ok(match rows.pop().as_deref() {
+            Some("managed") => Some(schema::Tenure::Managed),
+            Some(_) => Some(schema::Tenure::Attached),
+            None => None,
+        })
     }
 
     /// Record one cross-dataset link declaration (`dataset_links`). `INSERT OR REPLACE`

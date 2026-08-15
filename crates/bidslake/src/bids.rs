@@ -30,10 +30,10 @@ use crate::db::{BidsDb, BvalFile, BvecFile, FileAssociation, TabularStatus};
 use crate::fs::BidsFileSystem;
 use crate::links;
 use crate::readers::{self, ContentReader};
-use crate::schema::Schema;
 use crate::schema::dynamic::{quote_ident, sql_lit};
 use crate::schema::ingestion::{Disposition, Undeclared};
 use crate::schema::tabular::{ColumnSpec, FileContext, RowIdentity, TableSpec};
+use crate::schema::{Schema, Tenure};
 use crate::timing::{self, Counter, Phase};
 use anyhow::{Context, Result};
 use bids_core::entities::read_entities;
@@ -156,6 +156,9 @@ pub struct BidsParser {
     file_stats: HashMap<String, crate::fs::FileStat>,
     /// Whether to run that pass at all (`--no-stat` turns it off).
     stat_files: bool,
+    /// The tenure this run asserts for its root (docs/adr/0009). Defaults to
+    /// [`Tenure::Attached`]; `--managed` is what raises it.
+    tenure: Tenure,
     /// Statuses decided during the **walk**, keyed by dataset-relative path.
     ///
     /// The registry is written after the walk, so a `record_file_status` UPDATE issued while
@@ -494,6 +497,7 @@ impl BidsParser {
             ignore_set: Gitignore::empty(),
             apply_bidsignore,
             stat_files,
+            tenure: Tenure::default(),
             pending_associations: Vec::new(),
             pending_gradients: Vec::new(),
             schema,
@@ -518,6 +522,17 @@ impl BidsParser {
             root_description_json: None,
             declared_sources: Vec::new(),
         }
+    }
+
+    /// Assert that this run's root is bidslake-managed (docs/adr/0009).
+    ///
+    /// A builder rather than another `new` parameter because it is the CLI's `--managed` and
+    /// nothing else: every other construction — tests, benches, embedders — wants the
+    /// `attached` default, which is the tier that promises nothing beyond durability.
+    #[must_use]
+    pub fn with_tenure(mut self, tenure: Tenure) -> Self {
+        self.tenure = tenure;
+        self
     }
 
     /// Record CLI `--source-dataset` references as `declared` cross-dataset links, so a
@@ -703,8 +718,11 @@ impl BidsParser {
         let root_uri = self.fs.root();
         let existing = db.dataset_roots(dataset_id)?;
 
-        // Re-indexing a root already registered: nothing to decide.
+        // Re-indexing a root already registered: nothing to decide about *identity*. Still
+        // re-register, because tenure may have been raised since — `--managed` on a re-index
+        // has to take effect, and the attached default is a no-op here by construction.
         if existing.iter().any(|uri| uri == &root_uri) {
+            db.register_dataset_root(dataset_id, &root_uri, self.tenure)?;
             return Ok(root_uri);
         }
 
@@ -743,7 +761,7 @@ impl BidsParser {
             }
         }
 
-        db.register_dataset_root(dataset_id, &root_uri)?;
+        db.register_dataset_root(dataset_id, &root_uri, self.tenure)?;
         Ok(root_uri)
     }
 

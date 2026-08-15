@@ -267,6 +267,7 @@ class DatasetRoots(Base):
 
     dataset_id: Mapped[str] = mapped_column(String, primary_key=True)
     root_uri: Mapped[str] = mapped_column(String, primary_key=True)
+    tenure: Mapped[str | None] = mapped_column(String)
 
 
 class Descriptions(Base):

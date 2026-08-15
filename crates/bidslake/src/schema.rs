@@ -429,13 +429,55 @@ CREATE TABLE IF NOT EXISTS file_associations (
 // The registry is explicit rather than `SELECT DISTINCT root_uri FROM file_registry`
 // because it is authoritative for a root that contributed no rows at all — an ingest that
 // found nothing, or whose every file an `ignore` rule claimed.
+//
+// `tenure` says what may be concluded from those rows (docs/adr/0009). It is per root
+// rather than per database because one catalog holds many datasets, and an `attached`
+// OpenNeuro dataset has to be able to sit beside a `managed` derivative.
 pub const CREATE_DATASET_ROOTS_TABLE: &str = "
 CREATE TABLE IF NOT EXISTS dataset_roots (
     dataset_id TEXT,
     root_uri TEXT,
+    tenure TEXT NOT NULL DEFAULT 'attached'
+        CHECK (tenure IN ('attached', 'managed')),
     PRIMARY KEY (dataset_id, root_uri)
 );
 ";
+
+/// Bring a pre-tenure `dataset_roots` up to date (docs/adr/0009).
+///
+/// Idempotent, and applied on every `create_tables` so a catalog indexed before this column
+/// existed keeps working rather than failing on the first read of `tenure`. The `DEFAULT` is
+/// what makes the backfill correct as well as cheap: a root registered before tenure existed
+/// promised only that its files were there, which is exactly `attached`.
+pub const ADD_DATASET_ROOTS_TENURE: &str =
+    "ALTER TABLE dataset_roots ADD COLUMN IF NOT EXISTS tenure TEXT DEFAULT 'attached'";
+
+/// What was promised about a root, and so what the catalog may conclude from its rows
+/// (docs/adr/0009).
+///
+/// Both tiers are permanent. `Attached` is not a waypoint on the way to `Managed` — it is how
+/// bidslake stays useful to somebody who has data and no intention of handing control of it
+/// over, and most catalogs will hold nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Tenure {
+    /// Somebody else writes there. Indexing it promised only that the files will stay put, so
+    /// a row here is a record of a past observation: enough to *find* work, not enough to
+    /// *skip* it without confirming. [`crate::verify`] is what audits that promise.
+    #[default]
+    Attached,
+    /// bidslake owns the storage, so the catalog is the commit point and its rows are current
+    /// by construction. This is what unlocks the verbs that move or rewrite files.
+    Managed,
+}
+
+impl Tenure {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Tenure::Attached => "attached",
+            Tenure::Managed => "managed",
+        }
+    }
+}
 
 // Cross-dataset association (see docs/adr/0003). The dataset-to-dataset relation is
 // deliberately NOT stored — it is resolved at query time by the `dataset_relations`

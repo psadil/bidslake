@@ -189,6 +189,52 @@ class BidsLake:
         """One row per dataset in the catalog (the ``dataset_description`` table)."""
         return self._query("SELECT * FROM dataset_description", [])
 
+    def roots(self, dataset_id: str | None = None) -> DataFrame:
+        """The ingest roots in this catalog: ``(dataset_id, root_uri, tenure)``.
+
+        A dataset may have several (``docs/adr/0005``), so ``root_uri`` is the only thing
+        that says *which tree* a row is about — and ``file_path`` is meaningless without it.
+
+        ``tenure`` says what may be concluded from those rows (``docs/adr/0009``).
+        ``attached`` means somebody else writes there and the catalog records what it saw
+        last time it looked; ``managed`` means bidslake owns the storage, so its rows are
+        current by construction. The distinction matters most to anything deciding whether
+        work still needs doing: a catalog is sound for *finding* work in either tier, and for
+        *skipping* it only once an attached root's rows have been confirmed — by ``bidslake
+        verify``, or by checking the files.
+
+        Pair with :func:`~bidslake.to_uri` to scope a query to one tree::
+
+            lake.sql("SELECT ... WHERE root_uri = ?", [bidslake.to_uri(out_dir)])
+
+        A catalog written before ``tenure`` existed has no such column, and this reads
+        ``attached`` for it rather than failing. That is not leniency for its own sake: the
+        write side backfills the same value (``ALTER TABLE … DEFAULT 'attached'``), but only
+        ``index`` runs DDL, and this package opens read-only — so a reader that insisted on
+        the column would simply be unable to open an older catalog at all.
+        """
+        # Selected as a literal when absent, so the shape of the frame does not depend on how
+        # old the catalog is; a caller can always read `tenure`.
+        tenure = "tenure" if self._has_column("dataset_roots", "tenure") else "'attached' AS tenure"
+        sql = f"SELECT dataset_id, root_uri, {tenure} FROM dataset_roots"
+        if dataset_id is None:
+            return self._query(f"{sql} ORDER BY dataset_id, root_uri", [])
+        return self._query(f"{sql} WHERE dataset_id = ? ORDER BY root_uri", [dataset_id])
+
+    def _has_column(self, table: str, column: str) -> bool:
+        """Does ``table`` carry ``column`` in *this* catalog?
+
+        Catalogs outlive the schema that built them, and a column added to an existing table
+        only reaches an old file through ``index``'s DDL. Read paths therefore cannot assume
+        the current shape — asking is cheaper than the alternative, which is a `Binder Error`
+        surfaced to someone whose only mistake was not re-indexing.
+        """
+        df = self._query(
+            "SELECT 1 FROM duckdb_columns() WHERE table_name = ? AND column_name = ? LIMIT 1",
+            [table, column],
+        )
+        return df.height > 0
+
     def dataset_relations(self) -> DataFrame:
         """The resolved dataset-to-dataset relations.
 

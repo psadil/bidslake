@@ -235,6 +235,7 @@ COLUMNS: dict[str, dict[str, str]] = {
     "dataset_roots": {
         "dataset_id": "VARCHAR",
         "root_uri": "VARCHAR",
+        "tenure": "VARCHAR",
     },
     "descriptions": {
         "file_id": "UBIGINT",
@@ -1164,6 +1165,7 @@ class C:
     class dataset_roots:
         dataset_id: pl.Expr = pl.col("dataset_id")
         root_uri: pl.Expr = pl.col("root_uri")
+        tenure: pl.Expr = pl.col("tenure")
 
     class descriptions:
         file_id: pl.Expr = pl.col("file_id")

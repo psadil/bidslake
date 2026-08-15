@@ -1,8 +1,13 @@
 //! `bidslake verify` — is the catalog still true about the files it names?
 //!
-//! A catalog is an index, never an owner (ADR 0005), so the tree underneath it moves
-//! without asking. This asks the only two questions an index can answer about that: is
+//! An `attached` root is somebody else's tree (ADR 0009): bidslake does not own it, so it
+//! moves without asking, and the catalog's rows describe what the walk saw rather than what
+//! is there now. This asks the only two questions an index can answer about that gap — is
 //! every file it recorded still there, and does it still look the way it did.
+//!
+//! That makes this the precondition for trusting the catalog about work that has been done.
+//! A `verify` that has passed since the last index is what lets a caller act on those rows
+//! without re-checking the files itself.
 //!
 //! **What "look the way it did" means is bounded by what the ingest stored**, and that is
 //! deliberately size and mtime rather than a checksum. Hashing means *reading* every file,
@@ -20,7 +25,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::db::BidsDb;
-use crate::fs::{BidsFileSystem, FileStat, LocalFileSystem};
+use crate::fs::{BidsFileSystem, FileStat, LocalFileSystem, local_root};
 
 /// What verification found about one file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,12 +57,22 @@ struct Rooted {
 /// relative path. Resolution has to go through `dataset_roots`, which is what `file_id`
 /// already keys on.
 fn rows_by_root(db: &BidsDb) -> Result<Vec<Rooted>> {
+    // A catalog written before those two columns existed does not have them, and only
+    // `index` runs the DDL that would add them — so selecting them unconditionally turns
+    // "your catalog is older than this build" into a `Binder Error`. Selecting NULL instead
+    // lands on the degraded path this command already has: no recorded stat is exactly what
+    // `--no-stat` produces, and the report says so rather than claiming a clean bill.
+    let stats = if db.has_column("file_registry", "size_bytes")? {
+        "size_bytes, mtime_ns"
+    } else {
+        "NULL::UBIGINT, NULL::BIGINT"
+    };
     let mut stmt = db
         .conn
-        .prepare(
-            "SELECT dataset_id, root_uri, file_path, size_bytes, mtime_ns \
-             FROM file_registry ORDER BY dataset_id, root_uri, file_path",
-        )
+        .prepare(&format!(
+            "SELECT dataset_id, root_uri, file_path, {stats} \
+             FROM file_registry ORDER BY dataset_id, root_uri, file_path"
+        ))
         .context("reading the file registry")?;
     let rows = stmt
         .query_map([], |r| {
@@ -94,14 +109,6 @@ fn rows_by_root(db: &BidsDb) -> Result<Vec<Rooted>> {
             files,
         })
         .collect())
-}
-
-/// A `file://` root as a local path, or `None` for a root this build cannot reach.
-fn local_root(root_uri: &str) -> Option<PathBuf> {
-    root_uri
-        .strip_prefix("file://")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
 }
 
 /// Verify every file in `database`, printing a report. Returns the number of problems.
