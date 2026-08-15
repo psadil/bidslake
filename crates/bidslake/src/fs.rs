@@ -9,8 +9,67 @@
 use anyhow::{Context as _, Result};
 use bids_core::filetree::FileTree;
 use futures::future::BoxFuture;
+use futures::stream::StreamExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+
+/// How many stats are in flight at once, matching the body-read prefetch in `bids.rs`.
+///
+/// The number that matters is not local throughput — a local stat is ~2 µs — but network
+/// latency. On a parallel filesystem each stat is a round trip to a metadata server, and
+/// serially that is minutes per million files; overlapping them is what makes recording
+/// size and mtime affordable there at all.
+const STAT_CONCURRENCY: usize = 16;
+
+/// A local absolute path as the `root_uri` the catalog stores.
+///
+/// The inverse of [`local_root`], and the reason both live here rather than at either call
+/// site: a stored `root_uri` is the only route from a registry row back to an openable file,
+/// so a consumer that spells the conversion itself is one typo away from a query that
+/// silently matches nothing. `LocalFileSystem::root` is the original of this format.
+pub fn root_uri(path: &Path) -> String {
+    format!("file://{}", path.display())
+}
+
+/// A `file://` root as a local path, or `None` for a root this build cannot reach — an
+/// `s3://` one, or anything whose path is not absolute.
+pub fn local_root(root_uri: &str) -> Option<PathBuf> {
+    root_uri
+        .strip_prefix("file://")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+}
+
+/// What a walk can learn about a file besides its path.
+///
+/// Deliberately not a checksum. Hashing every file would mean *reading* every file, which
+/// is a different order of cost from stat-ing it and is not something an index should do
+/// by default. Size and mtime are what a consumer needs to answer "has this changed since
+/// I looked" — which is what a content-addressed workflow engine asks, and what `verify`
+/// can ask of a catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileStat {
+    pub size_bytes: u64,
+    /// Nanoseconds since the Unix epoch. Signed, because a pre-1970 mtime is legal and a
+    /// backup restore does produce them; `i64` reaches year 2262, which is enough.
+    pub mtime_ns: i64,
+}
+
+impl FileStat {
+    /// From a `std::fs::Metadata`, or `None` if the platform gives no modification time.
+    pub fn from_metadata(md: &std::fs::Metadata) -> Option<Self> {
+        let mtime = md.modified().ok()?;
+        let mtime_ns = match mtime.duration_since(std::time::UNIX_EPOCH) {
+            Ok(d) => i64::try_from(d.as_nanos()).ok()?,
+            // Before the epoch: `duration_since` errors and carries the magnitude.
+            Err(e) => -i64::try_from(e.duration().as_nanos()).ok()?,
+        };
+        Some(Self {
+            size_bytes: md.len(),
+            mtime_ns,
+        })
+    }
+}
 
 /// Trait for abstracting file system access (Local vs S3)
 pub trait BidsFileSystem: Send + Sync {
@@ -24,6 +83,22 @@ pub trait BidsFileSystem: Send + Sync {
         pseudo_exts: &[String],
         apply_bidsignore: bool,
     ) -> BoxFuture<'_, Result<Vec<PathBuf>>>;
+
+    /// Size and modification time for each of `paths`, in order.
+    ///
+    /// `None` for a file that has gone or cannot be stat-ed — a walk and a stat are two
+    /// moments, and a dataset can change between them. That is data about the tree, not an
+    /// error to abort an ingest over.
+    ///
+    /// Separate from [`Self::walk`] rather than folded into it, because the two backends
+    /// come by this differently: S3 already has size and mtime in the listing it just
+    /// paged through and answers from memory, while a POSIX filesystem has to ask. Keeping
+    /// them apart is also what lets an ingest skip the stat pass entirely (`--no-stat`)
+    /// without the walk knowing.
+    fn stat_many<'a>(
+        &'a self,
+        paths: &'a [PathBuf],
+    ) -> BoxFuture<'a, Result<Vec<Option<FileStat>>>>;
 
     /// Read file content as string
     fn read_to_string(&self, path: &Path) -> BoxFuture<'_, Result<String>>;
@@ -133,6 +208,42 @@ impl BidsFileSystem for LocalFileSystem {
             // Cache the tree so `file_tree()` can share it with bids-core inheritance.
             let _ = self.tree.set(Arc::new(tree));
             Ok(paths)
+        })
+    }
+
+    fn stat_many<'a>(
+        &'a self,
+        paths: &'a [PathBuf],
+    ) -> BoxFuture<'a, Result<Vec<Option<FileStat>>>> {
+        Box::pin(async move {
+            // Concurrent, not serial, and the reason is latency rather than throughput.
+            // A local stat is a couple of microseconds and the ordering would not matter;
+            // on a parallel filesystem it is a round trip to a metadata server, and a
+            // million serialized round trips is minutes. `buffered` (not `_unordered`)
+            // keeps the results aligned with `paths`, so the caller needs no key.
+            //
+            // `spawn_blocking` because `std::fs::metadata` blocks: without it, sixteen
+            // in-flight stats would still take turns on the async worker thread and the
+            // concurrency would be a fiction.
+            let root = self.root.clone();
+            let stats = futures::stream::iter(paths.iter().cloned())
+                .map(|rel| {
+                    let full = root.join(&rel);
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            std::fs::metadata(&full)
+                                .ok()
+                                .as_ref()
+                                .and_then(FileStat::from_metadata)
+                        })
+                        .await
+                        .unwrap_or(None)
+                    }
+                })
+                .buffered(STAT_CONCURRENCY)
+                .collect::<Vec<_>>()
+                .await;
+            Ok(stats)
         })
     }
 

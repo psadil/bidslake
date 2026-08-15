@@ -53,6 +53,7 @@ async fn ingest_into(db: &BidsDb, path: &Path, dataset_id: &str, declared: &[&st
         Schema::load(None).unwrap(),
         None,
         true,
+        true,
     )
     .with_declared_sources(declared.iter().map(|s| s.to_string()).collect());
     let txn = db.conn.unchecked_transaction().unwrap();

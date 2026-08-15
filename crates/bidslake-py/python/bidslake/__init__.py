@@ -33,8 +33,8 @@ from collections.abc import Mapping
 
 from .file import BidsFile
 from .layout import BidsLake, Table
-from .layouts import Layout, LayoutAt, layout
-from .paths import RemotePathError, to_local_path
+from .layouts import Layout, LayoutAt, RoleState, layout
+from .paths import RemotePathError, to_local_path, to_uri
 from .query import Sibling, sibling, sibling_path, unresolved
 from .relations import Relation
 from .schema import C
@@ -50,6 +50,7 @@ __all__ = [
     "LayoutAt",
     "Relation",
     "RemotePathError",
+    "RoleState",
     "Sibling",
     "Table",
     "layout",
@@ -57,6 +58,7 @@ __all__ = [
     "sibling",
     "sibling_path",
     "to_local_path",
+    "to_uri",
     "unresolved",
 ]
 

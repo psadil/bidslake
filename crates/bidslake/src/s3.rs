@@ -5,11 +5,12 @@
 //! files are read by DuckDB directly over `s3://` via the **httpfs** extension
 //! ([`crate::s3::configure_httpfs`]), since `read_csv` needs to open the path itself.
 
-use crate::fs::BidsFileSystem;
+use crate::fs::{BidsFileSystem, FileStat};
 use anyhow::{Context, Result};
 use aws_config::meta::region::RegionProviderChain;
 use aws_sdk_s3::config::Region;
 use futures::future;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Last-resort region when neither the environment, the active profile, nor the
@@ -76,6 +77,14 @@ pub struct S3Client {
     region: String,
     /// Anonymous (unsigned) access — public buckets like OpenNeuro's.
     anonymous: bool,
+    /// Size and mtime per relative key, filled by [`BidsFileSystem::walk`].
+    ///
+    /// `ListObjectsV2` returns both on every object, so on S3 a stat costs nothing and
+    /// there is nothing to overlap — the walk already paged through the answer. Caching it
+    /// here is what lets `stat_many` serve from memory rather than issuing a `HeadObject`
+    /// per file, which would be one request per object against a listing that already had
+    /// the numbers.
+    stats: std::sync::Arc<std::sync::Mutex<HashMap<PathBuf, FileStat>>>,
 }
 
 impl S3Client {
@@ -122,7 +131,13 @@ impl S3Client {
             prefix,
             region,
             anonymous: signing.is_anonymous(),
+            stats: Default::default(),
         })
+    }
+
+    /// A handle to the stat cache, for the walk's async block to fill.
+    fn stats_handle(&self) -> std::sync::Arc<std::sync::Mutex<HashMap<PathBuf, FileStat>>> {
+        std::sync::Arc::clone(&self.stats)
     }
 
     /// The AWS region httpfs should use.
@@ -176,8 +191,11 @@ impl BidsFileSystem for S3Client {
         let prefix = self.prefix.clone();
         let client = self.client.clone();
 
+        // The cache `stat_many` will answer from; filled as the listing is paged.
+        let stats_slot = self.stats_handle();
         Box::pin(async move {
             let mut files = Vec::new();
+            let mut seen_stats: HashMap<PathBuf, FileStat> = HashMap::new();
             let mut paginator = client
                 .list_objects_v2()
                 .bucket(&bucket)
@@ -200,13 +218,45 @@ impl BidsFileSystem for S3Client {
 
                             // Skip directories (keys ending in /)
                             if !relative_key.ends_with('/') {
-                                files.push(PathBuf::from(relative_key));
+                                let rel = PathBuf::from(relative_key);
+                                // Both come back with the listing; taking them here is the
+                                // difference between a free stat and one request per object.
+                                if let (Some(size), Some(modified)) =
+                                    (object.size, object.last_modified.as_ref())
+                                {
+                                    let mtime_ns = modified.as_nanos();
+                                    if let (Ok(size_bytes), Ok(mtime_ns)) =
+                                        (u64::try_from(size), i64::try_from(mtime_ns))
+                                    {
+                                        seen_stats.insert(
+                                            rel.clone(),
+                                            FileStat {
+                                                size_bytes,
+                                                mtime_ns,
+                                            },
+                                        );
+                                    }
+                                }
+                                files.push(rel);
                             }
                         }
                     }
                 }
             }
+            *stats_slot.lock().unwrap_or_else(|e| e.into_inner()) = seen_stats;
             Ok(files)
+        })
+    }
+
+    fn stat_many<'a>(
+        &'a self,
+        paths: &'a [PathBuf],
+    ) -> future::BoxFuture<'a, Result<Vec<Option<FileStat>>>> {
+        Box::pin(async move {
+            // From the listing, not from `HeadObject`. `None` for a key the walk did not
+            // see, which on S3 means the caller asked about something outside the prefix.
+            let stats = self.stats.lock().unwrap_or_else(|e| e.into_inner());
+            Ok(paths.iter().map(|p| stats.get(p).copied()).collect())
         })
     }
 

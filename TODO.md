@@ -122,6 +122,16 @@ as issues. Roughly ordered by value.
   `INSERT OR REPLACE`. Worth doing before anyone points bidslake at a catalog of that size,
   rather than widening the key again.
 
+- [ ] **`verify` cannot detect a rewrite that preserved size and mtime.** It compares the
+  registry's `size_bytes`/`mtime_ns` against the tree, which catches a file that was deleted,
+  truncated, replaced or rewritten — the failures a derivative tree actually suffers — and
+  misses a forgery, or a second write inside one timestamp tick on a filesystem with coarse
+  mtime. A checksum column would close it and is deliberately not there: hashing means
+  *reading* every file, which is a different order of cost from stat-ing one, and an index
+  that read every byte of a study to build itself would not be an index. If it is ever wanted,
+  it belongs behind a flag on `verify` (hash on demand, for the files whose stat already
+  matched) rather than in the ingest.
+
 - [ ] **CI enhancements**. The initial `.github/workflows/ci.yml` covers fmt/clippy/test, the
   Python suite, and the codegen drift guard on a single Linux runner. Later: an OS/Python/Rust
   matrix, benchmark-regression tracking (`cargo bench` in `bidslake` and `bids-validator-rs`), a
@@ -249,6 +259,22 @@ accessors; and the opt-in `python -m bidslake.stubgen`. Remaining follow-ups:
   as before — rebuild the table in place (new table, copy, swap), which `compact.rs` has most of
   the machinery for — but the blast radius is now larger, not smaller: 25 tables carry a foreign
   key to `file_registry`, not just `sidecars`. Regression tests: `test_registry_shape.rs`.
+
+- [ ] **A catalog snapshot id, so a claim about it can be dated**.
+  [ADR 0009](docs/adr/0009-root-tenure.md) makes an `attached` root's rows *trustworthy* — the
+  indexer asserted the files would stay put, and `bidslake verify` audits that. What it cannot
+  make them is **citable**: nothing records *when* the catalog last agreed with the tree, so
+  "this unit is done" is a claim with no timestamp, and a consumer that wants to skip work has
+  to re-check the filesystem itself. DuckLake's answer is five columns — `snapshot_id`,
+  `snapshot_time`, `schema_version`, two allocator counters — plus `begin_snapshot`/`end_snapshot`
+  on the file table, which turns "as of" into one predicate. For bidslake that would buy three
+  things: a citable catalog version (the difference between a reproducible analysis and "as of
+  whenever we ran it"), a `changes(a, b)` feed so a downstream step learns what is new rather
+  than re-deriving it, and a non-destructive re-index, so the narrowing-run degradation recorded
+  above becomes inspectable rather than merely regrettable. It would also let `verify` record its
+  result, which is what a caller deciding on a node that never mounted the tree actually needs —
+  see the `--trust-catalog` limitation in `a2cps/melodic`'s `spikes/findings.md` §16. Re-indexing
+  is `DELETE` + re-insert today, so this is a real piece of work, not a column.
 
 - [ ] **A reader for headerless numeric matrices**. FSL writes several
   (`filtered_func_data.ica/melodic_mix`, `mc/prefiltered_func_data_mcf.par`): whitespace-

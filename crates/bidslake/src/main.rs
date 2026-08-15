@@ -29,8 +29,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Index a BIDS dataset into a DuckDB database (also used to bring
-    /// additional datasets under management — see the README on managed mode).
+    /// Index a BIDS dataset into a DuckDB database.
+    ///
+    /// The catalog records what the walk saw, and does not own the tree it saw it in.
+    /// `--managed` is what changes that, handing bidslake ownership of the root's storage
+    /// (docs/adr/0009).
     Index {
         /// Input BIDS dataset directory or S3 URI (e.g., s3://bucket/prefix)
         #[arg(short, long)]
@@ -92,6 +95,32 @@ enum Commands {
         #[arg(long)]
         no_bidsignore: bool,
 
+        /// Do not record each file's size and modification time in the registry.
+        ///
+        /// Those two columns are what lets a consumer ask "has this changed since I looked"
+        /// — a workflow engine's staleness check, and what `verify` compares against. They
+        /// cost nothing on S3 (the object listing already carries both) and roughly two
+        /// microseconds per file locally; the stats are issued concurrently so that a
+        /// parallel filesystem's per-file latency is overlapped rather than paid in turn.
+        ///
+        /// Mostly here for measuring what that pass costs. With it, `size_bytes` and
+        /// `mtime_ns` are NULL, and `verify` falls back to checking presence alone.
+        #[arg(long)]
+        no_stat: bool,
+
+        /// Take ownership of this root's storage: `tenure = 'managed'` (docs/adr/0009).
+        ///
+        /// The default, `attached`, is bidslake reading somebody else's tree — the right tier
+        /// for a downloaded dataset or a colleague's derivatives, and a permanent one. Opting
+        /// in says bidslake is the writer here, which is what makes the catalog's rows current
+        /// by construction rather than a record of the last time it looked, and what will
+        /// unlock the verbs that move or rewrite files.
+        ///
+        /// Asserted per run and never withdrawn by omission: a later re-index without this
+        /// flag leaves an already-managed root managed.
+        #[arg(long)]
+        managed: bool,
+
         /// Declare that this dataset derives from a source: a DOI, URL, filesystem/S3 path,
         /// or another catalog dataset's id (`dataset:<id>` or a bare id). The escape hatch
         /// for datasets whose `dataset_description.json` has no `SourceDatasets` DOI to link
@@ -125,8 +154,11 @@ enum Commands {
         diff: bool,
     },
 
-    /// (Managed mode, not yet implemented) Verify integrity of managed files:
-    /// check that every file the catalog records is present and uncorrupted.
+    /// Is every file the catalog records still there, and does it still look the way it did?
+    ///
+    /// An `attached` root is somebody else's tree, so its rows describe what was true at
+    /// index time. This passing is what lets a caller act on them without re-checking the
+    /// files itself (docs/adr/0009).
     Verify {
         /// bidslake DuckDB database
         #[arg(short, long, default_value = "bidslake.duckdb")]
@@ -250,6 +282,8 @@ async fn main() -> Result<()> {
             adapter,
             dry_run,
             no_bidsignore,
+            no_stat,
+            managed,
             source_dataset,
             temp_dir,
         } => {
@@ -292,6 +326,12 @@ async fn main() -> Result<()> {
                 bundle.ingestion_provenance,
                 dry_run,
                 !no_bidsignore,
+                !no_stat,
+                if managed {
+                    schema::Tenure::Managed
+                } else {
+                    schema::Tenure::Attached
+                },
                 source_dataset,
                 temp_dir,
             )
@@ -316,10 +356,13 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Verify { database } => {
-            anyhow::bail!(
-                "`verify` is not yet implemented (managed mode). \
-                 See the README on managed mode. (database: {database})"
-            )
+            let problems = bidslake::verify::run(&database).await?;
+            if problems > 0 {
+                // A nonzero exit, so this composes into a cron job or a CI step without
+                // anyone having to grep the output for the word "missing".
+                std::process::exit(1);
+            }
+            Ok(())
         }
         Commands::Transcode { database, to } => {
             anyhow::bail!(
@@ -871,6 +914,8 @@ async fn run_indexer(
     ingestion_provenance: Vec<(String, serde_json::Value)>,
     dry_run: bool,
     apply_bidsignore: bool,
+    stat_files: bool,
+    tenure: schema::Tenure,
     declared_sources: Vec<String>,
     temp_dir: Option<PathBuf>,
 ) -> Result<()> {
@@ -911,10 +956,17 @@ async fn run_indexer(
 
     let (fs, s3_httpfs_cfg) = open_backend(&input, no_sign_request, &db).await?;
 
-    let mut parser: BidsParser =
-        BidsParser::new(fs, dataset_id, schema, s3_httpfs_cfg, apply_bidsignore)
-            .with_term_maps(term_maps)
-            .with_declared_sources(declared_sources);
+    let mut parser: BidsParser = BidsParser::new(
+        fs,
+        dataset_id,
+        schema,
+        s3_httpfs_cfg,
+        apply_bidsignore,
+        stat_files,
+    )
+    .with_term_maps(term_maps)
+    .with_tenure(tenure)
+    .with_declared_sources(declared_sources);
 
     parser.parse(&db).await?;
     {

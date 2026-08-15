@@ -21,7 +21,7 @@ async fn ingest_with(root: &std::path::Path, fragment: &str) -> anyhow::Result<B
     let schema = Schema::load_full(None, &[], ingestion, &[])?;
     db.create_tables(&schema)?;
     let fs_backend = Box::new(LocalFileSystem::new(root.to_path_buf()));
-    let mut parser = BidsParser::new(fs_backend, None, schema, None, true);
+    let mut parser = BidsParser::new(fs_backend, None, schema, None, true, true);
     let txn = db.conn.unchecked_transaction()?;
     parser.parse(&db).await?;
     txn.commit()?;

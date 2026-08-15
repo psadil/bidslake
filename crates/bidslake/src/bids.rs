@@ -30,10 +30,10 @@ use crate::db::{BidsDb, BvalFile, BvecFile, FileAssociation, TabularStatus};
 use crate::fs::BidsFileSystem;
 use crate::links;
 use crate::readers::{self, ContentReader};
-use crate::schema::Schema;
 use crate::schema::dynamic::{quote_ident, sql_lit};
 use crate::schema::ingestion::{Disposition, Undeclared};
 use crate::schema::tabular::{ColumnSpec, FileContext, RowIdentity, TableSpec};
+use crate::schema::{Schema, Tenure};
 use crate::timing::{self, Counter, Phase};
 use anyhow::{Context, Result};
 use bids_core::entities::read_entities;
@@ -148,6 +148,17 @@ pub struct BidsParser {
     /// The two are merged at the flush, where a path in both (a promoted metadata-only
     /// record) resolves to its data-file row.
     registry_extra: Vec<RegistryEntry>,
+    /// Size and mtime per dataset-relative path, from one `stat_many` after the walk.
+    ///
+    /// Empty when the run was given `--no-stat`, and missing an entry for a file the
+    /// backend could not stat. Both cases leave the registry columns NULL, which is what
+    /// `verify` reads as "presence is all this catalog can tell you".
+    file_stats: HashMap<String, crate::fs::FileStat>,
+    /// Whether to run that pass at all (`--no-stat` turns it off).
+    stat_files: bool,
+    /// The tenure this run asserts for its root (docs/adr/0009). Defaults to
+    /// [`Tenure::Attached`]; `--managed` is what raises it.
+    tenure: Tenure,
     /// Statuses decided during the **walk**, keyed by dataset-relative path.
     ///
     /// The registry is written after the walk, so a `record_file_status` UPDATE issued while
@@ -475,6 +486,7 @@ impl BidsParser {
         schema: Schema,
         s3_httpfs: Option<S3Httpfs>,
         apply_bidsignore: bool,
+        stat_files: bool,
     ) -> Self {
         let datatypes = schema.datatypes().into_iter().collect();
         Self {
@@ -484,11 +496,14 @@ impl BidsParser {
             s3_httpfs,
             ignore_set: Gitignore::empty(),
             apply_bidsignore,
+            stat_files,
+            tenure: Tenure::default(),
             pending_associations: Vec::new(),
             pending_gradients: Vec::new(),
             schema,
             imaging_files: Vec::new(),
             registry_extra: Vec::new(),
+            file_stats: HashMap::new(),
             walk_status: HashMap::new(),
             has_dataset_description: false,
             sidecars: Vec::new(),
@@ -507,6 +522,17 @@ impl BidsParser {
             root_description_json: None,
             declared_sources: Vec::new(),
         }
+    }
+
+    /// Assert that this run's root is bidslake-managed (docs/adr/0009).
+    ///
+    /// A builder rather than another `new` parameter because it is the CLI's `--managed` and
+    /// nothing else: every other construction — tests, benches, embedders — wants the
+    /// `attached` default, which is the tier that promises nothing beyond durability.
+    #[must_use]
+    pub fn with_tenure(mut self, tenure: Tenure) -> Self {
+        self.tenure = tenure;
+        self
     }
 
     /// Record CLI `--source-dataset` references as `declared` cross-dataset links, so a
@@ -603,6 +629,17 @@ impl BidsParser {
             Value::String(file_path.to_string()),
         );
         row.insert("kind".to_string(), Value::String(kind.as_str().to_string()));
+        // What the walk observed about the file itself. Absent for a file the backend could
+        // not stat, and for every file under `--no-stat`: left out of the row rather than
+        // written as a JSON null, so the column is NULL by the write path's own default and
+        // "unknown" has one representation.
+        if let Some(st) = self.file_stats.get(file_path) {
+            row.insert(
+                "size_bytes".to_string(),
+                Value::Number(st.size_bytes.into()),
+            );
+            row.insert("mtime_ns".to_string(), Value::Number(st.mtime_ns.into()));
+        }
         // A status decided during the walk, before this row existed to UPDATE.
         if let Some(status) = self.walk_status.get(file_path) {
             row.insert(
@@ -681,8 +718,11 @@ impl BidsParser {
         let root_uri = self.fs.root();
         let existing = db.dataset_roots(dataset_id)?;
 
-        // Re-indexing a root already registered: nothing to decide.
+        // Re-indexing a root already registered: nothing to decide about *identity*. Still
+        // re-register, because tenure may have been raised since — `--managed` on a re-index
+        // has to take effect, and the attached default is a no-op here by construction.
         if existing.iter().any(|uri| uri == &root_uri) {
+            db.register_dataset_root(dataset_id, &root_uri, self.tenure)?;
             return Ok(root_uri);
         }
 
@@ -721,7 +761,7 @@ impl BidsParser {
             }
         }
 
-        db.register_dataset_root(dataset_id, &root_uri)?;
+        db.register_dataset_root(dataset_id, &root_uri, self.tenure)?;
         Ok(root_uri)
     }
 
@@ -802,6 +842,20 @@ impl BidsParser {
         timing::count(Counter::Files, files.len() as u64);
         if let Some(tree) = self.fs.file_tree() {
             timing::count(Counter::Dirs, tree.walk_directories().count() as u64);
+        }
+
+        // One concurrent pass over everything the walk found. Free on S3 (the listing
+        // already carried both) and ~2 µs per file locally; on a parallel filesystem it is
+        // a metadata-server round trip each, which is why `stat_many` overlaps them rather
+        // than paying them in turn. `--no-stat` skips it, leaving both columns NULL.
+        if self.stat_files {
+            let _t = timing::scope(Phase::Walk);
+            let stats = self.fs.stat_many(&files).await?;
+            self.file_stats = files
+                .iter()
+                .zip(stats)
+                .filter_map(|(p, st)| st.map(|st| (p.to_string_lossy().into_owned(), st)))
+                .collect();
         }
 
         for path in files {

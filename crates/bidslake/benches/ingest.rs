@@ -37,6 +37,7 @@ use bidslake::{
 use bidslake::{bids::S3Httpfs, s3};
 use criterion::{Criterion, criterion_group, criterion_main};
 use futures::future::BoxFuture;
+use futures::stream::StreamExt as _;
 
 /// Datasets chosen to exercise the cost drivers: `ds001`/`ds002`/`ds114` cover
 /// the common paths (anat/func, sessions, events, inheritance); `ds108` is
@@ -60,7 +61,7 @@ fn ingest_once(path: &Path) {
         let schema = Schema::load(None).expect("load schema");
         db.create_tables(&schema).expect("create tables");
         let fs = Box::new(LocalFileSystem::new(path.to_path_buf()));
-        let mut parser = BidsParser::new(fs, None, schema, None, true);
+        let mut parser = BidsParser::new(fs, None, schema, None, true, true);
         parser.parse(&db).await.expect("parse");
     });
 }
@@ -109,6 +110,7 @@ fn ingest_s3_once(dataset: &str) {
                 anonymous: true,
             }),
             true,
+            true,
         );
         parser.parse(&db).await.expect("parse");
     });
@@ -136,9 +138,14 @@ fn bench_ingest_s3(c: &mut Criterion) {
 fn bench_ingest_s3(_c: &mut Criterion) {}
 
 /// A [`LocalFileSystem`] that sleeps `delay` before each Rust-side read
-/// (`read_to_string` / `read_head` — the reads the prefetch parallelizes),
-/// simulating network round-trip latency deterministically. `walk` and
+/// (`read_to_string` / `read_head` — the reads the prefetch parallelizes) and before each
+/// stat, simulating network round-trip latency deterministically. `walk` and
 /// `read_csv_source` (DuckDB's, not the prefetch's) delegate without delay.
+///
+/// The stat delay is what makes this bench able to see whether recording size and mtime is
+/// affordable on a parallel filesystem: serially it would cost `files × delay`, and the
+/// point of issuing them with bounded concurrency is that it costs about
+/// `files / STAT_CONCURRENCY × delay` instead.
 struct SlowFs {
     inner: LocalFileSystem,
     delay: Duration,
@@ -157,6 +164,28 @@ impl BidsFileSystem for SlowFs {
         apply_bidsignore: bool,
     ) -> BoxFuture<'_, Result<Vec<PathBuf>>> {
         self.inner.walk(pseudo_exts, apply_bidsignore)
+    }
+
+    fn stat_many<'a>(
+        &'a self,
+        paths: &'a [PathBuf],
+    ) -> BoxFuture<'a, Result<Vec<Option<bidslake::fs::FileStat>>>> {
+        let delay = self.delay;
+        Box::pin(async move {
+            // One delay per file, applied inside the same concurrency the real backend
+            // uses -- so the bench measures the overlap rather than assuming it.
+            futures::stream::iter(paths.iter().cloned())
+                .map(|p| async move {
+                    tokio::time::sleep(delay).await;
+                    self.inner.stat_many(std::slice::from_ref(&p)).await
+                })
+                .buffered(16)
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .map(|r| r.map(|mut v| v.pop().flatten()))
+                .collect()
+        })
     }
 
     fn read_to_string(&self, path: &Path) -> BoxFuture<'_, Result<String>> {
@@ -228,7 +257,7 @@ fn ingest_through(fs: Box<dyn BidsFileSystem>) {
         let db = BidsDb::new(":memory:").expect("open db");
         let schema = Schema::load(None).expect("load schema");
         db.create_tables(&schema).expect("create tables");
-        let mut parser = BidsParser::new(fs, None, schema, None, true);
+        let mut parser = BidsParser::new(fs, None, schema, None, true, true);
         parser.parse(&db).await.expect("parse");
     });
 }

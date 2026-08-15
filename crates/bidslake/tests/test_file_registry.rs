@@ -61,6 +61,12 @@ fn all_files_is_a_view_over_the_registry() -> anyhow::Result<()> {
 /// The concept columns are on the view, not the registry. That placement is what makes the
 /// registry free of generated columns — a precondition for the bulk staged upsert — and what
 /// makes widening the concept set free.
+///
+/// The registry itself holds three kinds of column and no others: **identity** (`file_id`
+/// and the three parts it hashes), **classification** (`kind`, `status` — what bidslake
+/// decided about the file), and **observation** (`size_bytes`, `mtime_ns` — what the
+/// filesystem said, as opposed to what the name or contents say). Nothing derived from the
+/// BIDS vocabulary belongs here; that is the view's job.
 #[test]
 fn concepts_live_on_the_view_not_the_registry() -> anyhow::Result<()> {
     let db = fresh()?;
@@ -77,9 +83,11 @@ fn concepts_live_on_the_view_not_the_registry() -> anyhow::Result<()> {
             "root_uri",
             "file_path",
             "kind",
-            "status"
+            "status",
+            "size_bytes",
+            "mtime_ns"
         ],
-        "the registry holds identity and classification only"
+        "the registry holds identity, classification and observation only"
     );
 
     let view = names(

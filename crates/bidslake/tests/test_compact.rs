@@ -43,7 +43,7 @@ async fn compact_preserves_everything_and_reclaims_space() -> anyhow::Result<()>
         let schema = Schema::load(None).unwrap();
         db.create_tables(&schema)?;
         let fs = Box::new(LocalFileSystem::new(bids_example("ds001")));
-        let mut parser = BidsParser::new(fs, None, schema, None, true);
+        let mut parser = BidsParser::new(fs, None, schema, None, true, true);
         let txn = db.conn.unchecked_transaction()?;
         parser.parse(&db).await?;
         txn.commit()?;
@@ -158,7 +158,7 @@ async fn compact_orders_tables_by_foreign_key() -> anyhow::Result<()> {
         let schema = Schema::load(None).unwrap();
         db.create_tables(&schema)?;
         let fs = Box::new(LocalFileSystem::new(bids_example("eyetracking_fmri")));
-        let mut parser = BidsParser::new(fs, None, schema, None, true);
+        let mut parser = BidsParser::new(fs, None, schema, None, true, true);
         let txn = db.conn.unchecked_transaction()?;
         parser.parse(&db).await?;
         txn.commit()?;
@@ -189,7 +189,7 @@ async fn compact_is_a_no_op_on_a_fresh_catalog() -> anyhow::Result<()> {
         let schema = Schema::load(None).unwrap();
         db.create_tables(&schema)?;
         let fs = Box::new(LocalFileSystem::new(bids_example("ds210")));
-        let mut parser = BidsParser::new(fs, None, schema, None, true);
+        let mut parser = BidsParser::new(fs, None, schema, None, true, true);
         let txn = db.conn.unchecked_transaction()?;
         parser.parse(&db).await?;
         txn.commit()?;

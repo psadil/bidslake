@@ -45,11 +45,29 @@ and then silently ignored at index time.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import os
 from collections.abc import Mapping
 from pathlib import Path
 
 from . import _bidslake
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class RoleState:
+    """What the filesystem says about one role's file.
+
+    Size and mtime rather than a checksum, and the distinction is the point: a digest would
+    mean reading every file, while these two answer "has this changed since I looked" for
+    the price of a `stat`. That is the question a workflow engine's staleness check asks,
+    and the one `bidslake verify` asks of a catalog — the same pair of numbers the ingest
+    records in `all_files.size_bytes`/`mtime_ns`, so the two are directly comparable.
+    """
+
+    role: str
+    exists: bool
+    size_bytes: int | None = None
+    mtime_ns: int | None = None
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -99,6 +117,69 @@ class LayoutAt:
         target = self.path(role, **bindings)
         target.parent.mkdir(parents=True, exist_ok=True)
         return target
+
+    # -- what is actually here -------------------------------------------------------
+    #
+    # A layout says where a role *goes*; these say whether it arrived. Every consumer that
+    # tracks progress through a tree needs that, and before this each wrote its own: a
+    # pipeline's own "is this step done" check, a workflow engine's completion rule, an
+    # asset check comparing a ledger against disk, and a progress count for a UI. Four
+    # implementations of one question, each stat-ing the same paths.
+    #
+    # The work is in Rust (`PyLayout::present`), so the answer here and the one
+    # `bidslake verify` gives for a catalog come from one place and one meaning of
+    # "changed".
+
+    def states(self, *roles: str) -> list[RoleState]:
+        """Every role's presence and stat, in the layout's order.
+
+        With no arguments, every role this binding can *render* — a role whose placeholders
+        nothing has bound is omitted rather than reported absent, because unaddressable and
+        missing are different answers and conflating them reports a finished tree as
+        incomplete for a forgotten keyword.
+        """
+        rows = self.layout._inner.present(str(self.root), dict(self.bindings))
+        states = [RoleState(r, e, sz, mt) for (r, e, sz, mt) in rows]
+        if roles:
+            wanted = set(roles)
+            states = [st for st in states if st.role in wanted]
+        return states
+
+    def has(self, role: str) -> bool:
+        """Is this one role's file there?
+
+        `False` for a role that cannot be rendered, which is the one place this
+        deliberately differs from :meth:`path` — a caller asking "is it there" wants an
+        answer, not a `KeyError`.
+        """
+        return any(st.exists for st in self.states(role))
+
+    def present(self) -> dict[str, bool]:
+        """`{role: exists}` for every renderable role. The shape a progress count wants."""
+        return {st.role: st.exists for st in self.states()}
+
+    def state(self, role: str) -> RoleState | None:
+        """One role's :class:`RoleState`, or `None` if it cannot be rendered."""
+        return next(iter(self.states(role)), None)
+
+    def digest(self, *roles: str) -> str:
+        """A short hash over the given roles' size and mtime — a cache key.
+
+        This is what a content-addressed engine needs and what none of them can derive on
+        their own: Dagster's `DataVersion`, a Prefect `cache_key_fn`, or anything else that
+        must decide whether work already done is still valid. Absent roles are folded in as
+        such, so a digest changes when a file appears or disappears as well as when one is
+        rewritten.
+
+        Not a content hash. Two files with identical size and mtime are treated as the same
+        file, which is the same assumption `make` has always made and is wrong only for a
+        deliberate forgery or a filesystem with second-granularity timestamps that was
+        written to twice within one tick.
+        """
+        h = hashlib.sha256()
+        for st in self.states(*roles):
+            h.update(f"{st.role}:{st.exists}:{st.size_bytes}:{st.mtime_ns}\n".encode())
+        return h.hexdigest()[:16]
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
