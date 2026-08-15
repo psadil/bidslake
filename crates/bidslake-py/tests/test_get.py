@@ -44,7 +44,10 @@ def test_unknown_column_raises(lake):
 
 
 def test_entities_mapping(lake):
-    f = next(lake.get(task="rest", suffix="bold"))
+    # Pinned to the extension the assertion below names: `get()` yields sidecars too, and
+    # the first task-rest bold is ds210's inherited `task-rest_echo-3_bold.json`, which has
+    # no `sub` and is not a `.nii.gz`.
+    f = next(lake.get(task="rest", suffix="bold", extension=".nii.gz"))
     assert (
         f.entities["task"] == "rest"
         and f.entities["suffix"] == "bold"

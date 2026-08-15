@@ -68,6 +68,47 @@ def test_params_are_bound_positionally_not_interpolated(lake) -> None:
     assert "SUBJ" not in sql, "values are bound, never interpolated into the SQL"
 
 
+def test_in_clause_expands_at_compile_time() -> None:
+    """`in_()` builds an *expanding* param that SQLAlchemy only expands when it executes
+    the statement — which never happens here. Unexpanded, the SQL keeps a literal
+    `__[POSTCOMPILE_x]` token and the param stays one nested list, so there is nothing for
+    DuckDB to bind. No `lake` fixture: this needs no database, and the guard should still
+    run where the bids-examples submodule is missing."""
+    from bidslake._sql import compile_statement
+
+    sql, params = compile_statement(
+        select(AllFiles.file_path).where(AllFiles.suffix.in_(["bold", "T1w"]))
+    )
+    assert "__[POSTCOMPILE" not in sql, "expanding param never expanded"
+    assert sql.count("?") == 2, "one placeholder per value"
+    assert params == ["bold", "T1w"], "flat, not a single nested list"
+
+
+def test_empty_in_clause_compiles_to_valid_sql() -> None:
+    """The empty sequence takes a separate branch: SQLAlchemy renders `IN (NULL) AND
+    (1 != 1)` rather than an empty `IN ()`, which is not valid SQL. Matching nothing is
+    also what `get()` means by an empty sequence (`_compile_filters` emits `FALSE`), so
+    both spellings of the query agree."""
+    from bidslake._sql import compile_statement
+
+    sql, params = compile_statement(select(AllFiles.file_path).where(AllFiles.suffix.in_([])))
+    assert "__[POSTCOMPILE" not in sql
+    assert params == []
+    assert sql.count("?") == 0
+
+
+def test_in_clause_matches_the_same_rows_as_get(lake) -> None:
+    """The compiled form has to survive the round trip, not just look right: `get()`'s
+    hand-rolled `IN` is the reference, and the statement must select the same files.
+    Compared by `file_id` because `file_path` is dataset-relative and collides across the
+    fixture's datasets, where a set comparison would quietly dedupe the difference away."""
+    stmt = select(AllFiles.file_id).where(AllFiles.suffix.in_(["bold", "T1w"]))
+    from_sql = sorted(lake.sql(stmt)["file_id"])
+    from_get = sorted(f.file_id for f in lake.get(suffix=["bold", "T1w"]))
+    assert from_sql, "fixture should have bold/T1w files; an empty result proves nothing"
+    assert from_sql == from_get
+
+
 def test_a_keyword_column_is_reachable(lake) -> None:
     """`participant_id` is ordinary; the point of the model layer is that a column whose
     name is a Python keyword (fMRIPrep's `from`) still gets an attribute, suffixed."""

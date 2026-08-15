@@ -29,15 +29,41 @@ as issues. Roughly ordered by value.
   and `coordsystem` are the multi-association case — several targets per source, so
   `(file_id, channel_idx)` would not be unique — which is permitted but wants a look first.
 
+- [x] **Every SQL error collapsed to `RuntimeError: preparing query`.** `anyhow_err` built the
+  Python exception with `e.to_string()`, which for an `anyhow::Error` prints only the outermost
+  `.context()` — so the `.context("preparing query")` *replaced* DuckDB's diagnostic rather than
+  adding to it, and a missing table, an unknown column and a syntax error were byte-identical.
+  Fixed with `format!("{e:#}")` (anyhow's alternate `Display` walks the chain).
+
+  Two things fell out that were not in the original entry. The chain walks one link too far:
+  `duckdb::Error`'s source is the raw FFI code, whose `Display` is the constant `Error code 1:
+  Unknown error code`, so `{:#}` appended it to *every* message — hence `duck()`, which re-wraps
+  a `duckdb::Error` as a leaf, in both `bidslake-py` and `bidslake`. And the same collapse
+  existed on the ingest side, where `main` renders the chain the same way. Regression tests:
+  `crates/bidslake-py/tests/test_errors.py` (eight, including one asserting the three mistakes
+  above now give three different messages) and `crates/bidslake/tests/test_write_errors.rs`.
+
 - [ ] **Genuine lazy `get()` streaming** (`py-04`). `get()` is typed `Iterator[BidsFile]` but
   materializes the whole Arrow-IPC buffer + Polars frame first, so its laziness is cosmetic
   (now documented in the docstring). When the PyO3 PyCapsule stream bridge lands
   (`crates/bidslake-py/src/lib.rs`), stream Arrow batches so `get()` is O(1) memory.
 
-- [ ] **Fully convert `db.rs`/`dynamic.rs` to `anyhow`** (`eh-05` optional). Beyond the
-  call-site `.context()` already added, push table/path context inside the write layer. Requires
-  rewriting the two manual `duckdb::Error::ToSqlConversionFailure` constructions in
-  `crates/bidslake/src/schema/dynamic.rs`.
+- [x] **Fully convert `db.rs`/`dynamic.rs` to `anyhow`** (`eh-05`). Done alongside the SQL-error
+  collapse above, since both were the same bug wearing different clothes: an error that knew
+  what went wrong and threw it away.
+
+  There were **three** `ToSqlConversionFailure` constructions, not two — the entry missed
+  `db.rs::file_id_value`, the only one of them honestly named, though it still hid the value that
+  failed. The other two claimed an `io::Error(NotFound)` for a table absent from an in-memory
+  `HashMap`, which is neither I/O nor a conversion; they existed solely so the function could keep
+  returning `duckdb::Result`, and converting the signatures removed the reason for them.
+
+  The context pushed inside is the part a call site cannot supply. `bids.rs` knows it is writing
+  `sidecars`; only the write layer knows *which row of how many*, the bound-value count, the row's
+  keys (bounded and key-only — a `sidecars` row is 451 columns and `other_data` can carry
+  participant data), and which stage of the upsert failed. `fs.rs` gained the same treatment for
+  the case that actually greets a mistyped `--input`: `No such file or directory (os error 2)`
+  now reads `walking /no/such/dataset`.
 
 - [x] **First-writer-wins `dataset_description` rows** (`eh-04`). Resolved by
   [ADR 0005](docs/adr/0005-multi-root-datasets.md) §5: a real `dataset_description.json` now

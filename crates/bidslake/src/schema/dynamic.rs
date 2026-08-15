@@ -51,7 +51,9 @@
 
 use super::ingestion::{Ingestion, Undeclared};
 use super::tabular::{RowIdentity, TableSpec, Tabular};
-use duckdb::{Connection, Result};
+use crate::db::duck;
+use anyhow::{Context as _, Result, anyhow};
+use duckdb::Connection;
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -1157,19 +1159,34 @@ impl Schema {
         statements: &HashMap<String, String>,
     ) -> Result<()> {
         // Use the statement built once at load time.
-        let sql = statements.get(table_name).ok_or_else(|| {
-            duckdb::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("No insert statement for table {}", table_name),
-            )))
-        })?;
+        // Was a `duckdb::Error::ToSqlConversionFailure` wrapping a fabricated
+        // `io::Error(NotFound)` -- an I/O error for a table that is missing from an
+        // in-memory map, which is neither I/O nor a conversion. It typed as `duckdb::Result`
+        // and that was its only reason to exist.
+        let sql = statements
+            .get(table_name)
+            .ok_or_else(|| anyhow!("no insert statement for table {table_name}"))?;
         let params = self.row_values(table_name, data)?;
         // Convert Option<Value> to &dyn ToSql
         let params_refs: Vec<&dyn duckdb::ToSql> =
             params.iter().map(|p| p as &dyn duckdb::ToSql).collect();
         // prepare_cached reuses the compiled plan across every row of this table.
-        let mut stmt = conn.prepare_cached(sql)?;
-        stmt.execute(params_refs.as_slice())?;
+        let mut stmt = conn
+            .prepare_cached(sql)
+            .map_err(duck)
+            .with_context(|| format!("preparing insert into {table_name}"))?;
+        // The context a call site cannot supply: it knows it is writing `sidecars`, not
+        // which of the row's values DuckDB rejected. Naming the column count and the
+        // offending row's keys turns "Conversion Error" into something locatable.
+        stmt.execute(params_refs.as_slice())
+            .map_err(duck)
+            .with_context(|| {
+                format!(
+                    "inserting a row into {table_name} ({} bound values; keys: {})",
+                    params_refs.len(),
+                    summarize_keys(data),
+                )
+            })?;
         Ok(())
     }
 
@@ -1183,12 +1200,10 @@ impl Schema {
         table_name: &str,
         data: &Value,
     ) -> Result<Vec<Option<duckdb::types::Value>>> {
-        let fields = self.table_columns.get(table_name).ok_or_else(|| {
-            duckdb::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("Table {} not found in schema", table_name),
-            )))
-        })?;
+        let fields = self
+            .table_columns
+            .get(table_name)
+            .ok_or_else(|| anyhow!("table {table_name} not found in schema"))?;
 
         // Which source keys have a dedicated column. Case-insensitive, and precomputed
         // per table rather than rebuilt per row — see `declares` for why both matter.
@@ -1546,4 +1561,36 @@ pub(crate) fn to_snake_case(s: &str) -> String {
         }
     }
     normalized
+}
+
+/// A few of a row's keys, for an error message.
+///
+/// The row itself is the wrong thing to put in an error: a `sidecars` row is 451 columns
+/// wide and a `scans` row can carry an arbitrary `other_data` blob, so printing it buries
+/// the message and can leak participant data into a log. The keys are enough to identify
+/// which row failed, and are bounded.
+fn summarize_keys(data: &Value) -> String {
+    const MAX: usize = 8;
+    let Some(obj) = data.as_object() else {
+        return format!("<{}>", type_name(data));
+    };
+    let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    let shown = keys.len().min(MAX);
+    let mut out = keys[..shown].join(", ");
+    if keys.len() > shown {
+        out.push_str(&format!(", … {} more", keys.len() - shown));
+    }
+    out
+}
+
+fn type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
