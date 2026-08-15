@@ -42,7 +42,7 @@
           "items": {
             "type": "string"
           },
-          "description": "BIDS selector expressions over the file's projected concepts; all must pass for the rule to apply."
+          "description": "BIDS selector expressions over the file's projected concepts; all must pass for the rule to apply. Regex escapes inside `match(x, \"...\")` take ONE backslash: the expression compiler doubles backslashes before parsing, so a JS string literal's own unescaping hands the regex what was written. Pre-doubling yields a pattern matching a literal backslash \u2014 still a valid regex, so the rule loads and then never fires. A term map's `Template` is compiled as a regex directly and is NOT doubled; the two conventions differ."
         },
         "disposition": {
           "description": "What bidslake does with a matched file.",
