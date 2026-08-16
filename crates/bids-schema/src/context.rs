@@ -1,21 +1,23 @@
 //! The per-file selector context used to evaluate BIDS schema expressions.
 //!
-//! [`build_file_context`] produces the single `{ path, extension, suffix, datatype, modality,
-//! entities }` object that both the validator and bidslake feed to
-//! [`expression::do_selectors_select`](crate::expression::do_selectors_select) — one builder
-//! instead of a copy in each consumer.
+//! [`FileContext`] is everything about a file that follows from its name, its path and the
+//! schema — no I/O. Both the validator and bidslake derive one per file and then read the
+//! fields they need, rather than each re-deriving the same facts; and
+//! [`FileContext::to_selector_value`] renders the single `{ path, extension, suffix, datatype,
+//! modality, entities }` object they feed to
+//! [`expression::do_selectors_select`](crate::expression::do_selectors_select).
+//!
+//! The lookups that derivation needs depend only on the schema, so they live in
+//! [`SchemaIndex`], built once and passed in.
 
-use crate::datatypes::{find_datatype, find_modality};
-use bids_core::entities::{read_entities, resolve_entities};
+use bids_core::entities::{BidsFileParts, read_entities, resolve_entities};
 use bids_core::filetree::BidsFile;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Map each entity's abbreviation (`entity`, falling back to `name`) → its schema object-key,
 /// from `schema.objects.entities`. e.g. `"sub" → "subject"`. Used to lift a filename's raw
-/// entity keys into the schema's namespace, matching the reference validator. Public so the
-/// validator can populate its own `entity_name_to_key` from this single derivation rather than
-/// re-deriving the same mapping from its parsed entity list.
+/// entity keys into the schema's namespace, matching the reference validator.
 pub fn entity_name_to_key(schema: &Value) -> HashMap<String, String> {
     let mut map = HashMap::new();
     if let Some(ents) = schema
@@ -36,29 +38,237 @@ pub fn entity_name_to_key(schema: &Value) -> HashMap<String, String> {
     map
 }
 
-/// Build the file-level selector context for `file` against `schema` (the raw schema JSON).
+/// The schema-derived lookups [`FileContext::derive`] needs, in a form that answers in one hash
+/// probe.
 ///
-/// `name_to_key` is the entity-abbreviation → schema-key map from [`entity_name_to_key`]. It
-/// depends only on the schema, not the file, so callers compute it **once** and pass it in for
-/// every file rather than rebuilding it per file. `entities` are resolved into the schema's key
-/// namespace (e.g. `subject`, not `sub`); the shared `dataset`/`schema`/`subject` scopes are left
-/// to the caller's [`crate::expression::EvalContext`].
-pub fn build_file_context(
-    file: &BidsFile,
-    schema: &Value,
-    name_to_key: &HashMap<String, String>,
-) -> Value {
-    let parts = read_entities(&file.name);
-    let entities = resolve_entities(&parts.entities, name_to_key);
-    let datatype = find_datatype(&file.path, schema);
-    let modality = datatype.as_deref().and_then(|dt| find_modality(dt, schema));
+/// Every field depends only on the schema, never on the file, so callers build this **once**
+/// and pass it in for every file rather than re-walking the schema JSON per file. Without it,
+/// each file costs two B-tree descents for its datatype and a linear scan of `rules.modalities`
+/// for its modality.
+#[derive(Debug, Clone)]
+pub struct SchemaIndex {
+    entity_name_to_key: HashMap<String, String>,
+    datatypes: HashSet<String>,
+    datatype_to_modality: HashMap<String, String>,
+}
 
-    json!({
-        "path": file.path,
-        "extension": parts.extension,
-        "suffix": parts.suffix,
-        "datatype": datatype,
-        "modality": modality,
-        "entities": entities,
-    })
+impl SchemaIndex {
+    /// Derive the lookups from the raw schema JSON.
+    pub fn new(schema: &Value) -> Self {
+        let datatypes: HashSet<String> = crate::datatypes::datatypes(schema).into_iter().collect();
+
+        // A datatype listed under more than one modality resolves to the first modality in
+        // iteration order, which is what `find_modality`'s scan returns. `serde_json::Map` is a
+        // `BTreeMap` here (the workspace does not enable `preserve_order`), so that order is
+        // alphabetical by modality name and `or_insert` reproduces it exactly.
+        let mut datatype_to_modality = HashMap::new();
+        if let Some(mods) = schema
+            .get("rules")
+            .and_then(|r| r.get("modalities"))
+            .and_then(|m| m.as_object())
+        {
+            for (mod_name, def) in mods {
+                let Some(dts) = def.get("datatypes").and_then(|d| d.as_array()) else {
+                    continue;
+                };
+                for dt in dts.iter().filter_map(|d| d.as_str()) {
+                    datatype_to_modality
+                        .entry(dt.to_string())
+                        .or_insert_with(|| mod_name.clone());
+                }
+            }
+        }
+
+        Self {
+            entity_name_to_key: entity_name_to_key(schema),
+            datatypes,
+            datatype_to_modality,
+        }
+    }
+
+    /// The entity abbreviation → schema-key map, e.g. `"sub" → "subject"`.
+    pub fn entity_name_to_key(&self) -> &HashMap<String, String> {
+        &self.entity_name_to_key
+    }
+
+    /// The schema's datatype directory names (`anat`, `func`, `eeg`, …).
+    pub fn datatypes(&self) -> &HashSet<String> {
+        &self.datatypes
+    }
+
+    /// The datatype `path` sits in, if its immediate parent directory names one. Borrowed from
+    /// `path`; the equivalent of [`crate::datatypes::find_datatype`] without the per-call
+    /// schema walk.
+    pub fn datatype<'a>(&self, path: &'a str) -> Option<&'a str> {
+        bids_core::datatype::parent_datatype(path, &self.datatypes)
+    }
+
+    /// The modality owning `datatype`. The equivalent of [`crate::datatypes::find_modality`]
+    /// without the scan.
+    pub fn modality(&self, datatype: &str) -> Option<&str> {
+        self.datatype_to_modality.get(datatype).map(String::as_str)
+    }
+}
+
+/// Everything about a file that follows from its name, its path and the schema — no I/O.
+///
+/// Derived **once** per file. The caller reads the typed fields it needs and renders the
+/// selector subset with [`to_selector_value`](Self::to_selector_value); deriving the facts a
+/// second time to build that JSON is the bug this type exists to prevent.
+#[derive(Debug, Clone)]
+pub struct FileContext {
+    /// The file's path relative to the dataset root.
+    pub path: String,
+    /// The parsed filename: stem, suffix, extension, raw entities, and their order.
+    pub parts: BidsFileParts,
+    /// `parts.entities` lifted into the schema's key namespace (`subject`, not `sub`).
+    pub entities: HashMap<String, String>,
+    /// The datatype directory the file sits in, if it names a known datatype.
+    pub datatype: Option<String>,
+    /// The modality owning `datatype`.
+    pub modality: Option<String>,
+}
+
+impl FileContext {
+    /// Derive the facts for `file` against a pre-built [`SchemaIndex`].
+    pub fn derive(file: &BidsFile, index: &SchemaIndex) -> Self {
+        let datatype = index.datatype(&file.path).map(str::to_string);
+        let modality = datatype
+            .as_deref()
+            .and_then(|dt| index.modality(dt))
+            .map(str::to_string);
+        let parts = read_entities(&file.name);
+        let entities = resolve_entities(&parts.entities, index.entity_name_to_key());
+
+        Self {
+            path: file.path.clone(),
+            parts,
+            entities,
+            datatype,
+            modality,
+        }
+    }
+
+    /// The `{ path, extension, suffix, datatype, modality, entities }` object fed to
+    /// [`do_selectors_select`](crate::expression::do_selectors_select) — the *selector subset*
+    /// of these facts.
+    ///
+    /// Contrast the validator's `BidsContext::to_file_value`, which renders the full `file`
+    /// scope (sidecar, columns, headers, associations) once those have been read. The shared
+    /// `dataset`/`schema`/`subject` scopes are left to the caller's
+    /// [`EvalContext`](crate::expression::EvalContext).
+    pub fn to_selector_value(&self) -> Value {
+        json!({
+            "path": self.path,
+            "extension": self.parts.extension,
+            "suffix": self.parts.suffix,
+            "datatype": self.datatype,
+            "modality": self.modality,
+            "entities": self.entities,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::datatypes::{find_datatype, find_modality};
+    use std::path::PathBuf;
+
+    fn schema() -> Value {
+        serde_json::from_str(crate::SCHEMA_JSON).unwrap()
+    }
+
+    fn file(path: &str) -> BidsFile {
+        BidsFile {
+            name: path.rsplit('/').next().unwrap().to_string(),
+            path: path.to_string(),
+            absolute_path: PathBuf::new(),
+        }
+    }
+
+    /// The selector context's shape is a contract with every `meta.associations` and
+    /// `rules.checks` selector in the schema: the key names, the fact that entities arrive in
+    /// the schema's *key* namespace (`subject`, not `sub`), and — for a file outside a datatype
+    /// directory — that `datatype`/`modality` are present and **null** rather than absent.
+    /// `EvalContext::get` distinguishes those two (`Some(&Null)` vs `None`), and selectors such
+    /// as `datatype == "func"` see different things, so the null case is pinned deliberately.
+    #[test]
+    fn selector_value_shape_is_pinned() {
+        let index = SchemaIndex::new(&schema());
+
+        let bold = file("/sub-01/func/sub-01_task-rest_run-01_bold.nii.gz");
+        assert_eq!(
+            FileContext::derive(&bold, &index).to_selector_value(),
+            json!({
+                "path": "/sub-01/func/sub-01_task-rest_run-01_bold.nii.gz",
+                "extension": ".nii.gz",
+                "suffix": "bold",
+                "datatype": "func",
+                "modality": "mri",
+                "entities": { "subject": "01", "task": "rest", "run": "01" },
+            })
+        );
+
+        let desc = file("/dataset_description.json");
+        assert_eq!(
+            FileContext::derive(&desc, &index).to_selector_value(),
+            json!({
+                "path": "/dataset_description.json",
+                "extension": ".json",
+                "suffix": "description",
+                "datatype": null,
+                "modality": null,
+                "entities": {},
+            })
+        );
+
+        // `.bval` must survive as the extension intact — association resolution keys on it.
+        let bval = file("/sub-01/dwi/sub-01_dwi.bval");
+        assert_eq!(
+            FileContext::derive(&bval, &index).to_selector_value(),
+            json!({
+                "path": "/sub-01/dwi/sub-01_dwi.bval",
+                "extension": ".bval",
+                "suffix": "dwi",
+                "datatype": "dwi",
+                "modality": "mri",
+                "entities": { "subject": "01" },
+            })
+        );
+    }
+
+    /// The index is a faster spelling of the schema-reading lookups, not a different answer.
+    #[test]
+    fn index_agrees_with_the_schema_reading_lookups() {
+        let s = schema();
+        let index = SchemaIndex::new(&s);
+
+        assert_eq!(index.entity_name_to_key(), &entity_name_to_key(&s));
+
+        for dt in crate::datatypes::datatypes(&s) {
+            assert_eq!(
+                index.modality(&dt),
+                find_modality(&dt, &s).as_deref(),
+                "modality disagreement on {dt}"
+            );
+        }
+
+        for path in [
+            "/sub-01/anat/sub-01_T1w.nii.gz",
+            "/sub-01/ses-1/eeg/sub-01_ses-1_task-x_eeg.vhdr",
+            "/derivatives/fmriprep/sub-01/anat/sub-01_desc-preproc_T1w.nii.gz",
+            "/anat/loose.nii.gz",
+            "/sub-01/anat/extra/nested.nii.gz",
+            "/sub-01/sub-01_scans.tsv",
+            "/dataset_description.json",
+            "/README",
+        ] {
+            assert_eq!(
+                index.datatype(path),
+                find_datatype(path, &s).as_deref(),
+                "datatype disagreement on {path}"
+            );
+        }
+    }
 }

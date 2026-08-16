@@ -24,7 +24,7 @@ pub fn check_entity_rules(context: &BidsContext, schema: &BidsSchema, issues: &m
     let file_path = &context.path;
 
     let schema_entities = &schema.entities;
-    let name_to_key = &schema.entity_name_to_key;
+    let name_to_key = schema.index.entity_name_to_key();
     let rules_entities = &schema.entity_order;
 
     let mut last_schema_index: Option<usize> = None;

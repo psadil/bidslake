@@ -1694,7 +1694,7 @@ impl BidsParser {
         let kind = kind_of(
             rel_path,
             &extension,
-            parent_datatype(rel_path, &self.datatypes),
+            bids_core::datatype::parent_datatype(rel_path, &self.datatypes),
         );
 
         // JSON (sidecars + `dataset_description.json`) is handled directly: it is neither
@@ -2873,22 +2873,24 @@ impl BidsParser {
     /// either, so a structural association's `target_file_id` is never NULL.
     fn resolve_structural_associations(&self) -> Vec<PendingAssociation> {
         let tree = FileTree::from_paths("", self.registered_paths());
-        let schema = self.schema.raw();
         let meta_assoc = self.schema.associations();
-        // The entity abbreviation→key map depends only on the schema, so derive it once here
-        // instead of rebuilding it inside `build_file_context` for every file in the tree.
-        let name_to_key = bids_schema::context::entity_name_to_key(schema);
+        // The entity, datatype and modality lookups depend only on the schema, so derive them
+        // once here rather than re-walking the schema JSON for every file in the tree.
+        let index = bids_schema::context::SchemaIndex::new(self.schema.raw());
 
         let mut out = Vec::new();
         for file in tree.walk_files() {
+            let file_ctx = bids_schema::context::FileContext::derive(file, &index);
             // Only data files (inside a datatype directory) can be association sources; skipping
             // the rest avoids evaluating selectors on `dataset_description.json`, READMEs, etc.
-            if bids_schema::datatypes::find_datatype(&file.path, schema).is_none() {
+            // Filtering here rather than before the derive keeps one entry point: the derive is
+            // string work, and the selectors — the expensive part — are still skipped.
+            if file_ctx.datatype.is_none() {
                 continue;
             }
-            let file_ctx = bids_schema::context::build_file_context(file, schema, &name_to_key);
+            let ctx_value = file_ctx.to_selector_value();
             for h in
-                bids_schema::associations::resolve_associations(meta_assoc, file, &tree, &file_ctx)
+                bids_schema::associations::resolve_associations(meta_assoc, file, &tree, &ctx_value)
             {
                 out.push(PendingAssociation {
                     source_file: file.path.trim_start_matches('/').to_string(),
@@ -3472,32 +3474,18 @@ fn kind_of(rel_path: &str, extension: &str, datatype: Option<&str>) -> Kind {
     }
 }
 
-/// The datatype a BIDS-named file gets from its position: its **immediate** parent directory.
-///
-/// Deliberately narrower than [`BidsParser::datatype_dir_in_path`], which accepts a datatype
-/// anywhere in the path — `sub-01/anat/extra/nested.nii.gz` is not a data file. Matches
-/// [`bids_schema::datatypes::find_datatype`]'s rule. `datatypes` is the schema's datatype set,
-/// cached once per parser rather than re-walked out of the schema JSON for every file.
-fn parent_datatype<'a>(rel_path: &'a str, datatypes: &HashSet<String>) -> Option<&'a str> {
-    let mut components = rel_path.rsplit('/').filter(|s| !s.is_empty());
-    components.next(); // the file itself
-    components
-        .next()
-        .filter(|parent| datatypes.contains(*parent))
-}
-
 /// Whether a file is a primary BIDS **data file**.
 ///
 /// Superseded by [`kind_of`], and kept as its executable specification: the test
-/// `kind_of_agrees_with_is_datafile` asserts the two agree over every path in the corpus, the
-/// same device as `is_datafile_agrees_with_find_datatype`. Do not call from ingest.
+/// `kind_of_agrees_with_is_datafile` asserts the two agree over every path in the corpus.
+/// Do not call from ingest.
 #[cfg(test)]
 fn is_datafile(rel_path: &str, extension: &str, datatypes: &HashSet<String>) -> bool {
     const COMPANION_EXTS: &[&str] = &[".json", ".tsv", ".tsv.gz", ".bval", ".bvec"];
     if COMPANION_EXTS.contains(&extension) {
         return false;
     }
-    parent_datatype(rel_path, datatypes).is_some()
+    bids_core::datatype::parent_datatype(rel_path, datatypes).is_some()
 }
 
 /// Compile `.bidsignore` file content into a [`Gitignore`] matcher.
@@ -3749,51 +3737,9 @@ mod tests {
         }
     }
 
-    /// `is_datafile` consults a cached datatype set rather than re-walking the schema JSON per
-    /// file, so it reimplements `find_datatype`'s parent-directory rule. Pin the two together:
-    /// a divergence would silently change which files earn a `scans` row.
-    #[test]
-    fn is_datafile_agrees_with_find_datatype() {
-        use super::is_datafile;
-        let schema: serde_json::Value = serde_json::from_str(bids_schema::SCHEMA_JSON).unwrap();
-        let datatypes: std::collections::HashSet<String> = schema["objects"]["datatypes"]
-            .as_object()
-            .unwrap()
-            .keys()
-            .cloned()
-            .collect();
-
-        for path in [
-            "sub-01/anat/sub-01_T1w.nii.gz",
-            "sub-01/func/sub-01_task-rest_bold.nii.gz",
-            "sub-01/ses-1/eeg/sub-01_ses-1_task-x_eeg.vhdr",
-            "sub-01/meg/sub-01_task-x_meg.ds",
-            "derivatives/fmriprep/sub-01/anat/sub-01_desc-preproc_T1w.nii.gz",
-            // Not a datatype directory, or the datatype is not the *parent*.
-            "sub-01/sub-01_scans.tsv",
-            "dataset_description.json",
-            "README",
-            "sub-01/anat/extra/nested.nii.gz",
-            "anat/loose.nii.gz",
-        ] {
-            let ext = match path.rfind('.') {
-                Some(_) if path.ends_with(".nii.gz") => ".nii.gz",
-                Some(i) => &path[i..],
-                None => "",
-            };
-            let by_schema = bids_schema::datatypes::find_datatype(path, &schema).is_some()
-                && ext != ".json"
-                && ext != ".tsv"
-                && ext != ".tsv.gz"
-                && ext != ".bval"
-                && ext != ".bvec";
-            assert_eq!(
-                is_datafile(path, ext, &datatypes),
-                by_schema,
-                "disagreement on {path}"
-            );
-        }
-    }
+    // `is_datafile_agrees_with_find_datatype` lived here, pinning this crate's own copy of the
+    // datatype-directory rule against `find_datatype`'s. Both now call the one implementation
+    // in `bids_core::datatype`, and its cases went with it.
 
     /// `kind_of` replaced `is_datafile` plus the two hardcoded JSON arms of `process_file`.
     /// `is_datafile` is kept as its executable specification: `Kind::Data` must hold exactly
@@ -3801,7 +3747,7 @@ mod tests {
     /// divergence would silently change which files count as data files.
     #[test]
     fn kind_of_agrees_with_is_datafile() {
-        use super::{Kind, is_datafile, kind_of, parent_datatype};
+        use super::{Kind, is_datafile, kind_of};
         let schema: serde_json::Value = serde_json::from_str(bids_schema::SCHEMA_JSON).unwrap();
         let datatypes: std::collections::HashSet<String> = schema["objects"]["datatypes"]
             .as_object()
@@ -3813,7 +3759,11 @@ mod tests {
         let check = |rel: &str| {
             let name = rel.rsplit('/').next().unwrap_or(rel);
             let ext = bids_core::entities::read_entities(name).extension;
-            let kind = kind_of(rel, &ext, parent_datatype(rel, &datatypes));
+            let kind = kind_of(
+                rel,
+                &ext,
+                bids_core::datatype::parent_datatype(rel, &datatypes),
+            );
             assert_eq!(
                 kind == Kind::Data,
                 is_datafile(rel, &ext, &datatypes),

@@ -18,10 +18,26 @@ as issues. Roughly ordered by value.
   (now documented in the docstring). When the PyO3 PyCapsule stream bridge lands
   (`crates/bidslake-py/src/lib.rs`), stream Arrow batches so `get()` is O(1) memory.
 
-- [ ] **Validator double-compute of datatype/modality/entities** (`dup-04`). Optional, low value:
-  `crates/bids-validator-rs/src/context.rs` derives the core selector fields once for its struct
-  and again via `build_file_context`. Fixing it re-introduces hand-assembly or needs a
-  precomputed-inputs `build_file_context` variant, to save three cheap in-memory calls.
+- [ ] **A per-file subject-directory lookup whose result is discarded.**
+  `crates/bids-validator-rs/src/context.rs` builds `subject_dir` with `format!("sub-{}", …)` and
+  then linear-scans the root's subdirectories via `find_dir` (`bids-core/src/filetree.rs`, a pure
+  `iter().find`) — and drops both; the binding is `let _subject`. The root's subdirectories *are*
+  the `sub-*` dirs, so this is O(files × subjects) of thrown-away string comparison: ~10⁸
+  comparisons on a 1000-subject, 100k-file dataset, for nothing. It is a vestige of the
+  unfinished `subject` scope, whose actual expression binding is the stub
+  `DatasetContext::subject_context_value` (empty `ses_dirs`, null `session_id`). Deleting the two
+  lines is behaviour-preserving; finishing the `subject` scope is the larger question, and this
+  should not wait on it.
+
+- [ ] **Two raw-schema datatype lookups that per-file loops no longer need.** `find_datatype`
+  now has a table-driven twin — `bids_core::datatype::parent_datatype`, reached via
+  `bids_schema::context::SchemaIndex` — and every per-file path uses it. Two callers still read
+  the schema JSON per call, both deliberately: `DatasetContext::new` walks the whole tree to
+  collect the dataset's datatype *set*, and `BidsParser::process_intended_for` holds only
+  `self.schema.raw()`. Neither is worth an index today — the dataset walk is fused into a loop
+  that already clones every path, so `find_datatype` is not its cost, and it covers a wider file
+  set than the per-file pass (it runs before `opaque_dirs` filtering). Revisit if `BidsParser`
+  grows a `SchemaIndex` for some other reason, or if a profile ever puts either on a hot path.
 
 - [ ] **Enforced referential integrity for the concept columns?** `all_files.sub`/`ses` cannot be
   foreign keys as built: they are select items of a *view* now (ADR 0006 §3) rather than the

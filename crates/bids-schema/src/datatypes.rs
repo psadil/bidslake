@@ -8,20 +8,20 @@ use serde_json::Value;
 /// The datatype of a file: the directory name directly above it, if that name is a known
 /// datatype (`schema.objects.datatypes`). e.g. `/sub-01/anat/sub-01_T1w.nii.gz` → `anat`;
 /// `/dataset_description.json` and `/participants.tsv` → `None`.
+///
+/// The path half of the rule is [`bids_core::datatype::parent_dir`] — the one place it is
+/// spelled. This form reads the datatype set out of the schema on every call, which suits a
+/// caller holding only the raw schema and looking up a handful of paths. A per-file loop should
+/// derive the set once and use [`bids_core::datatype::parent_datatype`] instead (which is what
+/// [`crate::context::SchemaIndex`] does).
 pub fn find_datatype(path: &str, schema: &Value) -> Option<String> {
-    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    if parts.len() < 2 {
-        return None;
-    }
-    let parent = parts[parts.len() - 2];
-    let known = schema
+    let parent = bids_core::datatype::parent_dir(path)?;
+    schema
         .get("objects")
         .and_then(|o| o.get("datatypes"))
-        .and_then(|d| d.as_object());
-    match known {
-        Some(dts) if dts.contains_key(parent) => Some(parent.to_string()),
-        _ => None,
-    }
+        .and_then(|d| d.as_object())
+        .filter(|dts| dts.contains_key(parent))
+        .map(|_| parent.to_string())
 }
 
 /// The modality whose `datatypes` list (`schema.rules.modalities`) contains `dt_name`
@@ -129,5 +129,33 @@ mod tests {
         let s = schema();
         assert_eq!(find_modality("anat", &s), Some("mri".to_string()));
         assert_eq!(find_modality("func", &s), Some("mri".to_string()));
+    }
+
+    /// The schema-reading form and the set-reading form are the same rule, so they must agree
+    /// everywhere. This replaces bidslake's `is_datafile_agrees_with_find_datatype`, which
+    /// pinned a *second* implementation of the rule; there is only one now, and this asserts
+    /// that the two entry points onto it stay interchangeable.
+    #[test]
+    fn find_datatype_agrees_with_parent_datatype() {
+        let s = schema();
+        let set: std::collections::HashSet<String> = datatypes(&s).into_iter().collect();
+        for path in [
+            "sub-01/anat/sub-01_T1w.nii.gz",
+            "sub-01/func/sub-01_task-rest_bold.nii.gz",
+            "sub-01/ses-1/eeg/sub-01_ses-1_task-x_eeg.vhdr",
+            "sub-01/meg/sub-01_task-x_meg.ds",
+            "derivatives/fmriprep/sub-01/anat/sub-01_desc-preproc_T1w.nii.gz",
+            "anat/loose.nii.gz",
+            "sub-01/anat/extra/nested.nii.gz",
+            "sub-01/sub-01_scans.tsv",
+            "dataset_description.json",
+            "README",
+        ] {
+            assert_eq!(
+                find_datatype(path, &s).as_deref(),
+                bids_core::datatype::parent_datatype(path, &set),
+                "disagreement on {path}"
+            );
+        }
     }
 }

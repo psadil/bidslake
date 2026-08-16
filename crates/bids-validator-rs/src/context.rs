@@ -5,7 +5,6 @@
 //! the `meta.context` structure defined in the BIDS schema.
 
 use crate::associations::{BidsAssociations, CoordsystemsAssociation};
-use crate::entities::{read_entities, resolve_entities};
 use crate::files::bval::{BFileMeta, parse_bfile_meta_from_file};
 use crate::files::json::load_json;
 use crate::files::nifti::NiftiHeader;
@@ -17,6 +16,7 @@ use crate::inheritance::SidecarOverride;
 use crate::inheritance::read_sidecars;
 use crate::issues::DatasetIssues;
 use crate::schema::BidsSchema;
+use bids_schema::context::FileContext;
 use bids_schema::datatypes::{find_datatype, find_modality};
 use hed_validator_rs::schema::{SchemaCollection, load_schema_version};
 use serde::Serialize;
@@ -306,19 +306,16 @@ impl BidsContext {
         // The walk no longer `stat`s every entry to carry a size — ingestion never
         // reads it, and validation is the one consumer, once per file, here.
         let size = file.size_bytes();
-        let file_parts = read_entities(&file.name);
-        let entities = resolve_entities(&file_parts.entities, &schema.entity_name_to_key);
-        let datatype = find_datatype(&file.path, &schema.raw);
-        let modality = datatype
-            .as_ref()
-            .and_then(|dt| find_modality(dt, &schema.raw));
+        // Derived once: these same facts render the selector context that resolves this file's
+        // associations further down, and then become this struct's fields.
+        let file_ctx = FileContext::derive(file, &schema.index);
 
         // Read sidecar metadata via inheritance. A `.json` file has no sidecar of its own —
         // its contents are bound to `json`, not `sidecar`. Without this guard a sidecar's own
         // keys would satisfy `sidecar.*` selectors and the file would be reported alongside the
         // data file it describes (mirrors the TS validator's `loadSidecar` early return,
         // lib/bids-validator/src/schema/context.ts:200-204).
-        let (sidecar, sidecar_overrides) = if file_parts.extension == ".json" {
+        let (sidecar, sidecar_overrides) = if file_ctx.parts.extension == ".json" {
             (Value::Object(Default::default()), Vec::new())
         } else {
             read_sidecars(file, &dataset.tree).await
@@ -328,18 +325,18 @@ impl BidsContext {
         // columns are declared in the sidecar `Columns` field. An empty file has no columns to
         // check — reporting on names we never read would be unsound, and `EMPTY_FILE` already
         // covers it (mirrors the TS validator, context.ts:270-276).
-        let columns = if file_parts.extension == ".tsv" {
+        let columns = if file_ctx.parts.extension == ".tsv" {
             crate::files::tsv::load_tsv_columns(file)
                 .await
                 .unwrap_or_default()
-        } else if file_parts.extension == ".tsv.gz" && size != 0 {
+        } else if file_ctx.parts.extension == ".tsv.gz" && size != 0 {
             columns_from_sidecar(&sidecar)
         } else {
             HashMap::new()
         };
 
         // Read JSON contents if applicable
-        let json = if file_parts.extension == ".json" {
+        let json = if file_ctx.parts.extension == ".json" {
             let mut j = load_json(file).await.unwrap_or(Value::Null);
             // For dataset_description.json, default `DatasetType` (matching the TS validator) so
             // the recommended-field check doesn't flag it — but only when the file actually
@@ -361,18 +358,20 @@ impl BidsContext {
         };
 
         // Read NIfTI header if applicable
-        let nifti_header = if file_parts.extension == ".nii" || file_parts.extension == ".nii.gz" {
-            load_nifti_header(file).await
-        } else {
-            None
-        };
+        let nifti_header =
+            if file_ctx.parts.extension == ".nii" || file_ctx.parts.extension == ".nii.gz" {
+                load_nifti_header(file).await
+            } else {
+                None
+            };
 
         // Read bfile meta if applicable
-        let bfile_meta = if file_parts.extension == ".bval" || file_parts.extension == ".bvec" {
-            parse_bfile_meta_from_file(file).await
-        } else {
-            None
-        };
+        let bfile_meta =
+            if file_ctx.parts.extension == ".bval" || file_ctx.parts.extension == ".bvec" {
+                parse_bfile_meta_from_file(file).await
+            } else {
+                None
+            };
 
         // Read gzip header if applicable
         let gzip = if file.name.ends_with(".gz") {
@@ -384,24 +383,28 @@ impl BidsContext {
         };
 
         // Read TIFF / OME-TIFF header if applicable
-        let (tiff, ome) =
-            if file_parts.extension.ends_with(".tif") || file_parts.extension.ends_with(".btf") {
-                parse_tiff(file, file_parts.extension.starts_with(".ome")).await
-            } else {
-                (None, None)
-            };
+        let (tiff, ome) = if file_ctx.parts.extension.ends_with(".tif")
+            || file_ctx.parts.extension.ends_with(".btf")
+        {
+            parse_tiff(file, file_ctx.parts.extension.starts_with(".ome")).await
+        } else {
+            (None, None)
+        };
 
         // Build subject context
-        let subject_dir = entities.get("subject").map(|s| format!("sub-{}", s));
+        let subject_dir = file_ctx
+            .entities
+            .get("subject")
+            .map(|s| format!("sub-{}", s));
         let _subject = subject_dir
             .as_ref()
             .and_then(|sd| dataset.tree.find_dir(sd));
 
         // Resolve the schema's `meta.associations` for this file via the shared, pure resolver
         // in `bids-schema` (selector eval + tree search, no content reads), then build the typed
-        // `BidsAssociations` on top (the content reads stay here).
-        let ctx_value =
-            bids_schema::context::build_file_context(file, &schema.raw, &schema.entity_name_to_key);
+        // `BidsAssociations` on top (the content reads stay here). The selector context is
+        // rendered from the facts derived at the top of this function, not derived a second time.
+        let ctx_value = file_ctx.to_selector_value();
         let hits = bids_schema::associations::resolve_associations(
             schema.associations(),
             file,
@@ -432,16 +435,16 @@ impl BidsContext {
         }
 
         BidsContext {
-            path: file.path.clone(),
+            path: file_ctx.path,
             size,
-            raw_entities: file_parts.entities,
-            entities,
-            entity_keys: file_parts.entity_keys,
-            datatype,
-            suffix: file_parts.suffix,
-            extension: file_parts.extension,
-            stem: file_parts.stem,
-            modality,
+            raw_entities: file_ctx.parts.entities,
+            entities: file_ctx.entities,
+            entity_keys: file_ctx.parts.entity_keys,
+            datatype: file_ctx.datatype,
+            suffix: file_ctx.parts.suffix,
+            extension: file_ctx.parts.extension,
+            stem: file_ctx.parts.stem,
+            modality: file_ctx.modality,
             sidecar,
             sidecar_overrides,
             associations,

@@ -14,6 +14,7 @@ use crate::rules::files::FilesRules;
 use crate::rules::json::JsonNode;
 use crate::rules::sidecars::SidecarNode;
 use crate::rules::tabular_data::TabularNode;
+use bids_schema::context::SchemaIndex;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
@@ -51,16 +52,14 @@ pub struct BidsSchema {
 
     /// Entity definitions from `schema.objects.entities`, keyed by entity name.
     pub entities: HashMap<String, EntityDef>,
-    /// Map from entity literal name to schema key, e.g. `"sub" -> "subject"`.
-    pub entity_name_to_key: HashMap<String, String>,
     /// Map from entity schema key to literal name, e.g. `"subject" -> "sub"`.
     pub entity_key_to_name: HashMap<String, String>,
     /// Entity ordering from `schema.rules.entities`.
     pub entity_order: Vec<String>,
-    /// The datatype values from `schema.objects.datatypes` (e.g. `["anat", "func", …]`).
-    pub known_datatypes: Vec<String>,
-    /// Modality → datatypes table from `schema.rules.modalities`.
-    pub modalities: HashMap<String, ModalityDef>,
+    /// The schema-derived lookups the per-file derivation needs — entity abbreviation → key,
+    /// the datatype set, and datatype → modality. Built once here so `BidsContext::new` never
+    /// re-walks the schema JSON per file.
+    pub index: SchemaIndex,
 }
 
 impl BidsSchema {
@@ -157,12 +156,10 @@ impl BidsSchema {
             .iter()
             .map(|(k, v)| (k.clone(), v.name.clone()))
             .collect();
-        // Reuse the shared derivation in bids-schema (single source of truth) rather
-        // than re-deriving the abbreviation→key map from the parsed entity list.
-        let entity_name_to_key = bids_schema::context::entity_name_to_key(&raw);
+        // Reuse the shared derivations in bids-schema (single source of truth) rather than
+        // re-deriving the abbreviation→key, datatype and modality tables here.
+        let index = SchemaIndex::new(&raw);
         let entity_order = Self::get_entity_order_from_raw(&raw);
-        let known_datatypes = Self::get_known_datatypes_from_raw(&raw);
-        let modalities = Self::get_modalities_from_raw(&raw);
 
         Ok(Self {
             raw,
@@ -177,11 +174,9 @@ impl BidsSchema {
             tabular_data_rules,
             error_rules,
             entities,
-            entity_name_to_key,
             entity_key_to_name,
             entity_order,
-            known_datatypes,
-            modalities,
+            index,
         })
     }
 
@@ -366,14 +361,6 @@ impl BidsSchema {
             .unwrap_or_default()
     }
 
-    /// Parse the modality → datatypes table from `schema.rules.modalities`.
-    fn get_modalities_from_raw(raw: &Value) -> HashMap<String, ModalityDef> {
-        raw.get("rules")
-            .and_then(|r| r.get("modalities"))
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default()
-    }
-
     /// Access `schema.rules.common_principles`.
     pub fn common_principles(&self) -> Vec<String> {
         self.rules()
@@ -385,21 +372,6 @@ impl BidsSchema {
     /// Access `schema.meta.associations`.
     pub fn associations(&self) -> &Value {
         self.meta().get("associations").unwrap_or(&Value::Null)
-    }
-
-    /// Get the list of datatypes for a given modality.
-    /// E.g. "mri" -> ["anat", "func", "dwi", ...]
-    pub fn datatypes_for_modality(&self, modality: &str) -> Vec<String> {
-        self.modalities
-            .get(modality)
-            .map(|m| m.datatypes.clone())
-            .unwrap_or_default()
-    }
-
-    /// The known datatype names from `raw`. Delegates to the shared owner in
-    /// `bids-schema` (single source of truth); datatype key == value in the schema.
-    fn get_known_datatypes_from_raw(raw: &Value) -> Vec<String> {
-        bids_schema::datatypes::datatypes(raw)
     }
 
     /// Get the set of pseudo-file extensions (extensions ending with `/`).
@@ -538,7 +510,7 @@ mod tests {
         assert_eq!(key_to_name.get("subject").map(|s| s.as_str()), Some("sub"));
         assert_eq!(key_to_name.get("session").map(|s| s.as_str()), Some("ses"));
 
-        let name_to_key = &schema.entity_name_to_key;
+        let name_to_key = schema.index.entity_name_to_key();
         assert_eq!(name_to_key.get("sub").map(|s| s.as_str()), Some("subject"));
         assert_eq!(name_to_key.get("ses").map(|s| s.as_str()), Some("session"));
     }
@@ -546,9 +518,9 @@ mod tests {
     #[test]
     fn test_known_datatypes() {
         let schema = BidsSchema::bundled().unwrap();
-        let datatypes = &schema.known_datatypes;
-        assert!(datatypes.contains(&"anat".to_string()));
-        assert!(datatypes.contains(&"func".to_string()));
+        let datatypes = schema.index.datatypes();
+        assert!(datatypes.contains("anat"));
+        assert!(datatypes.contains("func"));
     }
 
     #[test]
@@ -565,11 +537,6 @@ mod tests {
         let val = schema.resolve_path("rules.files.raw.anat.nonparametric");
         assert!(val.get("suffixes").is_some());
     }
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct ModalityDef {
-    pub datatypes: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
