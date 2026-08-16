@@ -18,19 +18,6 @@ as issues. Roughly ordered by value.
   (now documented in the docstring). When the PyO3 PyCapsule stream bridge lands
   (`crates/bidslake-py/src/lib.rs`), stream Arrow batches so `get()` is O(1) memory.
 
-- [ ] **The `subject` expression scope is a stub, and it is bound at the wrong altitude.**
-  `DatasetContext::subject_context_value` hands every file the same
-  `{ sessions: { ses_dirs: [], session_id: null } }`, so any schema rule selecting on
-  `subject.sessions.*` reads an empty answer rather than the file's own. But in the schema's
-  `meta.context`, `subject` is *the current file's* subject: a real binding reads `ses_dirs`
-  from that file's `sub-*` directory and `session_id` from that subject's `sessions.tsv`, which
-  makes it per-file state, not a dataset-wide binding built once in `validator.rs` beside
-  `dataset`/`schema`. The cheap shape is to resolve it per subject (there are few) and hand each
-  file the entry for its own — not per file, and not once for the dataset. Until then the stub is
-  silently permissive: rules gated on sessions never fire. Related: `DatasetContext.subjects`
-  already carries `sub_dirs` and `participants.tsv`'s `participant_id`, so half the inputs are
-  already collected.
-
 - [ ] **Enforced referential integrity for the concept columns?** `all_files.sub`/`ses` cannot be
   foreign keys as built: they are select items of a *view* now (ADR 0006 §3) rather than the
   generated columns of a table, and DuckDB refuses a foreign key on either. Making them keys

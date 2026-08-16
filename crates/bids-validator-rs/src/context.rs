@@ -62,22 +62,6 @@ pub struct SubjectsContext {
     pub participant_id: Option<Vec<String>>,
 }
 
-/// Per-subject context.
-#[derive(Debug, Clone, Serialize)]
-pub struct SubjectContext {
-    /// Session information for this subject.
-    pub sessions: SessionsContext,
-}
-
-/// Session information for a subject.
-#[derive(Debug, Clone, Serialize)]
-pub struct SessionsContext {
-    /// Session directories found (e.g. ["ses-01", "ses-02"]).
-    pub ses_dirs: Vec<String>,
-    /// session_id column from sessions.tsv, if present.
-    pub session_id: Option<Vec<String>>,
-}
-
 /// The full validation context for a single file.
 #[derive(Debug, Clone, Serialize)]
 pub struct BidsContext {
@@ -529,15 +513,26 @@ impl DatasetContext {
         })
     }
 
-    /// Build the `subject` binding shared by every file. Currently a stub: sessions are
-    /// not yet populated, so `subject.sessions.ses_dirs` is empty and `session_id` is null.
+    /// Build the `subject` binding. A deliberate stub — `ses_dirs` is empty and `session_id`
+    /// is null for every file — because **no expression in the schema reads it**.
     ///
-    /// Note the shape this stub commits to. `subject` is the *current file's* subject in the
-    /// schema's `meta.context`, so a real binding is per-file — it would read `ses_dirs` from
-    /// the file's own `sub-*` directory and `session_id` from that subject's `sessions.tsv` —
-    /// and would not be built here, once per dataset, at all. `BidsContext::new` used to reach
-    /// for exactly that (a `find_dir` on the file's subject whose result was then dropped);
-    /// that dead lookup is gone, and this is the stub it was groping toward.
+    /// `meta.context` declares the scope, so the binding exists to satisfy that shape, but a
+    /// sweep of all ~1200 selector and check expressions finds only `dataset.subjects.*` and
+    /// `entities.subject`; nothing references the `subject` scope itself, and none of the
+    /// `meta.expression_tests` do either. Populating it would mean scanning each `sub-*`
+    /// directory and reading one `sessions.tsv` per subject on every validation, to answer a
+    /// question nothing asks. Compare `dataset.datatypes`/`modalities`, which this validator
+    /// *does* populate where the reference leaves them empty — that was worth it because
+    /// `intersects(dataset.modalities, ["pet"])` is a real rule.
+    ///
+    /// The hazard is that a stub answers `[]` where a real binding would answer something, and
+    /// a selector cannot tell those apart. So the day the schema starts selecting on `subject`,
+    /// this must be implemented rather than silently evaluated against an empty stub —
+    /// `tests::no_schema_expression_reads_the_subject_scope` fails when that day comes.
+    ///
+    /// Implementing it means per-file state, not this dataset-wide value: `subject` is the
+    /// *current file's* subject. The cheap shape is to resolve once per subject (there are
+    /// few) and hand each file the entry for its own.
     pub fn subject_context_value(&self) -> Value {
         serde_json::json!({
             "sessions": {
@@ -545,5 +540,131 @@ impl DatasetContext {
                 "session_id": null,
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::Value;
+
+    /// Whether `expr` reads the top-level `subject` scope.
+    ///
+    /// Deliberately narrow, because the schema as it stands contains three lookalikes and a
+    /// bare substring search would leave the tripwire permanently red:
+    ///   - `dataset.subjects.sub_dirs` — a different scope, and a different word;
+    ///   - `entities.subject` — the file's subject *entity*, not the subject scope;
+    ///   - `exists(sidecar.IntendedFor, "subject")` — a quoted string naming the `subject`
+    ///     path-resolution rule (see `expression.rs`'s `exists`), not an identifier at all.
+    ///
+    /// So a match is `subject` as a whole identifier, nothing preceding it with a `.`, and not
+    /// wrapped in quotes.
+    fn reads_subject_scope(expr: &str) -> bool {
+        let bytes = expr.as_bytes();
+        let mut from = 0;
+        while let Some(offset) = expr[from..].find("subject") {
+            let start = from + offset;
+            let end = start + "subject".len();
+            let is_start_of_identifier = start == 0 || {
+                let prev = bytes[start - 1] as char;
+                !prev.is_alphanumeric() && prev != '_' && prev != '.'
+            };
+            let is_end_of_identifier = end >= bytes.len() || {
+                let next = bytes[end] as char;
+                !next.is_alphanumeric() && next != '_'
+            };
+            let is_quoted_literal = start > 0
+                && end < bytes.len()
+                && matches!(bytes[start - 1] as char, '"' | '\'')
+                && matches!(bytes[end] as char, '"' | '\'');
+            if is_start_of_identifier && is_end_of_identifier && !is_quoted_literal {
+                return true;
+            }
+            from = end;
+        }
+        false
+    }
+
+    /// Every expression string in the schema: the `selectors` and `checks` arrays of every
+    /// rule, wherever they appear, plus the `meta.expression_tests` expressions.
+    fn schema_expressions(schema: &Value) -> Vec<String> {
+        fn walk(node: &Value, out: &mut Vec<String>) {
+            match node {
+                Value::Object(map) => {
+                    for (key, value) in map {
+                        if matches!(key.as_str(), "selectors" | "checks")
+                            && let Some(items) = value.as_array()
+                        {
+                            out.extend(items.iter().filter_map(|v| v.as_str()).map(String::from));
+                        } else {
+                            walk(value, out);
+                        }
+                    }
+                }
+                Value::Array(items) => items.iter().for_each(|v| walk(v, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        walk(schema, &mut out);
+        out.extend(
+            schema
+                .get("meta")
+                .and_then(|m| m.get("expression_tests"))
+                .and_then(|t| t.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|t| t.get("expression").and_then(|e| e.as_str()))
+                .map(String::from),
+        );
+        out
+    }
+
+    /// `DatasetContext::subject_context_value` is a stub, and is only sound while nothing
+    /// reads it. This is the tripwire: when a schema update starts selecting on `subject`,
+    /// implement the binding rather than let the selector evaluate against an empty stub —
+    /// which it would do silently, since a selector cannot tell "no sessions" from "not
+    /// populated".
+    #[test]
+    fn no_schema_expression_reads_the_subject_scope() {
+        let schema: Value = serde_json::from_str(bids_schema::SCHEMA_JSON).unwrap();
+        let expressions = schema_expressions(&schema);
+
+        // Guard the guard: if the walk stops finding expressions, it would pass vacuously.
+        assert!(
+            expressions.len() > 1000,
+            "expected the schema's ~1200 expressions, found {} — the walk is looking in the \
+             wrong place, not the schema shrinking",
+            expressions.len()
+        );
+        assert!(
+            expressions.iter().any(|e| e.contains("dataset.subjects")),
+            "sanity: `dataset.subjects` should be present and must NOT count as a hit"
+        );
+
+        let readers: Vec<&String> = expressions
+            .iter()
+            .filter(|e| reads_subject_scope(e))
+            .collect();
+        assert!(
+            readers.is_empty(),
+            "the schema now reads the `subject` scope, which is still a stub \
+             (`ses_dirs: []`, `session_id: null`) — populate it per subject before these \
+             evaluate: {readers:#?}"
+        );
+    }
+
+    #[test]
+    fn reads_subject_scope_distinguishes_the_scope_from_its_lookalikes() {
+        assert!(reads_subject_scope("length(subject.sessions.ses_dirs) > 0"));
+        assert!(reads_subject_scope("subject.sessions.session_id"));
+        assert!(reads_subject_scope("type(subject) != 'null'"));
+        // The three forms that really are in the schema, none of which is the scope.
+        assert!(!reads_subject_scope(
+            "length(dataset.subjects.sub_dirs) > 0"
+        ));
+        assert!(!reads_subject_scope("entities.subject != \"emptyroom\""));
+        assert!(!reads_subject_scope(
+            "exists(sidecar.IntendedFor, \"subject\") == 1"
+        ));
     }
 }
