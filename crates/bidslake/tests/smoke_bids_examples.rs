@@ -11,8 +11,9 @@ use common::{all_datasets, count};
 
 /// Ingests every dataset in the corpus, so it takes minutes. Excluded from the
 /// default `cargo test` to keep iteration fast; run it explicitly with
-/// `cargo test --test smoke_bids_examples -- --ignored`, or in CI. The curated
-/// tests cover the common paths deeply on every run.
+/// `cargo test --test smoke_bids_examples -- --ignored`. CI runs bare
+/// `cargo test` and so does not run it either. The curated tests cover the
+/// common paths deeply on every run.
 #[ignore = "comprehensive: ingests the whole corpus; run with --ignored"]
 #[tokio::test]
 async fn ingest_every_bids_example() {
@@ -22,7 +23,7 @@ async fn ingest_every_bids_example() {
     let mut failures: Vec<String> = Vec::new();
 
     for (name, path) in &datasets {
-        match check_dataset(name, path).await {
+        match check_dataset(path).await {
             Ok(()) => {}
             Err(e) => failures.push(format!("  {name}: {e}")),
         }
@@ -38,7 +39,7 @@ async fn ingest_every_bids_example() {
 }
 
 /// Invariants that must hold for any successfully-ingested dataset.
-async fn check_dataset(name: &str, path: &std::path::Path) -> anyhow::Result<()> {
+async fn check_dataset(path: &std::path::Path) -> anyhow::Result<()> {
     let db = common::ingest(path)
         .await
         .map_err(|e| anyhow::anyhow!("parse failed: {e}"))?;
@@ -61,6 +62,5 @@ async fn check_dataset(name: &str, path: &std::path::Path) -> anyhow::Result<()>
         );
     }
 
-    let _ = name;
     Ok(())
 }

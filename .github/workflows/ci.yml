@@ -29,8 +29,9 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --all-targets -- -D warnings
       - name: cargo test
-        # Default-members only (excludes the maturin bidslake-py crate); the
-        # whole-corpus smoke test stays #[ignore] and does not run here.
+        # Default-members only (excludes the maturin bidslake-py crate). The
+        # whole-corpus tests — the bids-examples smoke test and the tabular
+        # coverage sweep — stay #[ignore] and do not run here.
         run: cargo test
 
   python:

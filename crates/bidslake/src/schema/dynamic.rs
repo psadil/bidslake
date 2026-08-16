@@ -1163,7 +1163,8 @@ impl Schema {
             .collect()
     }
 
-    #[allow(dead_code)]
+    /// The `CREATE TABLE` DDL generated for `table_name`, or `None` if it is not a
+    /// generated table. The schema-shape tests use it to assert what the generator emitted.
     pub fn get_create_sql(&self, table_name: &str) -> Option<&str> {
         self.table_definitions.get(table_name).map(String::as_str)
     }

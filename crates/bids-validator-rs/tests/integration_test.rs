@@ -164,7 +164,10 @@ async fn run_example(name: &str) {
 
     // Resolve HED library schemas from the vendored hed-schemas checkout when present, so HED
     // datasets validate offline and deterministically (falls back to cache/network otherwise).
-    let hed_dir = Path::new("lib/hed-validator-rs/tests/hed-schemas");
+    let hed_dir = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../hed-validator-rs/tests/hed-schemas"
+    ));
     if hed_dir.is_dir() {
         config.hed_schema_dir = Some(hed_dir.to_path_buf());
     }
