@@ -32,7 +32,7 @@ pub struct ResolvedAssociation {
 /// Resolve every `meta.associations` entry for `file` against `tree`.
 ///
 /// `meta_associations` is the schema's `meta.associations` object; `file_ctx` is the file-level
-/// selector context from [`crate::context::build_file_context`].
+/// selector context from [`crate::context::FileContext::to_selector_value`].
 pub fn resolve_associations(
     meta_associations: &Value,
     file: &BidsFile,
@@ -171,8 +171,8 @@ mod tests {
             )],
         );
 
-        let name_to_key = crate::context::entity_name_to_key(&schema);
-        let bold_ctx = crate::context::build_file_context(&bold, &schema, &name_to_key);
+        let index = crate::context::SchemaIndex::new(&schema);
+        let bold_ctx = crate::context::FileContext::derive(&bold, &index).to_selector_value();
         let bold_hits = resolve_associations(meta, &bold, &tree, &bold_ctx);
         assert!(
             bold_hits
@@ -182,7 +182,7 @@ mod tests {
             bold_hits.iter().map(|h| &h.name).collect::<Vec<_>>()
         );
 
-        let dwi_ctx = crate::context::build_file_context(&dwi, &schema, &name_to_key);
+        let dwi_ctx = crate::context::FileContext::derive(&dwi, &index).to_selector_value();
         let dwi_hits = resolve_associations(meta, &dwi, &tree, &dwi_ctx);
         assert!(
             dwi_hits.iter().any(|h| h.name == "bval"),

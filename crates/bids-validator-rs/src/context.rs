@@ -5,7 +5,6 @@
 //! the `meta.context` structure defined in the BIDS schema.
 
 use crate::associations::{BidsAssociations, CoordsystemsAssociation};
-use crate::entities::{read_entities, resolve_entities};
 use crate::files::bval::{BFileMeta, parse_bfile_meta_from_file};
 use crate::files::json::load_json;
 use crate::files::nifti::NiftiHeader;
@@ -17,7 +16,7 @@ use crate::inheritance::SidecarOverride;
 use crate::inheritance::read_sidecars;
 use crate::issues::DatasetIssues;
 use crate::schema::BidsSchema;
-use bids_schema::datatypes::{find_datatype, find_modality};
+use bids_schema::context::FileContext;
 use hed_validator_rs::schema::{SchemaCollection, load_schema_version};
 use serde::Serialize;
 use serde_json::Value;
@@ -61,22 +60,6 @@ pub struct SubjectsContext {
     pub sub_dirs: Vec<String>,
     /// participant_id column from participants.tsv, if present.
     pub participant_id: Option<Vec<String>>,
-}
-
-/// Per-subject context.
-#[derive(Debug, Clone, Serialize)]
-pub struct SubjectContext {
-    /// Session information for this subject.
-    pub sessions: SessionsContext,
-}
-
-/// Session information for a subject.
-#[derive(Debug, Clone, Serialize)]
-pub struct SessionsContext {
-    /// Session directories found (e.g. ["ses-01", "ses-02"]).
-    pub ses_dirs: Vec<String>,
-    /// session_id column from sessions.tsv, if present.
-    pub session_id: Option<Vec<String>>,
 }
 
 /// The full validation context for a single file.
@@ -196,10 +179,10 @@ impl DatasetContext {
         let mut tree_paths = Vec::new();
         for file in tree.walk_files() {
             tree_paths.push(file.path.clone());
-            if let Some(dt) = find_datatype(&file.path, &schema.raw)
-                && !datatypes.contains(&dt)
+            if let Some(dt) = schema.index.datatype(&file.path)
+                && !datatypes.iter().any(|d| d == dt)
             {
-                datatypes.push(dt);
+                datatypes.push(dt.to_string());
             }
         }
         for dir in tree.walk_directories() {
@@ -209,10 +192,10 @@ impl DatasetContext {
         // Determine modalities from datatypes
         let mut modalities = Vec::new();
         for dt in &datatypes {
-            if let Some(m) = find_modality(dt, &schema.raw)
-                && !modalities.contains(&m)
+            if let Some(m) = schema.index.modality(dt)
+                && !modalities.iter().any(|x| x == m)
             {
-                modalities.push(m);
+                modalities.push(m.to_string());
             }
         }
 
@@ -306,19 +289,16 @@ impl BidsContext {
         // The walk no longer `stat`s every entry to carry a size — ingestion never
         // reads it, and validation is the one consumer, once per file, here.
         let size = file.size_bytes();
-        let file_parts = read_entities(&file.name);
-        let entities = resolve_entities(&file_parts.entities, &schema.entity_name_to_key);
-        let datatype = find_datatype(&file.path, &schema.raw);
-        let modality = datatype
-            .as_ref()
-            .and_then(|dt| find_modality(dt, &schema.raw));
+        // Derived once: these same facts render the selector context that resolves this file's
+        // associations further down, and then become this struct's fields.
+        let file_ctx = FileContext::derive(file, &schema.index);
 
         // Read sidecar metadata via inheritance. A `.json` file has no sidecar of its own —
         // its contents are bound to `json`, not `sidecar`. Without this guard a sidecar's own
         // keys would satisfy `sidecar.*` selectors and the file would be reported alongside the
         // data file it describes (mirrors the TS validator's `loadSidecar` early return,
         // lib/bids-validator/src/schema/context.ts:200-204).
-        let (sidecar, sidecar_overrides) = if file_parts.extension == ".json" {
+        let (sidecar, sidecar_overrides) = if file_ctx.parts.extension == ".json" {
             (Value::Object(Default::default()), Vec::new())
         } else {
             read_sidecars(file, &dataset.tree).await
@@ -328,18 +308,18 @@ impl BidsContext {
         // columns are declared in the sidecar `Columns` field. An empty file has no columns to
         // check — reporting on names we never read would be unsound, and `EMPTY_FILE` already
         // covers it (mirrors the TS validator, context.ts:270-276).
-        let columns = if file_parts.extension == ".tsv" {
+        let columns = if file_ctx.parts.extension == ".tsv" {
             crate::files::tsv::load_tsv_columns(file)
                 .await
                 .unwrap_or_default()
-        } else if file_parts.extension == ".tsv.gz" && size != 0 {
+        } else if file_ctx.parts.extension == ".tsv.gz" && size != 0 {
             columns_from_sidecar(&sidecar)
         } else {
             HashMap::new()
         };
 
         // Read JSON contents if applicable
-        let json = if file_parts.extension == ".json" {
+        let json = if file_ctx.parts.extension == ".json" {
             let mut j = load_json(file).await.unwrap_or(Value::Null);
             // For dataset_description.json, default `DatasetType` (matching the TS validator) so
             // the recommended-field check doesn't flag it — but only when the file actually
@@ -361,18 +341,20 @@ impl BidsContext {
         };
 
         // Read NIfTI header if applicable
-        let nifti_header = if file_parts.extension == ".nii" || file_parts.extension == ".nii.gz" {
-            load_nifti_header(file).await
-        } else {
-            None
-        };
+        let nifti_header =
+            if file_ctx.parts.extension == ".nii" || file_ctx.parts.extension == ".nii.gz" {
+                load_nifti_header(file).await
+            } else {
+                None
+            };
 
         // Read bfile meta if applicable
-        let bfile_meta = if file_parts.extension == ".bval" || file_parts.extension == ".bvec" {
-            parse_bfile_meta_from_file(file).await
-        } else {
-            None
-        };
+        let bfile_meta =
+            if file_ctx.parts.extension == ".bval" || file_ctx.parts.extension == ".bvec" {
+                parse_bfile_meta_from_file(file).await
+            } else {
+                None
+            };
 
         // Read gzip header if applicable
         let gzip = if file.name.ends_with(".gz") {
@@ -384,24 +366,19 @@ impl BidsContext {
         };
 
         // Read TIFF / OME-TIFF header if applicable
-        let (tiff, ome) =
-            if file_parts.extension.ends_with(".tif") || file_parts.extension.ends_with(".btf") {
-                parse_tiff(file, file_parts.extension.starts_with(".ome")).await
-            } else {
-                (None, None)
-            };
-
-        // Build subject context
-        let subject_dir = entities.get("subject").map(|s| format!("sub-{}", s));
-        let _subject = subject_dir
-            .as_ref()
-            .and_then(|sd| dataset.tree.find_dir(sd));
+        let (tiff, ome) = if file_ctx.parts.extension.ends_with(".tif")
+            || file_ctx.parts.extension.ends_with(".btf")
+        {
+            parse_tiff(file, file_ctx.parts.extension.starts_with(".ome")).await
+        } else {
+            (None, None)
+        };
 
         // Resolve the schema's `meta.associations` for this file via the shared, pure resolver
         // in `bids-schema` (selector eval + tree search, no content reads), then build the typed
-        // `BidsAssociations` on top (the content reads stay here).
-        let ctx_value =
-            bids_schema::context::build_file_context(file, &schema.raw, &schema.entity_name_to_key);
+        // `BidsAssociations` on top (the content reads stay here). The selector context is
+        // rendered from the facts derived at the top of this function, not derived a second time.
+        let ctx_value = file_ctx.to_selector_value();
         let hits = bids_schema::associations::resolve_associations(
             schema.associations(),
             file,
@@ -432,16 +409,16 @@ impl BidsContext {
         }
 
         BidsContext {
-            path: file.path.clone(),
+            path: file_ctx.path,
             size,
-            raw_entities: file_parts.entities,
-            entities,
-            entity_keys: file_parts.entity_keys,
-            datatype,
-            suffix: file_parts.suffix,
-            extension: file_parts.extension,
-            stem: file_parts.stem,
-            modality,
+            raw_entities: file_ctx.parts.entities,
+            entities: file_ctx.entities,
+            entity_keys: file_ctx.parts.entity_keys,
+            datatype: file_ctx.datatype,
+            suffix: file_ctx.parts.suffix,
+            extension: file_ctx.parts.extension,
+            stem: file_ctx.parts.stem,
+            modality: file_ctx.modality,
             sidecar,
             sidecar_overrides,
             associations,
@@ -536,8 +513,26 @@ impl DatasetContext {
         })
     }
 
-    /// Build the `subject` binding shared by every file. Currently a stub: sessions are
-    /// not yet populated, so `subject.sessions.ses_dirs` is empty and `session_id` is null.
+    /// Build the `subject` binding. A deliberate stub — `ses_dirs` is empty and `session_id`
+    /// is null for every file — because **no expression in the schema reads it**.
+    ///
+    /// `meta.context` declares the scope, so the binding exists to satisfy that shape, but a
+    /// sweep of all ~1200 selector and check expressions finds only `dataset.subjects.*` and
+    /// `entities.subject`; nothing references the `subject` scope itself, and none of the
+    /// `meta.expression_tests` do either. Populating it would mean scanning each `sub-*`
+    /// directory and reading one `sessions.tsv` per subject on every validation, to answer a
+    /// question nothing asks. Compare `dataset.datatypes`/`modalities`, which this validator
+    /// *does* populate where the reference leaves them empty — that was worth it because
+    /// `intersects(dataset.modalities, ["pet"])` is a real rule.
+    ///
+    /// The hazard is that a stub answers `[]` where a real binding would answer something, and
+    /// a selector cannot tell those apart. So the day the schema starts selecting on `subject`,
+    /// this must be implemented rather than silently evaluated against an empty stub —
+    /// `tests::no_schema_expression_reads_the_subject_scope` fails when that day comes.
+    ///
+    /// Implementing it means per-file state, not this dataset-wide value: `subject` is the
+    /// *current file's* subject. The cheap shape is to resolve once per subject (there are
+    /// few) and hand each file the entry for its own.
     pub fn subject_context_value(&self) -> Value {
         serde_json::json!({
             "sessions": {
@@ -545,5 +540,131 @@ impl DatasetContext {
                 "session_id": null,
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::Value;
+
+    /// Whether `expr` reads the top-level `subject` scope.
+    ///
+    /// Deliberately narrow, because the schema as it stands contains three lookalikes and a
+    /// bare substring search would leave the tripwire permanently red:
+    ///   - `dataset.subjects.sub_dirs` — a different scope, and a different word;
+    ///   - `entities.subject` — the file's subject *entity*, not the subject scope;
+    ///   - `exists(sidecar.IntendedFor, "subject")` — a quoted string naming the `subject`
+    ///     path-resolution rule (see `expression.rs`'s `exists`), not an identifier at all.
+    ///
+    /// So a match is `subject` as a whole identifier, nothing preceding it with a `.`, and not
+    /// wrapped in quotes.
+    fn reads_subject_scope(expr: &str) -> bool {
+        let bytes = expr.as_bytes();
+        let mut from = 0;
+        while let Some(offset) = expr[from..].find("subject") {
+            let start = from + offset;
+            let end = start + "subject".len();
+            let is_start_of_identifier = start == 0 || {
+                let prev = bytes[start - 1] as char;
+                !prev.is_alphanumeric() && prev != '_' && prev != '.'
+            };
+            let is_end_of_identifier = end >= bytes.len() || {
+                let next = bytes[end] as char;
+                !next.is_alphanumeric() && next != '_'
+            };
+            let is_quoted_literal = start > 0
+                && end < bytes.len()
+                && matches!(bytes[start - 1] as char, '"' | '\'')
+                && matches!(bytes[end] as char, '"' | '\'');
+            if is_start_of_identifier && is_end_of_identifier && !is_quoted_literal {
+                return true;
+            }
+            from = end;
+        }
+        false
+    }
+
+    /// Every expression string in the schema: the `selectors` and `checks` arrays of every
+    /// rule, wherever they appear, plus the `meta.expression_tests` expressions.
+    fn schema_expressions(schema: &Value) -> Vec<String> {
+        fn walk(node: &Value, out: &mut Vec<String>) {
+            match node {
+                Value::Object(map) => {
+                    for (key, value) in map {
+                        if matches!(key.as_str(), "selectors" | "checks")
+                            && let Some(items) = value.as_array()
+                        {
+                            out.extend(items.iter().filter_map(|v| v.as_str()).map(String::from));
+                        } else {
+                            walk(value, out);
+                        }
+                    }
+                }
+                Value::Array(items) => items.iter().for_each(|v| walk(v, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        walk(schema, &mut out);
+        out.extend(
+            schema
+                .get("meta")
+                .and_then(|m| m.get("expression_tests"))
+                .and_then(|t| t.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|t| t.get("expression").and_then(|e| e.as_str()))
+                .map(String::from),
+        );
+        out
+    }
+
+    /// `DatasetContext::subject_context_value` is a stub, and is only sound while nothing
+    /// reads it. This is the tripwire: when a schema update starts selecting on `subject`,
+    /// implement the binding rather than let the selector evaluate against an empty stub —
+    /// which it would do silently, since a selector cannot tell "no sessions" from "not
+    /// populated".
+    #[test]
+    fn no_schema_expression_reads_the_subject_scope() {
+        let schema: Value = serde_json::from_str(bids_schema::SCHEMA_JSON).unwrap();
+        let expressions = schema_expressions(&schema);
+
+        // Guard the guard: if the walk stops finding expressions, it would pass vacuously.
+        assert!(
+            expressions.len() > 1000,
+            "expected the schema's ~1200 expressions, found {} — the walk is looking in the \
+             wrong place, not the schema shrinking",
+            expressions.len()
+        );
+        assert!(
+            expressions.iter().any(|e| e.contains("dataset.subjects")),
+            "sanity: `dataset.subjects` should be present and must NOT count as a hit"
+        );
+
+        let readers: Vec<&String> = expressions
+            .iter()
+            .filter(|e| reads_subject_scope(e))
+            .collect();
+        assert!(
+            readers.is_empty(),
+            "the schema now reads the `subject` scope, which is still a stub \
+             (`ses_dirs: []`, `session_id: null`) — populate it per subject before these \
+             evaluate: {readers:#?}"
+        );
+    }
+
+    #[test]
+    fn reads_subject_scope_distinguishes_the_scope_from_its_lookalikes() {
+        assert!(reads_subject_scope("length(subject.sessions.ses_dirs) > 0"));
+        assert!(reads_subject_scope("subject.sessions.session_id"));
+        assert!(reads_subject_scope("type(subject) != 'null'"));
+        // The three forms that really are in the schema, none of which is the scope.
+        assert!(!reads_subject_scope(
+            "length(dataset.subjects.sub_dirs) > 0"
+        ));
+        assert!(!reads_subject_scope("entities.subject != \"emptyroom\""));
+        assert!(!reads_subject_scope(
+            "exists(sidecar.IntendedFor, \"subject\") == 1"
+        ));
     }
 }

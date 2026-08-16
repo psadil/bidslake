@@ -6,6 +6,8 @@
 //! - [`filetree`] — walk a BIDS dataset directory into a [`filetree::FileTree`], honouring
 //!   `.bidsignore`, hidden-file, and always-ignore rules.
 //! - [`entities`] — parse a BIDS filename into its entities, suffix, and extension.
+//! - [`datatype`] — read a file's datatype off its path position (the immediate parent
+//!   directory), against a datatype set the caller supplies.
 //! - [`inheritance`] — resolve a data file's effective JSON sidecar via the BIDS inheritance
 //!   principle, and find associated files.
 //!
@@ -14,6 +16,7 @@
 //! light dependency footprint (`tokio` + `ignore` + `serde_json`) so consumers pull in nothing
 //! validation-specific.
 
+pub mod datatype;
 pub mod entities;
 pub mod filetree;
 pub mod inheritance;

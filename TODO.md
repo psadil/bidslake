@@ -18,11 +18,6 @@ as issues. Roughly ordered by value.
   (now documented in the docstring). When the PyO3 PyCapsule stream bridge lands
   (`crates/bidslake-py/src/lib.rs`), stream Arrow batches so `get()` is O(1) memory.
 
-- [ ] **Validator double-compute of datatype/modality/entities** (`dup-04`). Optional, low value:
-  `crates/bids-validator-rs/src/context.rs` derives the core selector fields once for its struct
-  and again via `build_file_context`. Fixing it re-introduces hand-assembly or needs a
-  precomputed-inputs `build_file_context` variant, to save three cheap in-memory calls.
-
 - [ ] **Enforced referential integrity for the concept columns?** `all_files.sub`/`ses` cannot be
   foreign keys as built: they are select items of a *view* now (ADR 0006 §3) rather than the
   generated columns of a table, and DuckDB refuses a foreign key on either. Making them keys

@@ -71,7 +71,7 @@ fn test_schema_loads_and_has_rules() {
     assert!(!schema.bids_version.is_empty());
     assert!(!schema.schema_version.is_empty());
     assert!(!schema.entity_order.is_empty());
-    assert!(!schema.known_datatypes.is_empty());
+    assert!(!schema.index.datatypes().is_empty());
 
     // Verify key sections exist
     assert!(schema.objects().is_object());
