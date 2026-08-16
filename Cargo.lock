@@ -961,6 +961,7 @@ dependencies = [
  "duckdb",
  "futures",
  "ignore",
+ "proptest",
  "rstest",
  "serde",
  "serde_json",

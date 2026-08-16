@@ -86,9 +86,10 @@ class LayoutAt:
     def path(self, role: str, **bindings: str) -> Path:
         """The absolute path for ``role`` under this root.
 
-        Raises rather than returning a guess: an unknown role is a typo, and an unbound
+        Raises rather than returning a guess: an unknown role is a typo, an unbound
         ``{placeholder}`` would otherwise render as a plausible path pointing at the
-        wrong file.
+        wrong file, and a binding carrying a path separator would render one that leaves
+        this root entirely.
 
         Keywords here are merged over whatever :meth:`Layout.under` bound, and win — so a
         run-wide value is stated once and a per-call one still overrides it.
@@ -97,8 +98,22 @@ class LayoutAt:
         rel = self.layout._inner.render(role, merged)
         if rel is None:
             known = ", ".join(self.layout.roles)
+            # A binding is a label, not a path fragment. One carrying a separator or a
+            # parent reference renders a path that normalizes outside this root — and
+            # `mkdir` below would then create directories there — so `render` refuses it.
+            # Checked before the unbound-placeholder branch because both surface as `None`,
+            # and reporting an unsafe binding as a missing one sends the caller looking for
+            # a keyword they already passed.
+            unsafe = {k: v for k, v in sorted(merged.items()) if "/" in v or v == ".."}
             if role not in self.layout.roles:
                 msg = f"unknown role {role!r}; this layout declares: {known}"
+            elif unsafe:
+                offending = ", ".join(f"{k}={v!r}" for k, v in unsafe.items())
+                msg = (
+                    f"role {role!r} cannot be rendered: {offending} would put the path "
+                    f"outside {self.root}. A binding names one path component, so it may "
+                    f"not contain '/' or '..'."
+                )
             else:
                 # Naming what *is* bound is what makes a mistyped binding visible. Without
                 # it, `under(root, trainng=…)` fails with "unbound placeholders" for a

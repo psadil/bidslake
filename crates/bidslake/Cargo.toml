@@ -26,6 +26,7 @@ bids-schema = { path = "../bids-schema" }
 tempfile = { workspace = true }
 criterion = { workspace = true }
 rstest = { workspace = true }
+proptest = { workspace = true }
 
 [[bench]]
 name = "ingest"

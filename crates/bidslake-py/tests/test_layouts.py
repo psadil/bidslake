@@ -408,3 +408,26 @@ def test_the_whole_tree_digest_still_moves(after_an_unrelated_write):
     at, _, whole = after_an_unrelated_write
 
     assert at.digest() != whole
+
+
+#: Binding values that must never reach the filesystem. A binding names one path
+#: component; these each render a path that normalizes outside the root it was joined to.
+TRAVERSING_BINDINGS = ["..", "../..", "/etc/passwd", "a/../../../etc/cron.d/x"]
+
+
+@pytest.mark.parametrize("training", TRAVERSING_BINDINGS, ids=lambda v: v)
+def test_a_binding_cannot_render_a_path_outside_the_root(tmp_path, training):
+    """A binding carrying a separator is refused rather than escaping the output root.
+
+    ``check_template`` guarded the *template*, which the layout document controls, while
+    binding values were substituted verbatim — so a caller reconstituted exactly the shape
+    it exists to refuse. On the bundled feat layout, ``training='a/../../../etc/cron.d/x'``
+    rendered a path whose ``normpath`` is ``/etc/cron.d/x_thr20.txt``, and :meth:`mkdir`
+    calls ``mkdir(parents=True)`` on whatever comes back.
+
+    Note the naive check does not catch it: the rendered string *does* start with the root.
+    """
+    at = bidslake.layout("feat").under(tmp_path)
+
+    with pytest.raises(KeyError, match="outside"):
+        at.path("classification", training=training, threshold="20")
