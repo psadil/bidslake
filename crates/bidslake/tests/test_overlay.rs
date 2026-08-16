@@ -594,3 +594,52 @@ async fn fmriprep_and_qsiprep_confounds_do_not_collapse() -> anyhow::Result<()> 
     }
     Ok(())
 }
+
+/// A recording table the schema declares columns for must keep them.
+///
+/// `motion` and `stim` are generated as *bare* tables (`file_id`, `row_idx`, `other_data`)
+/// because base BIDS gives them no `rules.tabular_data` column rule. That set is a hardcoded
+/// literal in the generator, so it does not notice when an overlay *does* declare columns for
+/// one of them: the bare spec is generated second, and `table_definitions` is keyed by table
+/// name, so the last writer wins and the typed definition is silently replaced.
+///
+/// Reachable on plain BIDS too — the `motion` group of `rules.tabular_data` already holds
+/// `motionChannels`, so a future `motionColumns` beside it would land on the same name.
+#[test]
+fn an_overlay_may_declare_columns_for_a_recording_table() {
+    let overlay = AppliedOverlay {
+        source: "stimtest".to_string(),
+        content: serde_json::json!({
+            "objects": {
+                "columns": {
+                    "stim_signal__test": {
+                        "name": "stim_signal",
+                        "display_name": "Stimulus signal",
+                        "description": "Stimulus intensity at this sample.\n",
+                        "type": "number"
+                    }
+                }
+            },
+            "rules": {
+                "tabular_data": {
+                    "stimtest": {
+                        "stim": {
+                            "selectors": ["suffix == \"stim\""],
+                            "additional_columns": "allowed",
+                            "columns": { "stim_signal__test": "optional" }
+                        }
+                    }
+                }
+            }
+        }),
+    };
+
+    let schema = Schema::load_with_overlays(None, &[overlay]).expect("overlay loads");
+    let ddl = schema
+        .get_create_sql("stim")
+        .expect("the stim table is generated");
+    assert!(
+        ddl.contains("stim_signal"),
+        "the overlay's declared column was dropped; `stim` was generated bare:\n{ddl}"
+    );
+}

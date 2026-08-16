@@ -47,6 +47,27 @@ const SCHEMA_KNOWN_SUFFIXES: &[&str] = &[
     "probseg",
 ];
 
+/// The recording suffixes are derived from the schema, so this list can fall behind
+/// one without anything noticing — and the coverage test below is `#[ignore]`d, so it
+/// would not be the thing to notice.
+///
+/// Kept as a cross-check rather than derived from the same source: a test that
+/// computes its expectation from the code under test asserts nothing. This one is
+/// cheap and runs by default.
+#[test]
+fn every_derived_recording_suffix_is_listed_here() {
+    let schema = bidslake::schema::Schema::load(None).expect("embedded schema loads");
+    let listed: HashSet<&str> = SCHEMA_KNOWN_SUFFIXES.iter().copied().collect();
+    for rec in schema.recordings().iter() {
+        assert!(
+            listed.contains(rec.suffix.as_str()),
+            "the schema derives `{}` as a recording, but SCHEMA_KNOWN_SUFFIXES omits it — \
+             a file with that suffix would be allowed to show up `skipped`",
+            rec.suffix
+        );
+    }
+}
+
 /// BIDS suffix of a tabular file path: the token after the last `_` before the
 /// extension, or the stem for `participants.tsv`/`samples.tsv`.
 fn suffix_of(file_path: &str) -> String {

@@ -22,7 +22,8 @@
 //! curves, participants, sessions, diffusion. Which table a file routes to, and
 //! that table's columns and types, are **derived from the BIDS schema**
 //! (`rules.tabular_data` + `objects.columns`; for the headerless recordings,
-//! `rules.sidecars` and `meta.associations`), never hardcoded. Large compressed
+//! `rules.sidecars`, `meta.associations` and `rules.files` — see [`recording`]),
+//! never hardcoded. Large compressed
 //! recordings (`*.tsv.gz`) are left on disk for now as a size policy, but are still
 //! recorded; a file the schema does not describe is skipped with a warning. The
 //! `file_registry` records every file it saw with a `status`
@@ -269,6 +270,7 @@
 
 pub mod dynamic;
 pub mod ingestion;
+pub mod recording;
 pub mod tabular;
 pub use dynamic::{AppliedOverlay, Schema};
 pub use ingestion::Ingestion;
