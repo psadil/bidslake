@@ -98,31 +98,27 @@ class LayoutAt:
         rel = self.layout._inner.render(role, merged)
         if rel is None:
             known = ", ".join(self.layout.roles)
-            # A binding is a label, not a path fragment. One carrying a separator or a
-            # parent reference renders a path that normalizes outside this root — and
-            # `mkdir` below would then create directories there — so `render` refuses it.
-            # Checked before the unbound-placeholder branch because both surface as `None`,
-            # and reporting an unsafe binding as a missing one sends the caller looking for
-            # a keyword they already passed.
-            unsafe = {k: v for k, v in sorted(merged.items()) if "/" in v or v == ".."}
             if role not in self.layout.roles:
                 msg = f"unknown role {role!r}; this layout declares: {known}"
-            elif unsafe:
-                offending = ", ".join(f"{k}={v!r}" for k, v in unsafe.items())
-                msg = (
-                    f"role {role!r} cannot be rendered: {offending} would put the path "
-                    f"outside {self.root}. A binding names one path component, so it may "
-                    f"not contain '/' or '..'."
-                )
             else:
                 # Naming what *is* bound is what makes a mistyped binding visible. Without
-                # it, `under(root, trainng=…)` fails with "unbound placeholders" for a
-                # caller who is certain they bound it.
+                # it, `under(root, trainng=…)` fails for a caller who is certain they bound
+                # it.
+                #
+                # Both causes are named rather than guessed at. `render` returns None for an
+                # unbound placeholder *and* for bindings that would render a path leaving the
+                # root, and which one applies depends on the role's template — which is on
+                # the Rust side. Inferring it from the binding values gets it wrong in both
+                # directions: `training='..'` is perfectly safe in a mid-segment placeholder
+                # (it renders `fix4melview_.._thr20.txt`, one component), while `'x/../..'`
+                # is not.
                 have = ", ".join(f"{k}={v!r}" for k, v in sorted(merged.items())) or "nothing"
                 msg = (
-                    f"role {role!r} has unbound placeholders; bound here: {have}. "
-                    f"Pass them as keywords, e.g. path({role!r}, training='UKBiobank'), "
-                    f"or bind them once with layout.under(root, training='UKBiobank')"
+                    f"role {role!r} could not be rendered; bound here: {have}. Either a "
+                    f"{{placeholder}} is unbound — pass it as a keyword, e.g. "
+                    f"path({role!r}, training='UKBiobank'), or bind it once with "
+                    f"layout.under(root, training='UKBiobank') — or a binding would put the "
+                    f"path outside {self.root}, which is refused."
                 )
             raise KeyError(msg)
         return self.root / rel

@@ -3499,7 +3499,8 @@ pub fn build_bidsignore(content: &str) -> Result<Gitignore> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BidsParser, Kind, build_bidsignore, kind_of};
+    use super::{BidsParser, Kind, build_bidsignore, file_id, kind_of};
+    use proptest::prelude::*;
     use rstest::rstest;
     use std::path::Path;
 
@@ -3770,6 +3771,39 @@ mod tests {
             file_id("ds", "file:///r1", "desc-aseg_dseg.tsv"),
             file_id("ds", "file:///r2", "desc-aseg_dseg.tsv")
         );
+    }
+
+    proptest! {
+        /// No two distinct identity triples in a catalog-sized corpus share an id.
+        ///
+        /// `file_id` is a primary key written with `INSERT OR REPLACE`, so a collision does not
+        /// raise — it quietly merges two files into one row. `TODO.md` records that and asks
+        /// for the collision to be made loud; this is the half that can be checked without a
+        /// catalog, and it is the half that would fail first if the hash, the truncation to 64
+        /// bits, or the `\x1f` join ever changed.
+        ///
+        /// The alphabets include `/`, `:`, `.`, `_` and `-` because the claim being tested is
+        /// that the unit separator "cannot occur in a path or URI" — an alphabet of bare
+        /// letters would never put that to the question. A `BTreeSet` supplies the distinctness
+        /// by construction, so no case is spent rejecting a duplicate.
+        ///
+        /// This does not disprove the birthday bound in the doc above; 200 triples is far below
+        /// where 64 bits gets interesting. It asserts the function is injective on the shapes a
+        /// real catalog holds, which is the property the primary key actually rests on.
+        #[test]
+        fn no_two_identity_triples_in_a_corpus_share_an_id(
+            triples in prop::collection::btree_set(
+                ("[a-z0-9-]{1,6}", "(file|s3)://[a-z0-9/._-]{1,10}", "[a-z0-9/._-]{1,14}"),
+                1..200,
+            )
+        ) {
+            let ids: std::collections::BTreeSet<u64> = triples
+                .iter()
+                .map(|(dataset, root, path)| file_id(dataset, root, path))
+                .collect();
+
+            prop_assert_eq!(ids.len(), triples.len());
+        }
     }
 
     /// The case `is_datafile` cannot express, and the reason `kind_of` takes `datatype` as an
