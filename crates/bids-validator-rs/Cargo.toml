@@ -1,7 +1,7 @@
 [package]
 name = "bids-validator-rs"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 description = "A pure Rust BIDS (Brain Imaging Data Structure) validator"
 license = "MIT"
 
@@ -10,15 +10,15 @@ name = "bids-validator"
 path = "src/main.rs"
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-clap = { version = "4", features = ["derive"] }
-regex = "1"
-thiserror = "2"
-tokio = { version = "1.52.3", features = ["full"] }
-futures = "0.3.32"
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+regex = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
 flate2 = "1.1.9"
-ignore = "0.4.27"
+ignore = { workspace = true }
 async-trait = "0.1"
 hed-validator-rs = { path = "../hed-validator-rs" }
 bids-core = { path = "../bids-core" }
@@ -27,8 +27,10 @@ quick-xml = "0.37"
 ureq = { version = "2", features = ["json"] }
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["async_tokio"] }
-tempfile = "3"
+# `async_tokio` is layered on top of the workspace version, which the benchmark needs and
+# `bidslake`'s criterion does not.
+criterion = { workspace = true, features = ["async_tokio"] }
+tempfile = { workspace = true }
 rlimit = "0.10"
 
 [[bench]]

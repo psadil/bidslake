@@ -18,13 +18,14 @@ extension-module = ["pyo3/extension-module"]
 
 [dependencies]
 pyo3 = { version = "0.26" }
-# Bundled DuckDB engine — same crate/version as `bidslake`, so cargo builds the
-# vendored engine once and the Arrow types line up across crates.
-duckdb = { version = "1.0", features = ["bundled"] }
+# Bundled DuckDB engine. Declared once in `[workspace.dependencies]` precisely because it
+# must stay the same crate/version/features as `bidslake`'s: cargo then builds the vendored
+# engine once, and the Arrow types line up across crates.
+duckdb = { workspace = true }
 # `ipc` augments the arrow instance duckdb already pulls (version 58); we use it
 # to serialize query results to an Arrow IPC stream for Polars on the Python side.
 arrow = { version = "58", features = ["ipc"] }
-anyhow = "1.0"
+anyhow = { workspace = true }
 # Used by the `emit-types` bin to reuse the exact schema/DDL model (no Python
 # port of the naming/type logic).
 bidslake = { path = "../bidslake" }
