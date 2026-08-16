@@ -32,6 +32,7 @@ ureq = { version = "2", features = ["json"] }
 criterion = { workspace = true, features = ["async_tokio"] }
 tempfile = { workspace = true }
 rlimit = "0.10"
+rstest = { workspace = true }
 
 [[bench]]
 name = "validation_benchmark"

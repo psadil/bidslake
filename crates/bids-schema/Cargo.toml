@@ -15,5 +15,8 @@ oxc_parser = "0.139.0"
 oxc_ast = "0.139.0"
 oxc_span = "0.139.0"
 
+[dev-dependencies]
+rstest = { workspace = true }
+
 [build-dependencies]
 serde_json = { workspace = true }

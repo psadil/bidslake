@@ -53,3 +53,7 @@ duckdb = { version = "1.0", features = ["bundled"] }
 # nothing loosens.
 criterion = "0.5"
 tempfile = "3.8"
+# Parameterized cases and fixtures. The suite had no such crate, so "one case per test" was
+# spelled as a `for` loop over an inline table — which reports one failing test for N cases
+# and stops at the first, the masking CONTRIBUTING.md asks contributors to avoid.
+rstest = "0.26"
