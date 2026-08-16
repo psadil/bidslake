@@ -15,29 +15,30 @@ use std::sync::LazyLock;
 
 static SCHEMA: LazyLock<BidsSchema> = LazyLock::new(|| BidsSchema::bundled().unwrap());
 
-/// Validate an example dataset with the shared base config, or `None` if the submodule
-/// dataset directory is not checked out.
-async fn validate_example(name: &str) -> Option<DatasetIssues> {
+/// Validate an example dataset with the shared base config.
+///
+/// A missing dataset directory fails rather than yielding `None`. Every test in this file
+/// consumed that `None` with an early `return`, so an uninitialized submodule made all five
+/// pass without validating anything — and two of them assert only a *negative*, which an
+/// empty run satisfies for free.
+async fn validate_example(name: &str) -> DatasetIssues {
     let dir = Path::new("tests/data/bids-examples").join(name);
-    if !dir.is_dir() {
-        eprintln!("Skipping {name}: dataset directory not present");
-        return None;
-    }
+    assert!(
+        dir.is_dir(),
+        "{name}: dataset directory not present. \
+         Run `git submodule update --init tests/data/bids-examples`."
+    );
     let config = ValidatorConfig::from_file("tests/data/bids-examples-config.json").ok();
-    Some(
-        bids_validator_rs::validator::validate(&dir, &SCHEMA, config.as_ref())
-            .await
-            .expect("validation should not error out"),
-    )
+    bids_validator_rs::validator::validate(&dir, &SCHEMA, config.as_ref())
+        .await
+        .expect("validation should not error out")
 }
 
 /// The `--json` output must use the TS validator's shape: `issues.issues` (array),
 /// `issues.codeMessages` (object), and per-issue `code` / lowercase `severity` / `subCode`.
 #[tokio::test]
 async fn test_json_output_structure_matches_ts() {
-    let Some(issues) = validate_example("ds001").await else {
-        return;
-    };
+    let issues = validate_example("ds001").await;
     let json = issues.to_json();
 
     let items = json["issues"]["issues"]
@@ -70,9 +71,7 @@ async fn test_json_output_structure_matches_ts() {
 /// `SIDECAR_KEY_RECOMMENDED` / `JSON_KEY_RECOMMENDED`, not rule-name codes.
 #[tokio::test]
 async fn test_recommended_field_codes() {
-    let Some(issues) = validate_example("asl001").await else {
-        return;
-    };
+    let issues = validate_example("asl001").await;
     assert!(
         issues
             .warnings()
@@ -86,9 +85,7 @@ async fn test_recommended_field_codes() {
 /// matching TS. (`cash_demean` is present in ds001 events but not its sidecar.)
 #[tokio::test]
 async fn test_additional_undefined_column_warned() {
-    let Some(issues) = validate_example("ds001").await else {
-        return;
-    };
+    let issues = validate_example("ds001").await;
     assert!(
         issues
             .warnings()
@@ -103,9 +100,7 @@ async fn test_additional_undefined_column_warned() {
 /// columns). `strain` is a recommended participants column absent from ds001.
 #[tokio::test]
 async fn test_recommended_column_not_warned() {
-    let Some(issues) = validate_example("ds001").await else {
-        return;
-    };
+    let issues = validate_example("ds001").await;
     assert!(
         !issues
             .warnings()
@@ -119,9 +114,7 @@ async fn test_recommended_column_not_warned() {
 /// field.
 #[tokio::test]
 async fn test_dataset_type_not_warned() {
-    let Some(issues) = validate_example("ds001").await else {
-        return;
-    };
+    let issues = validate_example("ds001").await;
     assert!(
         !issues
             .all()

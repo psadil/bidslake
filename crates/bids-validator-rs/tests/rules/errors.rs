@@ -251,6 +251,8 @@ async fn test_orphaned_symlink() {
         // Instead of relying on read_file_tree (which drops broken symlinks via `ignore` crate),
         // we can directly test the validator manually.
         let link_path = tmp.join("sub-01").join("anat").join("sub-01_T1w.nii");
+        // The fixture writes a real T1w image there; this test wants a broken link in its place.
+        fs::remove_file(&link_path).unwrap();
         std::os::unix::fs::symlink(tmp.join("does_not_exist.nii"), &link_path).unwrap();
 
         let issues = validate_dataset(&tmp).await;

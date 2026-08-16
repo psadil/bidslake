@@ -21,6 +21,13 @@ pub fn tempdir() -> PathBuf {
     dir
 }
 
+/// A dataset the validator accepts: the errors a test asserts should be the ones it wrote.
+///
+/// The T1w *image* matters. Writing only the sidecar left every dataset built from here
+/// carrying a `SIDECAR_WITHOUT_DATAFILE` error — invisible to the ~27 tests that ask whether
+/// one specific code is present, and the reason `test_minimal_valid_dataset` could assert
+/// nothing for so long without anyone noticing. A test that wants a *broken* T1w overwrites
+/// this file, which is what the `rules/checks.rs` family already does.
 pub fn create_minimal_dataset(root: &Path) {
     fs::write(
         root.join("dataset_description.json"),
@@ -40,6 +47,21 @@ pub fn create_minimal_dataset(root: &Path) {
     fs::write(
         anat_dir.join("sub-01_T1w.json"),
         r#"{"RepetitionTime": 2.0, "MagneticFieldStrength": 3}"#,
+    )
+    .unwrap();
+
+    // 3D, unit millimetres, qform set — the combination the `rules/checks.rs` cases
+    // deliberately perturb one field at a time to trigger their codes.
+    fs::write(
+        anat_dir.join("sub-01_T1w.nii"),
+        create_nifti1_header(
+            &[3, 2, 2, 2, 1, 1, 1, 1],
+            &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            2,
+            1,
+            0,
+            None,
+        ),
     )
     .unwrap();
 }
