@@ -7,7 +7,22 @@ edition.workspace = true
 tokio = { workspace = true }
 ignore = { workspace = true }
 serde_json = { workspace = true }
+# Optional, gated by the `proptest` feature below, so a plain `cargo build -p bids-core`
+# compiles neither this nor `src/strategy.rs`. It is here rather than only in dev-dependencies
+# because `strategy` has to be reachable from *other* crates' tests, and a dev-dependency is
+# not linkable downstream.
+proptest = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 rstest = { workspace = true }
+# Also here, unconditionally, so this crate's own `#[cfg(test)] mod tests` can use it without
+# turning the feature on for `cargo test`.
+proptest = { workspace = true }
+
+[features]
+# Exposes `bids_core::strategy`. Off by default; a crate above opts in from its own
+# dev-dependencies: `bids-core = { path = "../bids-core", features = ["proptest"] }`.
+# Under `resolver = "3"` a feature reached only through a dev-dependency is not unified into a
+# plain `cargo build`, so the shipped library is unchanged.
+proptest = ["dep:proptest"]

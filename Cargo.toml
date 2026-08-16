@@ -57,3 +57,14 @@ tempfile = "3.8"
 # spelled as a `for` loop over an inline table — which reports one failing test for N cases
 # and stops at the first, the masking CONTRIBUTING.md asks contributors to avoid.
 rstest = "0.26"
+# Property-based tests: state the rule, let the generator find the case. Note this is *not*
+# dev-only in `bids-core`/`bids-schema` — each exposes a `strategy` module behind a `proptest`
+# feature so the crates above can reuse one set of generators, and a `[dev-dependencies]`
+# entry is not linkable from a downstream crate.
+#
+# `default-features = false` drops `fork` and `timeout`, which exist to run each case in a
+# subprocess so a property that segfaults or hangs still reports. Nothing here can do either —
+# these are pure parsers and a JSON merge — and the two would add `rusty-fork`, `quick-error`
+# and `wait-timeout` to the lock for no benefit. `bit-set` is kept: it is what proptest shrinks
+# collections with, and `bit-set`/`bit-vec` 0.8 are already in the lock via `fancy-regex`.
+proptest = { version = "1.11", default-features = false, features = ["std", "bit-set"] }
