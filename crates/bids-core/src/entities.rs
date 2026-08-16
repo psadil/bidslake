@@ -130,53 +130,109 @@ pub fn resolve_entities(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::strategy;
+    use proptest::prelude::*;
     use rstest::rstest;
 
-    /// Every filename shape the splitter has to get right, and the whole result each yields.
+    /// The one filename shape worth naming: a real, extremely common file whose parse is
+    /// genuinely surprising.
     ///
-    /// One assertion over the full `(suffix, extension, entities)` triple rather than a
-    /// handful of `get()`s: the previous eight functions checked different subsets — some
-    /// pinned `entities.len()`, most did not — so a stray entity was only caught in the two
-    /// cases that happened to count.
+    /// `dataset_description` has no `-` in either `_`-segment, so the last segment becomes the
+    /// suffix and the first is silently dropped — the file is not "no entities and no suffix",
+    /// it is `suffix == "description"`. The other seven rows this table carried were points of
+    /// the laws below; this one stays as documentation, and the properties do not generate it
+    /// because their alphabets exclude the dash-free segment that causes it.
     #[rstest]
-    #[case::basic("sub-01_T1w.nii.gz", "T1w", ".nii.gz", &[("sub", "01")])]
-    #[case::multiple_entities(
-        "sub-01_ses-pre_task-rest_run-02_bold.nii.gz",
-        "bold",
-        ".nii.gz",
-        &[("run", "02"), ("ses", "pre"), ("sub", "01"), ("task", "rest")]
-    )]
-    #[case::json_sidecar("sub-01_T1w.json", "T1w", ".json", &[("sub", "01")])]
-    #[case::tabular(
-        "sub-01_ses-01_task-rest_events.tsv",
-        "events",
-        ".tsv",
-        &[("ses", "01"), ("sub", "01"), ("task", "rest")]
-    )]
-    // "dataset_description" has no `-` in either part, so the whole stem's last segment
-    // becomes the suffix and nothing is an entity.
-    #[case::no_entities("dataset_description.json", "description", ".json", &[])]
-    #[case::participants("participants.tsv", "participants", ".tsv", &[])]
-    #[case::entity_without_label("sub-_T1w.nii.gz", "T1w", ".nii.gz", &[("sub", "NOENTITY")])]
-    #[case::compressed("sub-01_physio.tsv.gz", "physio", ".tsv.gz", &[("sub", "01")])]
-    fn read_entities_splits_a_bids_filename(
+    #[case::dataset_description("dataset_description.json", "description", ".json")]
+    fn read_entities_reads_a_dash_free_stem_as_a_bare_suffix(
         #[case] name: &str,
         #[case] suffix: &str,
         #[case] extension: &str,
-        #[case] entities: &[(&str, &str)],
     ) {
         let parts = read_entities(name);
 
-        let mut got: Vec<(&str, &str)> = parts
-            .entities
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
-        got.sort_unstable();
         assert_eq!(
-            (parts.suffix.as_str(), parts.extension.as_str(), got),
-            (suffix, extension, entities.to_vec())
+            (
+                parts.suffix.as_str(),
+                parts.extension.as_str(),
+                parts.entities.len()
+            ),
+            (suffix, extension, 0)
         );
+    }
+
+    proptest! {
+        /// Any filename assembled from entities, a suffix and an extension parses back into
+        /// exactly those pieces.
+        ///
+        /// There-and-back-again over arbitrary keys, labels, entity counts, entity orders and
+        /// extensions — including keys the schema has never heard of, which the parser is
+        /// documented not to consult. Replaces `basic`, `multiple_entities`, `json_sidecar`,
+        /// `tabular` and `compressed`, which were five points of this one law.
+        ///
+        /// The expected value comes from the strategy, which *renders* a structure it already
+        /// holds; nothing here re-derives what the parser should do, so the test cannot agree
+        /// with a broken parser. One `prop_assert_eq!` over the whole struct, for the reason
+        /// the old table compared a whole triple: a subset comparison catches a stray entity
+        /// only in the cases that happened to count.
+        #[test]
+        fn read_entities_round_trips_a_filename_built_from_its_parts(
+            (name, expected) in strategy::bids_filename()
+        ) {
+            let parts = read_entities(&name);
+
+            prop_assert_eq!(parts, expected);
+        }
+
+        /// A name whose last `_` segment is an entity has no suffix, and every segment is an
+        /// entity.
+        ///
+        /// Separate from the round-trip rather than an `Option` inside it: these are two rules
+        /// with two expected shapes, and folding them into one strategy would give one test
+        /// whose failure could mean either.
+        #[test]
+        fn read_entities_reports_no_suffix_when_the_last_segment_is_an_entity(
+            (name, expected) in strategy::suffixless_filename()
+        ) {
+            let parts = read_entities(&name);
+
+            prop_assert_eq!(parts, expected);
+        }
+
+        /// An entity written with a key but no label reads as the `NOENTITY` sentinel.
+        ///
+        /// Was `entity_without_label`, pinned at `sub-` alone. The key is generated because the
+        /// sentinel is not a fact about `sub`.
+        #[test]
+        fn an_entity_with_no_label_reads_as_the_noentity_sentinel(
+            key in strategy::entity_key(),
+            suffix in strategy::suffix(),
+        ) {
+            let parts = read_entities(&format!("{key}-_{suffix}.nii.gz"));
+
+            prop_assert_eq!(
+                parts.entities.get(key.as_str()).map(String::as_str),
+                Some("NOENTITY")
+            );
+        }
+
+        /// A `_`-segment carrying no `-` is not an entity, and is dropped unless it is the
+        /// suffix.
+        ///
+        /// The rule behind `dataset_description.json`, stated directly. It was previously only
+        /// implied by rows whose stems happened to contain such a segment, so nothing asserted
+        /// the segment was *dropped* rather than mis-parsed into an entity.
+        #[test]
+        fn a_segment_without_a_dash_is_not_an_entity(
+            bare in strategy::label(),
+            key in strategy::entity_key(),
+            value in strategy::label(),
+            suffix in strategy::suffix(),
+        ) {
+            let parts = read_entities(&format!("{bare}_{key}-{value}_{suffix}.tsv"));
+
+            prop_assert_eq!(parts.entity_keys, vec![key]);
+        }
     }
 
     #[test]
