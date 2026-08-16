@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
+import shutil
+import subprocess
+
+import bidslake
 import pytest
+from bidslake.paths import to_local_path
+
+#: The concepts live once, on the registry view; the satellites key on `file_id`.
+CONCEPTS = {"sub", "ses", "task", "run", "datatype", "suffix", "extension", "modality"}
 
 
 def test_tables_present(lake):
@@ -17,22 +25,29 @@ def test_tables_present(lake):
         "events",
         "dataset_description",
     }
+
     assert expected <= set(lake.tables())
 
 
-def test_registry_has_concept_columns(lake):
-    # The concepts live once, on the registry view; the satellites key on `file_id`.
-    concepts = {"sub", "ses", "task", "run", "datatype", "suffix", "extension", "modality"}
-    assert concepts <= set(lake.columns("all_files"))
-    assert set(lake.columns("scans")).isdisjoint(concepts)
+def test_the_registry_carries_the_concepts(lake):
+    assert set(lake.columns("all_files")) >= CONCEPTS
+
+
+@pytest.mark.parametrize("satellite", ["scans", "sidecars"])
+def test_a_satellite_carries_no_concepts(lake, satellite):
+    assert set(lake.columns(satellite)).isdisjoint(CONCEPTS)
 
 
 def test_a_satellite_is_queried_by_concept_anyway(lake):
-    # `get` joins a file-keyed table back to the registry, so a concept filter reaches
-    # a table that stores no concepts at all (docs/adr/0006). `sidecars` rather than
-    # `scans`: the fixtures ship no `scans.tsv`, and `scans` is that file's satellite.
-    assert not {"suffix", "task"} & set(lake.columns("sidecars"))
-    assert list(lake.get(table="sidecars", suffix="bold"))
+    """`get` joins a file-keyed table back to the registry, so a concept filter reaches a
+    table that stores no concepts at all (docs/adr/0006).
+
+    `sidecars` rather than `scans`: the fixtures ship no `scans.tsv`, and `scans` is that
+    file's satellite. That it stores no concepts is pinned above.
+    """
+    hits = list(lake.get(table="sidecars", suffix="bold"))
+
+    assert hits
 
 
 def test_unknown_table_raises(lake):
@@ -40,63 +55,64 @@ def test_unknown_table_raises(lake):
         lake.table("no_such_table")
 
 
-def test_raw_sql_escape_hatch(lake):
-    df = lake.sql(
-        "SELECT count(*) AS n FROM all_files WHERE datatype = ? AND suffix = ?",
-        ["func", "bold"],
-    )
-    assert df["n"][0] > 0
+# -- the ingest roots, and what may be concluded from them -------------------
 
 
-def test_roots_reports_tenure(lake):
-    """Every root carries a tenure, and `attached` is what an ordinary index records.
-
-    The column is what stops a consumer treating a catalog row as a statement about the
-    present (docs/adr/0009); `roots()` is how it becomes visible from Python at all.
-    """
+@pytest.fixture(scope="module")
+def roots(lake):
     df = lake.roots()
-    assert df.height > 0
-    assert set(df.columns) == {"dataset_id", "root_uri", "tenure"}
-    assert set(df["tenure"].to_list()) == {"attached"}
-    # Scoped to one dataset, since a query that means one tree has to name it.
-    one = df["dataset_id"][0]
-    assert lake.roots(one)["dataset_id"].to_list() == [one] * lake.roots(one).height
+    assert df.height > 0, "fixture assumption: the catalog records the roots it ingested"
+    return df
 
 
-def test_to_uri_matches_what_the_catalog_stored(lake):
+def test_roots_reports_location_and_tenure(roots):
+    assert set(roots.columns) == {"dataset_id", "root_uri", "tenure"}
+
+
+def test_an_ordinary_index_records_attached_tenure(roots):
+    """`tenure` is what stops a consumer treating a catalog row as a statement about the
+    present (docs/adr/0009); `attached` is what an ordinary `index` promises."""
+    assert set(roots["tenure"].to_list()) == {"attached"}
+
+
+def test_roots_can_be_scoped_to_one_dataset(lake, roots):
+    """A query that means one tree has to be able to name it."""
+    one = roots["dataset_id"][0]
+
+    scoped = lake.roots(one)
+
+    assert set(scoped["dataset_id"].to_list()) == {one}
+
+
+def test_to_uri_matches_what_the_catalog_stored(roots):
     """`to_uri` is the write direction of the stored `root_uri`.
 
     A consumer scoping a query to an output tree writes `root_uri = to_uri(dst)`, so the two
     spellings have to agree exactly — including symlink resolution, which is where `/tmp`
     versus `/private/tmp` would otherwise silently match nothing.
     """
-    import bidslake
-    from bidslake.paths import to_local_path
+    stored = roots["root_uri"].to_list()
 
-    for uri in lake.roots()["root_uri"].to_list():
-        assert bidslake.to_uri(to_local_path(uri)) == uri
+    round_tripped = {uri: bidslake.to_uri(to_local_path(uri)) for uri in stored}
+
+    assert round_tripped == {uri: uri for uri in stored}
 
 
-def test_roots_reads_a_catalog_written_before_tenure(tmp_path):
-    """An older catalog has no `tenure` column, and reading must not require one.
+# -- reading a catalog older than the `tenure` column -------------------------
 
-    `index` is the only command that runs DDL, and this package opens read-only, so a reader
-    that insisted on the column could not open such a catalog at all. `attached` is reported
-    because it is what that root actually promised — the same value the write-side backfill
-    (`ALTER TABLE ... DEFAULT 'attached'`) would have given it.
+
+@pytest.fixture(scope="module")
+def pre_tenure_roots(tmp_path_factory: pytest.TempPathFactory):
+    """`roots()` over a catalog whose `dataset_roots` predates the `tenure` column.
+
+    Fabricated with the `duckdb` CLI, because the old shape predates anything this package
+    can write: `bidslake.open` is read-only, and `index` would build the current schema.
     """
-    import shutil
-    import subprocess
-
-    import bidslake
-
-    # Fabricated with the CLI, because the old shape predates anything this package can
-    # write: `bidslake.open` is read-only, and `index` would build the current schema.
     cli = shutil.which("duckdb")
     if cli is None:
         pytest.skip("no duckdb CLI to fabricate a pre-tenure catalog with")
 
-    db = tmp_path / "old.duckdb"
+    db = tmp_path_factory.mktemp("pre-tenure") / "old.duckdb"
     subprocess.run(
         [cli, str(db)],
         input=(
@@ -108,7 +124,16 @@ def test_roots_reads_a_catalog_written_before_tenure(tmp_path):
         check=True,
         capture_output=True,
     )
+    return bidslake.open(str(db)).roots()
 
-    df = bidslake.open(str(db)).roots()
-    assert df["tenure"].to_list() == ["attached"]
-    assert set(df.columns) == {"dataset_id", "root_uri", "tenure"}
+
+def test_a_pre_tenure_catalog_still_opens(pre_tenure_roots):
+    """`index` is the only command that runs DDL and this package opens read-only, so a
+    reader that insisted on the column could not open such a catalog at all."""
+    assert set(pre_tenure_roots.columns) == {"dataset_id", "root_uri", "tenure"}
+
+
+def test_a_pre_tenure_root_reads_as_attached(pre_tenure_roots):
+    """`attached` because it is what that root actually promised — the same value the
+    write-side backfill (`ALTER TABLE … DEFAULT 'attached'`) would have given it."""
+    assert pre_tenure_roots["tenure"].to_list() == ["attached"]

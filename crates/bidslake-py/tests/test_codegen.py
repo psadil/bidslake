@@ -6,35 +6,45 @@ contains. The schema-JSON value-set `Literal`s (Entity/Datatype/Suffix/Modality/
 Sex/Handedness) are NOT checked here — the `codegen-drift` CI job
 (.github/workflows/ci.yml) re-runs `emit-types` and `git diff --exit-code`s
 `_generated.py`, which is what actually guards those.
+
+The per-table checks are parametrized rather than looped so that a drifted table names
+itself in the failure, and so one drifted table does not hide the next.
 """
 
 from __future__ import annotations
 
 import polars as pl
+import pytest
 from bidslake.schema import COLUMNS, C
+
+TABLES = sorted(COLUMNS)
 
 
 def test_generated_tables_match_database(lake):
     assert set(COLUMNS) == set(lake.tables())
 
 
-def test_c_namespace_is_typed_pl_col():
-    # Per-table accessors resolve to the matching pl.col expression.
-    assert str(C.all_files.task) == str(pl.col("task")) and str(C.sidecars.RepetitionTime) == str(
-        pl.col("RepetitionTime")
-    )
+@pytest.mark.parametrize(
+    ("accessor", "column"),
+    [(C.all_files.task, "task"), (C.sidecars.RepetitionTime, "RepetitionTime")],
+)
+def test_c_namespace_is_typed_pl_col(accessor, column):
+    """Per-table accessors resolve to the matching pl.col expression."""
+    assert str(accessor) == str(pl.col(column))
 
 
-def test_generated_columns_match_database(lake):
-    mismatches = {table: set(cols) ^ set(lake.columns(table)) for table, cols in COLUMNS.items()}
-    assert not any(mismatches.values())
+@pytest.mark.parametrize("table", TABLES)
+def test_generated_columns_match_database(lake, table):
+    assert set(COLUMNS[table]) == set(lake.columns(table))
 
 
-def test_generated_column_types_match_database(lake):
+@pytest.mark.parametrize("table", TABLES)
+def test_generated_column_types_match_database(lake, table):
+    actual = lake.columns(table)
     mismatches = {
-        f"{table}.{name}": (dtype, lake.columns(table).get(name))
-        for table, cols in COLUMNS.items()
-        for name, dtype in cols.items()
-        if lake.columns(table).get(name) != dtype
+        name: (dtype, actual.get(name))
+        for name, dtype in COLUMNS[table].items()
+        if actual.get(name) != dtype
     }
-    assert not mismatches
+
+    assert mismatches == {}

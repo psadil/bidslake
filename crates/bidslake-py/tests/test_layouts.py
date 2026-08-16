@@ -8,8 +8,8 @@ actual index of a tree built from those very paths.
 
 from __future__ import annotations
 
-import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import bidslake
@@ -17,58 +17,96 @@ import pytest
 
 UNIT = "sub-01_ses-V1_task-rest_run-01_desc-preproc_bold"
 
+#: The slots a FIX/MELODIC run actually produces and downstream code reaches for.
+FEAT_ROLES = (
+    "filtered_func",
+    "filtered_func_clean",
+    "mask",
+    "melodic_mix",
+    "motion_params",
+    "classification",
+    "example_func",
+    "highres",
+    "standard",
+    "wmparc",
+    "highres2standard_mat",
+    "standard2example_func_warp",
+)
+
 
 @pytest.fixture(scope="module")
 def feat() -> bidslake.Layout:
     return bidslake.layout("feat")
 
 
-def test_roles_cover_the_feat_tree(feat: bidslake.Layout) -> None:
-    # The slots a FIX/MELODIC run actually produces and downstream code reaches for.
-    for role in (
-        "filtered_func",
-        "filtered_func_clean",
-        "mask",
-        "melodic_mix",
-        "motion_params",
-        "classification",
-        "example_func",
-        "highres",
-        "standard",
-        "wmparc",
-        "highres2standard_mat",
-        "standard2example_func_warp",
-    ):
-        assert role in feat.roles
+@pytest.mark.parametrize("role", FEAT_ROLES)
+def test_roles_cover_the_feat_tree(feat: bidslake.Layout, role: str) -> None:
+    assert role in feat.roles
+
+
+def test_the_layout_names_its_term_map(feat: bidslake.Layout) -> None:
     assert feat.term_map == "feat"
 
 
-def test_literal_roles_render_under_a_root(feat: bidslake.Layout) -> None:
-    at = feat.under(Path("/work") / UNIT)
-    assert at["filtered_func_clean"] == Path(f"/work/{UNIT}/filtered_func_data_clean.nii.gz")
-    assert at["highres2standard_mat"] == Path(f"/work/{UNIT}/reg/highres2standard.mat")
-    assert at["melodic_mix"] == Path(f"/work/{UNIT}/filtered_func_data.ica/melodic_mix")
+# -- rendering ---------------------------------------------------------------
+#
+# The roles needing no bindings are rendered from `under()` alone; this is also what pins
+# that the 21 such roles keep working when nothing is bound.
 
 
-def test_placeholders_come_from_keywords(feat: bidslake.Layout) -> None:
+@pytest.mark.parametrize(
+    ("role", "relative"),
+    [
+        ("filtered_func", "filtered_func_data.nii.gz"),
+        ("filtered_func_clean", "filtered_func_data_clean.nii.gz"),
+        ("highres2standard_mat", "reg/highres2standard.mat"),
+        ("melodic_mix", "filtered_func_data.ica/melodic_mix"),
+    ],
+)
+def test_literal_roles_render_under_a_root(feat: bidslake.Layout, role: str, relative: str) -> None:
     at = feat.under(Path("/work") / UNIT)
-    assert at.path("classification", training="UKBiobank", threshold="1") == Path(
-        f"/work/{UNIT}/fix4melview_UKBiobank_thr1.txt"
-    )
-    assert at.path(
-        "classification_by_rater", training="UKBiobank", threshold="1", rater="psadil"
-    ) == Path(f"/work/{UNIT}/fix4melview_UKBiobank_thr1_psadil.txt")
+
+    assert at[role] == Path(f"/work/{UNIT}/{relative}")
+
+
+@pytest.mark.parametrize(
+    ("role", "keywords", "relative"),
+    [
+        (
+            "classification",
+            {"training": "UKBiobank", "threshold": "1"},
+            "fix4melview_UKBiobank_thr1.txt",
+        ),
+        (
+            "classification_by_rater",
+            {"training": "UKBiobank", "threshold": "1", "rater": "psadil"},
+            "fix4melview_UKBiobank_thr1_psadil.txt",
+        ),
+    ],
+)
+def test_placeholders_come_from_keywords(
+    feat: bidslake.Layout, role: str, keywords: dict[str, str], relative: str
+) -> None:
+    at = feat.under(Path("/work") / UNIT)
+
+    assert at.path(role, **keywords) == Path(f"/work/{UNIT}/{relative}")
 
 
 def test_unbound_placeholder_raises_rather_than_guessing(feat: bidslake.Layout) -> None:
-    """An empty substitution would produce a plausible path pointing at nothing."""
+    """An empty substitution would produce a plausible path pointing at nothing.
+
+    The guarantee ADR 0008 states; binding at `under()` (below) moved only the *moment*
+    of binding, not this.
+    """
     at = feat.under(Path("/work") / UNIT)
+
     with pytest.raises(KeyError, match="unbound placeholders"):
         at["classification"]
 
 
 def test_unknown_role_lists_what_exists(feat: bidslake.Layout) -> None:
     at = feat.under(Path("/work") / UNIT)
+
     with pytest.raises(KeyError, match="unknown role"):
         at["highres2standard"]  # the real role name ends in `_mat`
 
@@ -78,72 +116,75 @@ def test_unknown_layout_names_the_bundled_ones() -> None:
         bidslake.layout("nope")
 
 
-def test_mkdir_creates_the_parent(feat: bidslake.Layout, tmp_path: Path) -> None:
-    target = feat.under(tmp_path / UNIT).mkdir("highres2standard_mat")
-    assert target.parent.is_dir()
-    assert not target.exists(), "only the directory is created, not the file"
+@pytest.fixture
+def mkdir_target(feat: bidslake.Layout, tmp_path: Path) -> Path:
+    return feat.under(tmp_path / UNIT).mkdir("highres2standard_mat")
 
 
-def test_rendered_paths_index_back_as_declared(feat: bidslake.Layout, tmp_path: Path) -> None:
-    """The end-to-end version of the round trip the layout checks at load time.
+def test_mkdir_creates_the_parent(mkdir_target: Path) -> None:
+    assert mkdir_target.parent.is_dir()
 
-    Build a tree *from the layout's own rendered paths*, index it with the `feat`
-    adapter, and confirm each file reads back as the role declared. This is what makes
+
+def test_mkdir_does_not_create_the_file(mkdir_target: Path) -> None:
+    """Only the directory is created; the file is the caller's to write."""
+    assert not mkdir_target.exists()
+
+
+# -- the round trip ----------------------------------------------------------
+#
+# `desc` is worth reading carefully. Where a role's mapping sets it, the projection wins.
+# Where it does not (`highres`, `wmparc` -- identified by `suffix` and `seg` instead), the
+# concept column falls back to the path regex, which finds `desc-preproc` in the *unit
+# directory* name. That is the input BOLD's desc, and inheriting it is a true statement
+# about which run the tree was built from.
+
+ROUND_TRIP = {
+    "filtered_func_clean": ("func", "bold", "clean"),
+    "mask": ("func", "mask", "brain"),
+    "melodic_mix": ("func", "mixing", "MELODIC"),
+    "highres": ("anat", "T1w", "preproc"),
+    "wmparc": ("anat", "dseg", "preproc"),
+}
+
+
+@pytest.fixture(scope="module")
+def indexed_feat_tree(
+    feat: bidslake.Layout,
+    tmp_path_factory: pytest.TempPathFactory,
+    bidslake_cli: Callable[..., None],
+):
+    """A tree built *from the layout's own rendered paths*, indexed with the `feat` adapter.
+
+    The end-to-end version of the round trip the layout checks at load time, and what makes
     the two directions trustworthy rather than merely coexisting.
     """
-    binary = (
-        Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip())
-        / "target"
-        / "debug"
-        / "bidslake"
-    )
-    if not binary.exists():
-        pytest.skip("build the debug binary first: cargo build -p bidslake")
-
-    root = tmp_path / "out"
+    base = tmp_path_factory.mktemp("roundtrip")
+    root = base / "out"
     at = feat.under(root / UNIT)
-    # `desc` is worth reading carefully. Where a role's mapping sets it, the projection
-    # wins. Where it does not (`highres`, `wmparc` -- identified by `suffix` and `seg`
-    # instead), the concept column falls back to the path regex, which finds
-    # `desc-preproc` in the *unit directory* name. That is the input BOLD's desc, and
-    # inheriting it is a true statement about which run the tree was built from.
-    expected = {
-        "filtered_func_clean": ("func", "bold", "clean"),
-        "mask": ("func", "mask", "brain"),
-        "melodic_mix": ("func", "mixing", "MELODIC"),
-        "highres": ("anat", "T1w", "preproc"),
-        "wmparc": ("anat", "dseg", "preproc"),
-    }
-    for role in expected:
+    for role in ROUND_TRIP:
         at.mkdir(role).write_bytes(b"x")
 
-    db = tmp_path / "out.duckdb"
-    subprocess.run(
-        [
-            str(binary),
-            "index",
-            "-i",
-            str(root),
-            "-o",
-            str(db),
-            "--dataset-id",
-            "out",
-            "--adapter",
-            "feat",
-        ],
-        check=True,
-        capture_output=True,
-    )
+    db = base / "out.duckdb"
+    bidslake_cli("index", "-i", root, "-o", db, "--dataset-id", "out", "--adapter", "feat")
 
     with bidslake.open(str(db)) as lake:
         rows = {
             Path(f.file_path).name: (f.datatype, f.suffix, f.entities.get("desc"))
             for f in lake.get()
         }
-    for role, want in expected.items():
-        name = at[role].name
-        assert name in rows, f"{role} ({name}) was not indexed"
-        assert rows[name] == want, f"{role} read back as {rows[name]}, declared {want}"
+    return at, rows
+
+
+@pytest.mark.parametrize(("role", "expected"), sorted(ROUND_TRIP.items()))
+def test_rendered_paths_index_back_as_declared(
+    indexed_feat_tree, role: str, expected: tuple[str, str, str]
+) -> None:
+    at, rows = indexed_feat_tree
+    name = at[role].name
+
+    # `.get`, so a role that was never indexed at all reads as `None` here rather than
+    # raising something unrelated to what is being checked.
+    assert rows.get(name) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -162,60 +203,67 @@ BINDINGS = {"training": "UKBiobank", "threshold": "1", "rater": "psadil"}
 
 def test_bindings_given_to_under_are_inherited(feat: bidslake.Layout) -> None:
     at = feat.under(Path("/work") / UNIT, training="UKBiobank", threshold="1")
+
     assert at["classification"] == Path(f"/work/{UNIT}/fix4melview_UKBiobank_thr1.txt")
 
 
 def test_a_per_call_keyword_overrides_a_bound_one(feat: bidslake.Layout) -> None:
     at = feat.under(Path("/work") / UNIT, **BINDINGS)
+
     assert at.path("classification", threshold="20") == Path(
         f"/work/{UNIT}/fix4melview_UKBiobank_thr20.txt"
     )
-    # …and the binding is not mutated by having been overridden once.
+
+
+def test_an_override_does_not_mutate_the_binding(feat: bidslake.Layout) -> None:
+    """The override is per call, so the next lookup sees the run-wide value again."""
+    at = feat.under(Path("/work") / UNIT, **BINDINGS)
+    at.path("classification", threshold="20")
+
     assert at["classification"] == Path(f"/work/{UNIT}/fix4melview_UKBiobank_thr1.txt")
 
 
 def test_a_per_call_keyword_completes_a_partial_binding(feat: bidslake.Layout) -> None:
     """The `rater` case: run-wide values bound once, the per-file one supplied late."""
     at = feat.under(Path("/work") / UNIT, training="UKBiobank", threshold="1")
+
     assert at.path("classification_by_rater", rater="ab") == Path(
         f"/work/{UNIT}/fix4melview_UKBiobank_thr1_ab.txt"
     )
 
 
 def test_every_role_renders_when_the_placeholders_are_bound(feat: bidslake.Layout) -> None:
-    """The point of the change: walking `roles` needs no knowledge of which are special."""
+    """The point of the change: walking `roles` needs no knowledge of which are special.
+
+    That every role renders is the comprehension itself — an unbound one would raise. What
+    is left to assert is that each rendered path is usable.
+    """
     at = feat.under(Path("/work") / UNIT, **BINDINGS)
+
     rendered = [at[role] for role in feat.roles]
-    assert len(rendered) == len(feat.roles)
-    assert all(p.is_absolute() for p in rendered)
 
-
-def test_binding_nothing_still_raises(feat: bidslake.Layout) -> None:
-    """The guarantee ADR 0008 states is unchanged; only the moment of binding moved."""
-    at = feat.under(Path("/work") / UNIT)
-    with pytest.raises(KeyError, match="unbound placeholders"):
-        at["classification"]
+    assert {p.is_absolute() for p in rendered} == {True}
 
 
 def test_a_mistyped_binding_says_what_is_bound(feat: bidslake.Layout) -> None:
     """Otherwise `under(root, trainng=…)` fails as 'unbound' to a caller who did bind it."""
     at = feat.under(Path("/work") / UNIT, trainng="UKBiobank", threshold="1")
+
     with pytest.raises(KeyError, match=r"bound here: threshold='1', trainng='UKBiobank'"):
         at["classification"]
 
 
-def test_mkdir_inherits_the_bindings(feat: bidslake.Layout, tmp_path: Path) -> None:
-    at = feat.under(tmp_path / UNIT, **BINDINGS)
-    target = at.mkdir("classification")
-    assert target.parent.is_dir()
-    assert target.name == "fix4melview_UKBiobank_thr1.txt"
+@pytest.fixture
+def bound_mkdir_target(feat: bidslake.Layout, tmp_path: Path) -> Path:
+    return feat.under(tmp_path / UNIT, **BINDINGS).mkdir("classification")
 
 
-def test_under_without_bindings_is_unchanged(feat: bidslake.Layout) -> None:
-    """The 21 roles that need nothing keep working exactly as before."""
-    at = feat.under(Path("/work") / UNIT)
-    assert at["filtered_func"] == Path(f"/work/{UNIT}/filtered_func_data.nii.gz")
-    assert at["highres2standard_mat"] == Path(f"/work/{UNIT}/reg/highres2standard.mat")
+def test_mkdir_creates_the_parent_of_a_bound_role(bound_mkdir_target: Path) -> None:
+    assert bound_mkdir_target.parent.is_dir()
+
+
+def test_mkdir_inherits_the_bindings(bound_mkdir_target: Path) -> None:
+    assert bound_mkdir_target.name == "fix4melview_UKBiobank_thr1.txt"
 
 
 # ---------------------------------------------------------------------------
@@ -231,83 +279,132 @@ def test_under_without_bindings_is_unchanged(feat: bidslake.Layout) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_presence_is_false_before_anything_is_written(feat, tmp_path):
-    at = feat.under(tmp_path / UNIT, **BINDINGS)
-    assert at.has("filtered_func") is False
-    assert set(at.present().values()) == {False}
+@pytest.fixture
+def empty_tree(feat, tmp_path):
+    """A bound layout over a root where nothing has been written yet."""
+    return feat.under(tmp_path / UNIT, **BINDINGS)
 
 
-def test_presence_follows_the_filesystem(feat, tmp_path):
+def test_has_is_false_before_anything_is_written(empty_tree):
+    assert empty_tree.has("filtered_func") is False
+
+
+def test_no_role_is_present_before_anything_is_written(empty_tree):
+    assert set(empty_tree.present().values()) == {False}
+
+
+@pytest.fixture
+def one_written_role(feat, tmp_path):
+    """The same, with exactly one role's file written."""
     at = feat.under(tmp_path / UNIT, **BINDINGS)
     at.mkdir("filtered_func").write_bytes(b"x" * 1234)
-    assert at.has("filtered_func") is True
-    assert at.present()["filtered_func"] is True
-    assert at.present()["melodic_mix"] is False
+    return at
 
 
-def test_state_carries_size_and_mtime(feat, tmp_path):
+def test_has_follows_the_filesystem(one_written_role):
+    assert one_written_role.has("filtered_func") is True
+
+
+def test_present_reports_the_written_role(one_written_role):
+    assert one_written_role.present()["filtered_func"] is True
+
+
+def test_present_still_reports_the_unwritten_ones(one_written_role):
+    assert one_written_role.present()["melodic_mix"] is False
+
+
+def test_state_carries_size_and_mtime(one_written_role):
+    state = one_written_role.state("filtered_func")
+
+    assert (state.role, state.exists, state.size_bytes) == ("filtered_func", True, 1234)
+
+
+def test_a_present_role_has_an_mtime(one_written_role):
+    assert one_written_role.state("filtered_func").mtime_ns is not None
+
+
+def test_an_absent_role_has_no_stat(one_written_role):
+    state = one_written_role.state("melodic_mix")
+
+    assert (state.exists, state.size_bytes, state.mtime_ns) == (False, None, None)
+
+
+# -- unaddressable is not the same answer as missing -------------------------
+
+
+@pytest.fixture
+def partially_bound(feat, tmp_path):
+    """`training`/`threshold` bound, `rater` deliberately not."""
+    return feat.under(tmp_path / UNIT, training="UKBiobank", threshold="1")
+
+
+def test_a_renderable_role_is_reported(partially_bound):
+    assert "classification" in partially_bound.present()
+
+
+def test_an_unrenderable_role_is_omitted_not_reported_absent(partially_bound):
+    """Conflating them would report a finished tree as incomplete because a caller forgot a
+    keyword — which is exactly the confusion the raise on `path()` exists to prevent."""
+    assert "classification_by_rater" not in partially_bound.present()
+
+
+def test_supplying_the_last_keyword_makes_it_renderable(feat, tmp_path):
     at = feat.under(tmp_path / UNIT, **BINDINGS)
-    at.mkdir("filtered_func").write_bytes(b"x" * 1234)
-    st = at.state("filtered_func")
-    assert (st.role, st.exists, st.size_bytes) == ("filtered_func", True, 1234)
-    assert st.mtime_ns is not None
-    absent = at.state("melodic_mix")
-    assert (absent.exists, absent.size_bytes, absent.mtime_ns) == (False, None, None)
+
+    assert "classification_by_rater" in at.present()
 
 
-def test_an_unrenderable_role_is_omitted_not_reported_absent(feat, tmp_path):
-    """Unaddressable and missing are different answers.
-
-    Conflating them would report a finished tree as incomplete because a caller forgot a
-    keyword — which is exactly the confusion the raise on `path()` exists to prevent.
-    """
-    at = feat.under(tmp_path / UNIT, training="UKBiobank", threshold="1")  # no `rater`
-    present = at.present()
-    assert "classification" in present, "bound placeholders make this one renderable"
-    assert "classification_by_rater" not in present, "unbound `{rater}` — omitted, not False"
-    # With `rater` supplied, it joins the rest.
-    assert "classification_by_rater" in feat.under(tmp_path / UNIT, **BINDINGS).present()
-
-
-def test_has_answers_false_rather_than_raising(feat, tmp_path):
+def test_has_answers_false_rather_than_raising(partially_bound):
     """`path()` raises for an unrenderable role; `has()` deliberately does not.
 
-    A caller asking "is it there" wants an answer.
+    A caller asking "is it there" wants an answer. That `path()` raises is pinned by
+    `test_unbound_placeholder_raises_rather_than_guessing`.
     """
-    at = feat.under(tmp_path / UNIT, training="UKBiobank", threshold="1")
-    with pytest.raises(KeyError):
-        at["classification_by_rater"]
-    assert at.has("classification_by_rater") is False
+    assert partially_bound.has("classification_by_rater") is False
 
 
-def test_digest_changes_when_a_file_appears(feat, tmp_path):
-    at = feat.under(tmp_path / UNIT, **BINDINGS)
-    before = at.digest()
-    at.mkdir("filtered_func").write_bytes(b"x" * 1234)
-    assert at.digest() != before
+# -- the digest, which is a cache key ----------------------------------------
 
 
-def test_digest_changes_on_a_size_preserving_rewrite(feat, tmp_path):
+def test_digest_changes_when_a_file_appears(empty_tree):
+    before = empty_tree.digest()
+
+    empty_tree.mkdir("filtered_func").write_bytes(b"x" * 1234)
+
+    assert empty_tree.digest() != before
+
+
+def test_digest_changes_on_a_size_preserving_rewrite(one_written_role):
     """The case a size-only check misses, and the reason mtime is in the digest."""
-    at = feat.under(tmp_path / UNIT, **BINDINGS)
-    at.mkdir("filtered_func").write_bytes(b"x" * 1234)
-    before = at.digest()
+    before = one_written_role.digest()
     time.sleep(0.01)
-    at["filtered_func"].write_bytes(b"y" * 1234)  # same size, new mtime
-    assert at.digest() != before
+
+    one_written_role["filtered_func"].write_bytes(b"y" * 1234)  # same size, new mtime
+
+    assert one_written_role.digest() != before
 
 
-def test_digest_is_stable_when_nothing_moves(feat, tmp_path):
-    at = feat.under(tmp_path / UNIT, **BINDINGS)
-    at.mkdir("filtered_func").write_bytes(b"x" * 1234)
-    assert at.digest() == at.digest()
+def test_digest_is_stable_when_nothing_moves(one_written_role):
+    assert one_written_role.digest() == one_written_role.digest()
 
 
-def test_digest_can_be_scoped_to_one_step_s_roles(feat, tmp_path):
+@pytest.fixture
+def after_an_unrelated_write(one_written_role):
+    """The digests taken before an *unrelated* role was written, and the tree after."""
+    scoped = one_written_role.digest("filtered_func")
+    whole = one_written_role.digest()
+    one_written_role.mkdir("melodic_mix").write_bytes(b"y")
+    return one_written_role, scoped, whole
+
+
+def test_a_scoped_digest_ignores_an_unrelated_role(after_an_unrelated_write):
     """What a per-step cache key needs: only the roles that step writes."""
-    at = feat.under(tmp_path / UNIT, **BINDINGS)
-    at.mkdir("filtered_func").write_bytes(b"x")
-    scoped = at.digest("filtered_func")
-    at.mkdir("melodic_mix").write_bytes(b"y")
-    assert at.digest("filtered_func") == scoped, "an unrelated role must not move it"
-    assert at.digest() != scoped, "but the whole-tree digest did move"
+    at, scoped, _ = after_an_unrelated_write
+
+    assert at.digest("filtered_func") == scoped
+
+
+def test_the_whole_tree_digest_still_moves(after_an_unrelated_write):
+    at, _, whole = after_an_unrelated_write
+
+    assert at.digest() != whole

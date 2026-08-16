@@ -12,8 +12,7 @@ that adapter provenance is recoverable.
 
 from __future__ import annotations
 
-import subprocess
-from pathlib import Path
+from collections.abc import Callable
 
 import bidslake
 import pytest
@@ -34,17 +33,10 @@ superiorfrontal  5000 3500 11000  2.8  0.6  0.090  0.020  30  2.5
 """
 
 
-def _repo_root() -> Path:
-    out = subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True)
-    return Path(out.strip())
-
-
 @pytest.fixture(scope="module")
-def freesurfer_db(tmp_path_factory: pytest.TempPathFactory) -> str:
-    binary = _repo_root() / "target" / "debug" / "bidslake"
-    if not binary.exists():
-        pytest.skip("build the debug binary first: cargo build -p bidslake")
-
+def freesurfer_db(
+    tmp_path_factory: pytest.TempPathFactory, bidslake_cli: Callable[..., None]
+) -> str:
     root = tmp_path_factory.mktemp("freesurfer")
     stats = root / "sub-01_ses-1" / "stats"
     surf = root / "sub-01_ses-1" / "surf"
@@ -59,81 +51,89 @@ def freesurfer_db(tmp_path_factory: pytest.TempPathFactory) -> str:
     (mri / "wmparc.mgz").write_bytes(b"MGZ")
 
     db = tmp_path_factory.mktemp("db") / "fs.duckdb"
-    subprocess.run(
-        [
-            str(binary),
-            "index",
-            "-i",
-            str(root),
-            "-o",
-            str(db),
-            "--dataset-id",
-            "fsdemo",
-            "--adapter",
-            "freesurfer",
-        ],
-        check=True,
-        capture_output=True,
-    )
+    bidslake_cli("index", "-i", root, "-o", db, "--dataset-id", "fsdemo", "--adapter", "freesurfer")
     return str(db)
 
 
-def test_adapter_tables_are_queryable_at_runtime(freesurfer_db: str) -> None:
+@pytest.fixture(scope="module")
+def fs_lake(freesurfer_db: str):
     with bidslake.open(freesurfer_db) as lake:
-        assert "freesurfer_aparc" in lake.tables()
-        df = lake.table("freesurfer_aparc").pl()
-        assert df.height == 2
+        yield lake
 
 
-def test_adapter_values_are_typed(freesurfer_db: str) -> None:
-    with bidslake.open(freesurfer_db) as lake:
-        df = lake.table("freesurfer_aparc").pl()
-        thick = df.filter(df["StructName"] == "bankssts")["ThickAvg"][0]
-        assert thick == pytest.approx(2.5)
+@pytest.fixture(scope="module")
+def aparc(fs_lake):
+    return fs_lake.table("freesurfer_aparc").pl()
 
 
-def test_adapter_concept_filter(freesurfer_db: str) -> None:
-    with bidslake.open(freesurfer_db) as lake:
-        rows = list(lake.get(table="freesurfer_aparc", hemi="lh", parc="aparc"))
-        assert len(rows) == 2
+def test_adapter_tables_are_registered(fs_lake) -> None:
+    assert "freesurfer_aparc" in fs_lake.tables()
 
 
-def test_adapter_measures(freesurfer_db: str) -> None:
-    with bidslake.open(freesurfer_db) as lake:
-        etiv = lake.table("freesurfer_measures").pl()["eTIV"].drop_nulls().to_list()
-        assert etiv == [pytest.approx(1_500_000.0)]
+def test_adapter_tables_hold_the_parsed_rows(aparc) -> None:
+    assert aparc.height == 2
 
 
-def test_adapter_provenance(freesurfer_db: str) -> None:
-    with bidslake.open(freesurfer_db) as lake:
-        assert [source for _idx, source, _sha in lake.term_maps] == ["freesurfer"]
+def test_adapter_values_are_typed(aparc) -> None:
+    """A float column arrives as a float, not the text the `.stats` file holds."""
+    thickness = aparc.filter(aparc["StructName"] == "bankssts")["ThickAvg"][0]
+
+    assert thickness == pytest.approx(2.5)
 
 
-def test_cataloged_file_is_reachable_by_projected_concept(freesurfer_db: str) -> None:
-    """A term-mapped file answers `get()` by what its term map says it is.
+def test_adapter_concept_filter(fs_lake) -> None:
+    rows = list(fs_lake.get(table="freesurfer_aparc", hemi="lh", parc="aparc"))
 
-    `mri/wmparc.mgz` carries no BIDS entity in its name, so before the projection was
-    retained the only way to reach it was matching the path by hand. This is the
-    query that replaces `file_path.endswith("mri/wmparc.mgz")`.
+    assert len(rows) == 2
+
+
+def test_adapter_measures(fs_lake) -> None:
+    etiv = fs_lake.table("freesurfer_measures").pl()["eTIV"].drop_nulls().to_list()
+
+    assert etiv == [pytest.approx(1_500_000.0)]
+
+
+def test_adapter_provenance(fs_lake) -> None:
+    assert [source for _idx, source, _sha in fs_lake.term_maps] == ["freesurfer"]
+
+
+# -- a file whose only concepts come from the term map -----------------------
+
+
+def test_a_term_mapped_file_is_reachable_by_projected_concept(fs_lake) -> None:
+    """`mri/wmparc.mgz` carries no BIDS entity in its name, so before the projection was
+    retained the only way to reach it was matching the path by hand. This is the query
+    that replaces `file_path.endswith("mri/wmparc.mgz")`.
     """
-    with bidslake.open(freesurfer_db) as lake:
-        hits = list(lake.get(sub="01", ses="1", seg="wmparc", extension=".mgz"))
-        assert len(hits) == 1
-        assert hits[0].file_path.endswith("mri/wmparc.mgz")
-        assert hits[0].datatype == "anat"
-        assert hits[0].suffix == "dseg"
+    hits = list(fs_lake.get(sub="01", ses="1", seg="wmparc", extension=".mgz"))
+
+    assert len(hits) == 1
 
 
-def test_projection_is_not_exposed_as_an_entity(freesurfer_db: str) -> None:
+@pytest.fixture(scope="module")
+def wmparc(fs_lake):
+    return next(iter(fs_lake.get(seg="wmparc", extension=".mgz")))
+
+
+def test_the_projected_concept_reaches_the_intended_file(wmparc) -> None:
+    assert wmparc.file_path.endswith("mri/wmparc.mgz")
+
+
+def test_the_term_map_supplies_datatype_and_suffix(wmparc) -> None:
+    assert (wmparc.datatype, wmparc.suffix) == ("anat", "dseg")
+
+
+def test_projection_is_not_exposed_as_an_entity(wmparc) -> None:
     """`projected` backs the concept columns; it is not itself a concept.
 
-    It is a real column on adapter catalogs, so without an explicit exclusion it
-    would surface as a JSON blob in `entities` — on adapter catalogs only, which is
-    exactly the kind of difference that is painful to discover later.
+    It is a real column on adapter catalogs, so without an explicit exclusion it would
+    surface as a JSON blob in `entities` — on adapter catalogs only, which is exactly the
+    kind of difference that is painful to discover later.
     """
-    with bidslake.open(freesurfer_db) as lake:
-        hit = next(iter(lake.get(seg="wmparc", extension=".mgz")))
-        assert "projected" not in hit.entities
-        # The concepts it supplied are present, under their own names.
-        assert hit.entities["seg"] == "wmparc"
-        assert hit.entities["sub"] == "01"
+    assert "projected" not in wmparc.entities
+
+
+def test_the_projected_concepts_appear_under_their_own_names(wmparc) -> None:
+    supplied = {k: wmparc.entities.get(k) for k in ("seg", "sub")}
+
+    assert supplied == {"seg": "wmparc", "sub": "01"}
