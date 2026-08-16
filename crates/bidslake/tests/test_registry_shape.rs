@@ -178,3 +178,26 @@ async fn a_second_root_is_registered_not_refused() -> anyhow::Result<()> {
     assert_eq!(db.dataset_roots("study")?.len(), 2);
     Ok(())
 }
+
+/// `dataset_description` is keyed by `dataset_id`, so re-`index`ing a dataset updates its row
+/// rather than accumulating one per run.
+///
+/// This is what `test_pk_error.rs` was reaching for. That test stripped `PRIMARY KEY` out of
+/// this DDL and asserted an insert still succeeded — a property of DuckDB rather than of
+/// bidslake, and one that held with the key left in anyway, since `Schema::insert` runs
+/// `INSERT ... WHERE NOT EXISTS` and never needed a key. Asserting the key exists is the part
+/// that was worth keeping.
+#[test]
+fn dataset_description_is_keyed_by_dataset_id() -> anyhow::Result<()> {
+    let schema = schema_for(&[])?;
+
+    let ddl = schema
+        .get_create_sql("dataset_description")
+        .expect("dataset_description should be a generated table");
+
+    assert!(
+        ddl.contains("dataset_id TEXT PRIMARY KEY"),
+        "expected a primary key on dataset_id, got:\n{ddl}"
+    );
+    Ok(())
+}

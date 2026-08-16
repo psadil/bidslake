@@ -246,20 +246,17 @@ async fn test_orphaned_symlink() {
     let tmp = tempdir();
     create_minimal_dataset(&tmp);
 
-    #[cfg(unix)]
-    {
-        // Instead of relying on read_file_tree (which drops broken symlinks via `ignore` crate),
-        // we can directly test the validator manually.
-        let link_path = tmp.join("sub-01").join("anat").join("sub-01_T1w.nii");
-        // The fixture writes a real T1w image there; this test wants a broken link in its place.
-        fs::remove_file(&link_path).unwrap();
-        std::os::unix::fs::symlink(tmp.join("does_not_exist.nii"), &link_path).unwrap();
+    // Instead of relying on read_file_tree (which drops broken symlinks via `ignore` crate),
+    // we can directly test the validator manually.
+    let link_path = tmp.join("sub-01").join("anat").join("sub-01_T1w.nii");
+    // The fixture writes a real T1w image there; this test wants a broken link in its place.
+    fs::remove_file(&link_path).unwrap();
+    std::os::unix::fs::symlink(tmp.join("does_not_exist.nii"), &link_path).unwrap();
 
-        let issues = validate_dataset(&tmp).await;
+    let issues = validate_dataset(&tmp).await;
 
-        let orphaned = issues.issues.iter().any(|i| i.code == "ORPHANED_SYMLINK");
-        assert!(orphaned, "Expected ORPHANED_SYMLINK");
-    }
+    let orphaned = issues.issues.iter().any(|i| i.code == "ORPHANED_SYMLINK");
+    assert!(orphaned, "Expected ORPHANED_SYMLINK");
 }
 
 #[tokio::test]
@@ -267,27 +264,23 @@ async fn test_file_read() {
     let tmp = tempdir();
     create_minimal_dataset(&tmp);
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        // Create a file without read permissions
-        let unreadable_path = tmp.join("sub-01").join("anat").join("sub-01_T1w.nii");
-        fs::write(&unreadable_path, vec![0u8; 348]).unwrap();
-        let mut perms = fs::metadata(&unreadable_path).unwrap().permissions();
-        perms.set_mode(0o000); // No read permissions
-        fs::set_permissions(&unreadable_path, perms).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    // Create a file without read permissions
+    let unreadable_path = tmp.join("sub-01").join("anat").join("sub-01_T1w.nii");
+    fs::write(&unreadable_path, vec![0u8; 348]).unwrap();
+    let mut perms = fs::metadata(&unreadable_path).unwrap().permissions();
+    perms.set_mode(0o000); // No read permissions
+    fs::set_permissions(&unreadable_path, perms).unwrap();
 
-        let issues = validate_dataset(&tmp).await;
-        println!("DEBUG file read: {:#?}", issues);
-        let file_read = issues.issues.iter().any(|i| i.code == "FILE_READ");
+    let issues = validate_dataset(&tmp).await;
+    let file_read = issues.issues.iter().any(|i| i.code == "FILE_READ");
 
-        // Restore permissions so cleanup doesn't fail
-        let mut perms = fs::metadata(&unreadable_path).unwrap().permissions();
-        perms.set_mode(0o644);
-        fs::set_permissions(&unreadable_path, perms).unwrap();
+    // Restore permissions so `TempDir`'s drop glue can remove the tree.
+    let mut perms = fs::metadata(&unreadable_path).unwrap().permissions();
+    perms.set_mode(0o644);
+    fs::set_permissions(&unreadable_path, perms).unwrap();
 
-        assert!(file_read, "Expected FILE_READ");
-    }
+    assert!(file_read, "Expected FILE_READ");
 }
 
 #[tokio::test]
