@@ -301,6 +301,7 @@ pub fn load_term_map(path: &Path) -> Result<TermMap, TermMapError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     fn fs() -> TermMap {
         bundled_term_map("freesurfer").expect("bundled")
@@ -337,22 +338,31 @@ mod tests {
         assert!(!validate_term_map(&doc).is_empty());
     }
 
-    #[test]
-    fn pcre_collapses_all_subject_dir_forms() {
-        let tm = fs();
-        for (path, sub, ses) in [
-            ("sub-01_ses-1/stats/aseg.stats", "01", Some("1")),
-            ("sub-02/stats/aseg.stats", "02", None),
-            ("03/stats/aseg.stats", "03", None),
-        ] {
-            let f = tm
-                .classify(path)
-                .unwrap_or_else(|| panic!("no match: {path}"));
-            assert_eq!(f.get("sub"), Some(sub));
-            assert_eq!(f.get("ses"), ses);
-            assert_eq!(f.get("seg"), Some("aseg"));
-            assert_eq!(f.suffix.as_deref(), Some("segstats"));
-        }
+    /// The three ways a FreeSurfer subject directory can be named, each yielding the same
+    /// `aseg.stats` classification.
+    #[rstest]
+    #[case::bids_subject_and_session("sub-01_ses-1/stats/aseg.stats", "01", Some("1"))]
+    #[case::bids_subject_only("sub-02/stats/aseg.stats", "02", None)]
+    // A bare label, which is what `recon-all` writes when nobody imposes BIDS naming.
+    #[case::bare_label("03/stats/aseg.stats", "03", None)]
+    fn pcre_collapses_all_subject_dir_forms(
+        #[case] path: &str,
+        #[case] sub: &str,
+        #[case] ses: Option<&str>,
+    ) {
+        let f = fs()
+            .classify(path)
+            .unwrap_or_else(|| panic!("no match: {path}"));
+
+        assert_eq!(
+            (
+                f.get("sub"),
+                f.get("ses"),
+                f.get("seg"),
+                f.suffix.as_deref()
+            ),
+            (Some(sub), ses, Some("aseg"), Some("segstats"))
+        );
     }
 
     #[test]
@@ -365,53 +375,45 @@ mod tests {
         assert_eq!(f.suffix.as_deref(), Some("parcstats"));
     }
 
-    #[test]
-    fn surface_and_volume_project_to_anat() {
-        let s = fs().classify("bert/surf/lh.thickness").expect("surf");
-        assert_eq!(s.datatype.as_deref(), Some("anat"));
-        assert_eq!(s.get("hemi"), Some("lh"));
-        let v = fs().classify("bert/mri/aparc+aseg.mgz").expect("mri");
-        assert_eq!(v.datatype.as_deref(), Some("anat"));
-    }
-
     /// The volumetric segmentations are the ones downstream code actually reaches for
     /// (`wmparc.mgz` above all), so they carry `seg` rather than being swallowed by the
     /// `mri/*.mgz` catch-all — which binds no entity and left consumers string-matching
     /// the path. Order matters: `RegexSet` yields the lowest matching index, so the
     /// specific mapping must precede the catch-all.
-    #[test]
-    fn volumetric_segmentations_carry_seg() {
-        for (path, seg) in [
-            ("sub-10113_ses-V1/mri/wmparc.mgz", "wmparc"),
-            ("bert/mri/aseg.mgz", "aseg"),
-            ("bert/mri/aparc+aseg.mgz", "aparc+aseg"),
-            ("bert/mri/aparc.a2009s+aseg.mgz", "aparc.a2009s+aseg"),
-            ("bert/mri/aparc.DKTatlas+aseg.mgz", "aparc.DKTatlas+aseg"),
-        ] {
-            let f = fs()
-                .classify(path)
-                .unwrap_or_else(|| panic!("no match: {path}"));
-            assert_eq!(f.get("seg"), Some(seg), "{path}");
-            assert_eq!(f.suffix.as_deref(), Some("dseg"), "{path}");
-            assert_eq!(f.datatype.as_deref(), Some("anat"), "{path}");
-        }
+    #[rstest]
+    #[case("sub-10113_ses-V1/mri/wmparc.mgz", "wmparc")]
+    #[case("bert/mri/aseg.mgz", "aseg")]
+    #[case("bert/mri/aparc+aseg.mgz", "aparc+aseg")]
+    #[case("bert/mri/aparc.a2009s+aseg.mgz", "aparc.a2009s+aseg")]
+    #[case("bert/mri/aparc.DKTatlas+aseg.mgz", "aparc.DKTatlas+aseg")]
+    fn volumetric_segmentations_carry_seg(#[case] path: &str, #[case] seg: &str) {
+        let f = fs()
+            .classify(path)
+            .unwrap_or_else(|| panic!("no match: {path}"));
+
+        assert_eq!(
+            (f.get("seg"), f.suffix.as_deref(), f.datatype.as_deref()),
+            (Some(seg), Some("dseg"), Some("anat")),
+            "{path}"
+        );
     }
 
     /// ...and the catch-all still claims every other volume, so adding the specific
     /// mapping above it cannot make a file stop being recognized.
-    #[test]
-    fn other_volumes_still_match_the_catch_all() {
-        for path in [
-            "bert/mri/T1.mgz",
-            "bert/mri/brainmask.mgz",
-            "bert/mri/orig.mgz",
-        ] {
-            let f = fs()
-                .classify(path)
-                .unwrap_or_else(|| panic!("no match: {path}"));
-            assert_eq!(f.datatype.as_deref(), Some("anat"), "{path}");
-            assert_eq!(f.get("seg"), None, "{path}");
-        }
+    #[rstest]
+    #[case("bert/mri/T1.mgz")]
+    #[case("bert/mri/brainmask.mgz")]
+    #[case("bert/mri/orig.mgz")]
+    fn other_volumes_still_match_the_catch_all(#[case] path: &str) {
+        let f = fs()
+            .classify(path)
+            .unwrap_or_else(|| panic!("no match: {path}"));
+
+        assert_eq!(
+            (f.datatype.as_deref(), f.get("seg")),
+            (Some("anat"), None),
+            "{path}"
+        );
     }
 
     #[test]
@@ -428,48 +430,45 @@ mod tests {
     /// in `bids-validator-rs` (`rules::files::term_map_recognizes`), so recognition — not
     /// projection — is what a subtree catch-all is for. One path per subtree that was missed,
     /// so a narrowing shows up here rather than on a user's tree.
-    #[test]
-    fn every_recon_all_subtree_is_recognized() {
-        let tm = fs();
-        for path in [
-            // label/: only *.ctab and ?h.*.annot were covered, and .label is the bulk of it.
-            "bert/label/lh.cortex.label",
-            "bert/label/lh.BA1_exvivo.thresh.label",
-            "bert/label/aparc.annot.ctab",
-            // stats/: the parc alternation named aparc*/BA_exvivo* only.
-            "bert/stats/sclimbic.stats",
-            "bert/stats/lh.curv.stats",
-            "bert/stats/synthseg.vol.csv",
-            // mri/: both mappings required a direct child ending in .mgz.
-            "bert/mri/orig/001.mgz",
-            "bert/mri/transforms/talairach.xfm",
-            "bert/mri/transforms/synthmorph.mni305/log/run.log",
-            "bert/mri/samseg/samseg.fs.stats",
-            "bert/mri/wm1.txt",
-            // surf/: the mapping required a ?h. prefix.
-            "bert/surf/autodet.gw.stats.lh.dat",
-            // Bookkeeping subtrees, recognized but projecting nothing.
-            "bert/scripts/recon-all.log",
-            "bert/scripts/log/label-cortex.lh.log",
-            "bert/touch/wmsegment.touch",
-            "bert/tmp/filled.edits.txt",
-            "bert/trash/anything",
-            "bert/README.txt",
-            // The mirrored-hemisphere subtree, whose data half is cataloged like the
-            // top-level one and whose bookkeeping half is only recognized.
-            "bert/xhemi/surf/lh.area",
-            "bert/xhemi/mri/transforms/talairach.xfm",
-            "bert/xhemi/label/lh.aparc.annot",
-            "bert/xhemi/scripts/recon-all.done",
-            "bert/xhemi/touch/talairach.touch",
-        ] {
-            let f = tm
-                .classify(path)
-                .unwrap_or_else(|| panic!("unrecognized: {path}"));
-            // The subject must survive every mapping: it is what `scans.sub` projects from,
-            // and what the participants stub is synthesized from.
-            assert_eq!(f.get("sub"), Some("bert"), "{path}");
-        }
+    #[rstest]
+    // label/: only *.ctab and ?h.*.annot were covered, and .label is the bulk of it.
+    #[case("bert/label/lh.cortex.label")]
+    #[case("bert/label/lh.BA1_exvivo.thresh.label")]
+    #[case("bert/label/aparc.annot.ctab")]
+    // stats/: the parc alternation named aparc*/BA_exvivo* only.
+    #[case("bert/stats/sclimbic.stats")]
+    #[case("bert/stats/lh.curv.stats")]
+    #[case("bert/stats/synthseg.vol.csv")]
+    // mri/: both mappings required a direct child ending in .mgz.
+    #[case("bert/mri/orig/001.mgz")]
+    #[case("bert/mri/transforms/talairach.xfm")]
+    #[case("bert/mri/transforms/synthmorph.mni305/log/run.log")]
+    #[case("bert/mri/samseg/samseg.fs.stats")]
+    #[case("bert/mri/wm1.txt")]
+    // surf/: the mapping required a ?h. prefix.
+    #[case("bert/surf/autodet.gw.stats.lh.dat")]
+    // Bookkeeping subtrees, recognized but projecting nothing.
+    #[case("bert/scripts/recon-all.log")]
+    #[case("bert/scripts/log/label-cortex.lh.log")]
+    #[case("bert/touch/wmsegment.touch")]
+    #[case("bert/tmp/filled.edits.txt")]
+    #[case("bert/trash/anything")]
+    #[case("bert/README.txt")]
+    // The mirrored-hemisphere subtree, whose data half is cataloged like the top-level one
+    // and whose bookkeeping half is only recognized.
+    #[case("bert/xhemi/surf/lh.area")]
+    #[case("bert/xhemi/mri/transforms/talairach.xfm")]
+    #[case("bert/xhemi/label/lh.aparc.annot")]
+    #[case("bert/xhemi/scripts/recon-all.done")]
+    #[case("bert/xhemi/touch/talairach.touch")]
+    fn every_recon_all_subtree_is_recognized(#[case] path: &str) {
+        let f = fs()
+            .classify(path)
+            .unwrap_or_else(|| panic!("unrecognized: {path}"));
+
+        // The subject must survive every mapping: it is what `scans.sub` projects from,
+        // and what the participants stub is synthesized from.
+        assert_eq!(f.get("sub"), Some("bert"), "{path}");
     }
 
     /// A catch-all states `datatype` but never `suffix`, because `suffix` is what the
@@ -478,21 +477,21 @@ mod tests {
     /// would send files like `sclimbic.stats` through that reader into `freesurfer_aseg` with
     /// no `seg` to tell them apart. Recognition is the catch-all's job; reading more stats
     /// families needs a `seg` capture per family and is tracked separately.
-    #[test]
-    fn catch_alls_claim_no_suffix_so_no_reader_is_dispatched() {
-        let tm = fs();
-        for path in [
-            "bert/stats/sclimbic.stats",
-            "bert/stats/qa.stats",
-            "bert/stats/lh.curv.stats",
-            "bert/label/lh.cortex.label",
-            "bert/mri/wm1.txt",
-            "bert/surf/autodet.gw.stats.lh.dat",
-        ] {
-            let f = tm.classify(path).expect(path);
-            assert_eq!(f.datatype.as_deref(), Some("anat"), "{path}");
-            assert_eq!(f.suffix, None, "{path}");
-        }
+    #[rstest]
+    #[case("bert/stats/sclimbic.stats")]
+    #[case("bert/stats/qa.stats")]
+    #[case("bert/stats/lh.curv.stats")]
+    #[case("bert/label/lh.cortex.label")]
+    #[case("bert/mri/wm1.txt")]
+    #[case("bert/surf/autodet.gw.stats.lh.dat")]
+    fn catch_alls_claim_no_suffix_so_no_reader_is_dispatched(#[case] path: &str) {
+        let f = fs().classify(path).expect(path);
+
+        assert_eq!(
+            (f.datatype.as_deref(), f.suffix.as_deref()),
+            (Some("anat"), None),
+            "{path}"
+        );
     }
 
     /// A real `SUBJECTS_DIR` holds FreeSurfer's shipped template subjects beside the study's
@@ -500,52 +499,62 @@ mod tests {
     /// subject-capturing mappings would bind `sub = "fsaverage"`, catalog the template as study
     /// data and mint a participant for it. The regex crate has no lookaround, so an earlier
     /// mapping claims them instead: recognized (no validator noise) with nothing projected.
+    #[rstest]
+    #[case("fsaverage/label/lh.PALS_B12_Brodmann.annot")]
+    #[case("fsaverage/mri/aseg.mgz")]
+    #[case("fsaverage5/surf/lh.white")]
+    #[case("fsaverage_sym/stats/aseg.stats")]
+    #[case("cvs_avg35_inMNI152/mri/norm.mgz")]
+    #[case("lh.EC_average/mri/T1.mgz")]
+    fn template_subjects_are_recognized_but_not_participants(#[case] path: &str) {
+        let f = fs()
+            .classify(path)
+            .unwrap_or_else(|| panic!("unrecognized: {path}"));
+
+        assert_eq!(
+            (f.get("sub"), f.datatype.as_deref(), f.suffix.as_deref()),
+            (None, None, None),
+            "{path}"
+        );
+    }
+
+    /// ...and a study subject whose label merely starts with the same letters is unaffected,
+    /// which is what keeps the template mappings from being a blunt prefix match.
     #[test]
-    fn template_subjects_are_recognized_but_not_participants() {
-        let tm = fs();
-        for path in [
-            "fsaverage/label/lh.PALS_B12_Brodmann.annot",
-            "fsaverage/mri/aseg.mgz",
-            "fsaverage5/surf/lh.white",
-            "fsaverage_sym/stats/aseg.stats",
-            "cvs_avg35_inMNI152/mri/norm.mgz",
-            "lh.EC_average/mri/T1.mgz",
-        ] {
-            let f = tm
-                .classify(path)
-                .unwrap_or_else(|| panic!("unrecognized: {path}"));
-            assert_eq!(f.get("sub"), None, "{path}");
-            assert_eq!(f.datatype, None, "{path}");
-            assert_eq!(f.suffix, None, "{path}");
-        }
-        // A study subject whose label merely starts with the same letters is unaffected.
-        let real = tm
+    fn a_subject_named_like_a_template_is_still_a_subject() {
+        let real = fs()
             .classify("fsaverageStudy01/mri/aseg.mgz")
             .expect("subject");
+
         assert_eq!(real.get("sub"), Some("fsaverageStudy01"));
     }
 
     /// The subtree catch-alls must not claim concepts they cannot know. A log or a touch file
     /// is not anatomical data, so it is recognized with nothing projected — the distinction
     /// `docs/adr/0002` §12 draws for catch-alls.
-    #[test]
-    fn bookkeeping_subtrees_project_no_concepts() {
-        let tm = fs();
-        for path in [
-            "bert/scripts/recon-all.log",
-            "bert/touch/wmsegment.touch",
-            "bert/xhemi/scripts/recon-all.done",
-            "bert/README.txt",
-        ] {
-            let f = tm.classify(path).expect(path);
-            assert_eq!(f.datatype, None, "{path}");
-            assert_eq!(f.suffix, None, "{path}");
-        }
-        // ...while `xhemi`'s data half is anat, like the top-level tree it mirrors.
-        for path in ["bert/xhemi/surf/lh.area", "bert/xhemi/mri/aparc+aseg.mgz"] {
-            let f = tm.classify(path).expect(path);
-            assert_eq!(f.datatype.as_deref(), Some("anat"), "{path}");
-        }
+    #[rstest]
+    #[case("bert/scripts/recon-all.log")]
+    #[case("bert/touch/wmsegment.touch")]
+    #[case("bert/xhemi/scripts/recon-all.done")]
+    #[case("bert/README.txt")]
+    fn bookkeeping_subtrees_project_no_concepts(#[case] path: &str) {
+        let f = fs().classify(path).expect(path);
+
+        assert_eq!(
+            (f.datatype.as_deref(), f.suffix.as_deref()),
+            (None, None),
+            "{path}"
+        );
+    }
+
+    /// ...while `xhemi`'s data half is anat, like the top-level tree it mirrors.
+    #[rstest]
+    #[case("bert/xhemi/surf/lh.area")]
+    #[case("bert/xhemi/mri/aparc+aseg.mgz")]
+    fn the_mirrored_hemisphere_data_half_is_anat(#[case] path: &str) {
+        let f = fs().classify(path).expect(path);
+
+        assert_eq!(f.datatype.as_deref(), Some("anat"), "{path}");
     }
 
     /// Adding the catch-alls must not shadow the mappings that carry concepts. `RegexSet`
@@ -568,14 +577,24 @@ mod tests {
         let ctab = tm.classify("bert/label/aparc.annot.ctab").expect("ctab");
         assert_eq!(ctab.suffix.as_deref(), Some("fslabels"));
 
-        // A hemisphere surface keeps `hemi` rather than falling to the `surf/` catch-all.
+        // A hemisphere surface keeps `hemi` and its `anat` datatype rather than falling to
+        // the `surf/` catch-all.
         let surf = tm.classify("bert/surf/lh.thickness").expect("surf");
-        assert_eq!(surf.get("hemi"), Some("lh"));
+        assert_eq!(
+            (surf.get("hemi"), surf.datatype.as_deref()),
+            (Some("lh"), Some("anat"))
+        );
     }
 
     /// The set drives DDL (which concept columns consult the projection), so it must
     /// cover literal `Entities`, named capture groups, and `Concepts` alike — and
     /// stay tight, since every member costs a `COALESCE` on read.
+    ///
+    /// The exact set is what encodes two rules that are easy to get wrong. `extension` is
+    /// deliberately absent: it comes off the filename even for a projected path, so wrapping
+    /// it would buy nothing and cost a COALESCE per row. And the members are `sub`/`ses`, not
+    /// `subject`/`session` — capture groups use BEP-043's long forms, while the DDL needs the
+    /// BIDS short keys, so the aliasing has to happen before a concept lands here.
     #[test]
     fn projectable_concepts_span_every_source() {
         let got = fs().projectable_concepts();
@@ -585,20 +604,5 @@ mod tests {
                 .map(|s| s.to_string())
                 .collect();
         assert_eq!(got, want);
-    }
-
-    /// `extension` comes off the filename even for a projected path, so wrapping it
-    /// would buy nothing and cost a COALESCE on every row.
-    #[test]
-    fn projectable_concepts_exclude_extension() {
-        assert!(!fs().projectable_concepts().contains("extension"));
-    }
-
-    /// Capture groups use BEP-043's long forms; the DDL needs BIDS short keys.
-    #[test]
-    fn projectable_concepts_are_aliased() {
-        let got = fs().projectable_concepts();
-        assert!(got.contains("sub") && got.contains("ses"));
-        assert!(!got.contains("subject") && !got.contains("session"));
     }
 }

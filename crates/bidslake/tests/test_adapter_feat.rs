@@ -12,6 +12,7 @@
 mod common;
 
 use common::ingest_with_adapters;
+use rstest::rstest;
 use std::fs;
 use std::path::Path;
 
@@ -66,50 +67,74 @@ fn write_feat_tree(root: &Path) {
 }
 
 /// Each FEAT slot is reachable by what it *is*, not by where it sits.
+#[rstest]
+#[case("bold", "clean", 1)]
+#[case("bold", "filtered", 1)]
+#[case("bold", "cleanvn", 1)]
+// The mask is the one slot both units write, so it is the only count above one.
+#[case("mask", "brain", 2)]
+#[case("mixing", "MELODIC", 1)]
+#[case("timeseries", "motion", 1)]
+#[case("components", "IC", 1)]
+#[case("components", "oIC", 1)]
+#[case("boldref", "preproc", 1)]
+#[case("dseg", "pveseg", 1)]
+#[case("T1w", "standard", 1)]
 #[tokio::test]
-async fn feat_roles_are_projected_onto_bids_concepts() -> anyhow::Result<()> {
+async fn feat_roles_are_projected_onto_bids_concepts(
+    #[case] suffix: &str,
+    #[case] desc: &str,
+    #[case] want: i64,
+) -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     write_feat_tree(dir.path());
     let db = ingest_with_adapters(dir.path(), &["feat"]).await?;
 
-    for (suffix, desc, want) in [
-        ("bold", "clean", 1),
-        ("bold", "filtered", 1),
-        ("bold", "cleanvn", 1),
-        ("mask", "brain", 2), // both units
-        ("mixing", "MELODIC", 1),
-        ("timeseries", "motion", 1),
-        ("components", "IC", 1),
-        ("components", "oIC", 1),
-        ("boldref", "preproc", 1),
-        ("dseg", "pveseg", 1),
-        ("T1w", "standard", 1),
-    ] {
-        let got: i64 = db.conn.query_row(
-            "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND suffix = ? AND \"desc\" = ?",
-            duckdb::params![suffix, desc],
-            |r| r.get(0),
-        )?;
-        assert_eq!(got, want, "suffix={suffix} desc={desc}");
-    }
+    let got: i64 = db.conn.query_row(
+        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND suffix = ? AND \"desc\" = ?",
+        duckdb::params![suffix, desc],
+        |r| r.get(0),
+    )?;
 
-    // The unit's entities come from the directory name, for both the session/run form
-    // and the bare one.
+    assert_eq!(got, want, "suffix={suffix} desc={desc}");
+    Ok(())
+}
+
+/// The unit's entities come from the directory name, not from any file inside it.
+#[tokio::test]
+async fn unit_entities_come_from_the_directory_name() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_feat_tree(dir.path());
+    let db = ingest_with_adapters(dir.path(), &["feat"]).await?;
+
     let (sub, ses, task, run): (String, String, String, String) = db.conn.query_row(
         "SELECT sub, ses, task, run FROM all_files WHERE kind = 'data' AND suffix = 'mixing'",
         [],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
+
     assert_eq!(
         (sub.as_str(), ses.as_str(), task.as_str(), run.as_str()),
         ("01", "V1", "rest", "01")
     );
+    Ok(())
+}
+
+/// ...and the optional groups in the templates hold, so a directory naming neither a
+/// session nor a run still resolves rather than failing to match.
+#[tokio::test]
+async fn a_sessionless_runless_unit_still_resolves() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_feat_tree(dir.path());
+    let db = ingest_with_adapters(dir.path(), &["feat"]).await?;
+
     let bare: i64 = db.conn.query_row(
         "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND sub = '02' AND ses IS NULL AND run IS NULL \
          AND task = 'cuff' AND suffix = 'mask'",
         [],
         |r| r.get(0),
     )?;
+
     assert_eq!(bare, 1, "sessionless/runless FEAT dir still resolves");
     Ok(())
 }
@@ -117,28 +142,32 @@ async fn feat_roles_are_projected_onto_bids_concepts() -> anyhow::Result<()> {
 /// FSL names transforms `<from>2<to>`, which is exactly the `from`/`to` pair BIDS
 /// derivatives use — so a FEAT registration directory becomes queryable by direction
 /// rather than by filename, with the affine and the warp distinguished by extension.
+#[rstest]
+#[case("exfunc", "highres", ".mat")]
+#[case("highres", "exfunc", ".mat")]
+#[case("highres", "standard", ".mat")]
+#[case("standard", "highres", ".mat")]
+// The same direction as an affine above, told apart by extension alone.
+#[case("highres", "standard", ".nii.gz")]
+#[case("exfunc", "standard", ".nii.gz")]
 #[tokio::test]
-async fn registration_transforms_carry_from_and_to() -> anyhow::Result<()> {
+async fn registration_transforms_carry_from_and_to(
+    #[case] from: &str,
+    #[case] to: &str,
+    #[case] ext: &str,
+) -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     write_feat_tree(dir.path());
     let db = ingest_with_adapters(dir.path(), &["feat"]).await?;
 
-    for (from, to, ext) in [
-        ("exfunc", "highres", ".mat"),
-        ("highres", "exfunc", ".mat"),
-        ("highres", "standard", ".mat"),
-        ("standard", "highres", ".mat"),
-        ("highres", "standard", ".nii.gz"),
-        ("exfunc", "standard", ".nii.gz"),
-    ] {
-        let got: i64 = db.conn.query_row(
-            "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND suffix = 'xfm' \
-             AND \"from\" = ? AND \"to\" = ? AND extension = ? AND mode = 'image'",
-            duckdb::params![from, to, ext],
-            |r| r.get(0),
-        )?;
-        assert_eq!(got, 1, "{from} -> {to} ({ext})");
-    }
+    let got: i64 = db.conn.query_row(
+        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND suffix = 'xfm' \
+         AND \"from\" = ? AND \"to\" = ? AND extension = ? AND mode = 'image'",
+        duckdb::params![from, to, ext],
+        |r| r.get(0),
+    )?;
+
+    assert_eq!(got, 1, "{from} -> {to} ({ext})");
     Ok(())
 }
 
@@ -177,38 +206,47 @@ async fn rater_separates_hand_classification_from_automatic() -> anyhow::Result<
 /// Most of a FEAT tree is intermediates. They must be recognized (so they are not treated
 /// as stray BIDS files) and then dropped — otherwise a single run contributes hundreds of
 /// meaningless registry rows.
+#[rstest]
+#[case("%/fix/%")]
+#[case("%/mc/prefiltered_func_data_mcf_conf.nii.gz")]
+#[case("%/melodic_pcaD")]
+#[case("%/eigenvalues_percent")]
+#[case("%/Noise__inv.nii.gz")]
+#[case("%/filtered_func_data.ica/log.txt")]
+#[case("%/pyfix.log")]
 #[tokio::test]
-async fn scratch_is_ignored_not_cataloged() -> anyhow::Result<()> {
+async fn scratch_is_ignored_not_cataloged(#[case] pattern: &str) -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     write_feat_tree(dir.path());
     let db = ingest_with_adapters(dir.path(), &["feat"]).await?;
 
-    for pattern in [
-        "%/fix/%",
-        "%/mc/prefiltered_func_data_mcf_conf.nii.gz",
-        "%/melodic_pcaD",
-        "%/eigenvalues_percent",
-        "%/Noise__inv.nii.gz",
-        "%/filtered_func_data.ica/log.txt",
-        "%/pyfix.log",
-    ] {
-        let got: i64 = db.conn.query_row(
-            "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND file_path LIKE ?",
-            duckdb::params![pattern],
-            |r| r.get(0),
-        )?;
-        assert_eq!(got, 0, "scratch should not be cataloged: {pattern}");
-    }
+    let got: i64 = db.conn.query_row(
+        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND file_path LIKE ?",
+        duckdb::params![pattern],
+        |r| r.get(0),
+    )?;
 
-    // `mc/` and `filtered_func_data.ica/` hold one keeper each amongst the scratch, so the
-    // ignore rules must discriminate within a directory rather than by prefix alone.
-    for keeper in ["%/mc/prefiltered_func_data_mcf.par", "%/melodic_mix"] {
-        let got: i64 = db.conn.query_row(
-            "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND file_path LIKE ?",
-            duckdb::params![keeper],
-            |r| r.get(0),
-        )?;
-        assert_eq!(got, 1, "keeper should survive: {keeper}");
-    }
+    assert_eq!(got, 0, "scratch should not be cataloged: {pattern}");
+    Ok(())
+}
+
+/// `mc/` and `filtered_func_data.ica/` hold one keeper each amongst the scratch, so the
+/// ignore rules must discriminate within a directory rather than by prefix alone.
+#[rstest]
+#[case("%/mc/prefiltered_func_data_mcf.par")]
+#[case("%/melodic_mix")]
+#[tokio::test]
+async fn a_keeper_beside_the_scratch_survives(#[case] keeper: &str) -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_feat_tree(dir.path());
+    let db = ingest_with_adapters(dir.path(), &["feat"]).await?;
+
+    let got: i64 = db.conn.query_row(
+        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND file_path LIKE ?",
+        duckdb::params![keeper],
+        |r| r.get(0),
+    )?;
+
+    assert_eq!(got, 1, "keeper should survive: {keeper}");
     Ok(())
 }

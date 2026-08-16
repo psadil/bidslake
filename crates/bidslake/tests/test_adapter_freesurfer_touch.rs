@@ -12,6 +12,7 @@
 
 use bidslake::schema::ingestion::{Disposition, Ingestion};
 use bidslake::schema::tabular::FileContext;
+use rstest::rstest;
 
 fn freesurfer() -> Ingestion {
     let srcs = [
@@ -39,38 +40,30 @@ fn classify(
         .map(|r| (r.disposition, r.reader.clone()))
 }
 
-#[test]
-fn touch_stamps_are_ignored() {
+// The one that produced the warning.
+#[rstest]
+#[case::segstats("/sub-01_ses-V1/touch/segstats.touch", Some("segstats"))]
+// The `parcstats` variant, and a hemisphere-prefixed name.
+#[case::hemisphere_parcstats("/sub-01_ses-V1/touch/lh.aparcstats2.touch", Some("parcstats"))]
+// A stamp whose name matches no stats rule at all — still ignored, because the rule is
+// about the directory rather than about which reader would have claimed it.
+#[case::no_matching_stats_rule("/sub-01_ses-V1/touch/conform.touch", None)]
+fn touch_stamps_are_ignored(#[case] path: &str, #[case] suffix: Option<&str>) {
     let ing = freesurfer();
-    for (path, suffix) in [
-        // The one that produced the warning.
-        ("/sub-01_ses-V1/touch/segstats.touch", Some("segstats")),
-        // The `parcstats` variant, and a hemisphere-prefixed name.
-        (
-            "/sub-01_ses-V1/touch/lh.aparcstats2.touch",
-            Some("parcstats"),
-        ),
-        // A stamp whose name matches no stats rule at all — still ignored, because the
-        // rule is about the directory rather than about which reader would have claimed it.
-        ("/sub-01_ses-V1/touch/conform.touch", None),
-    ] {
-        assert_eq!(
-            classify(&ing, path, suffix).map(|(d, _)| d),
-            Some(Disposition::Ignore),
-            "{path} should be ignored"
-        );
-    }
+
+    let got = classify(&ing, path, suffix).map(|(d, _)| d);
+
+    assert_eq!(got, Some(Disposition::Ignore), "{path} should be ignored");
 }
 
 #[test]
 fn the_stats_files_they_shadowed_still_read() {
     // The other half: ignoring `touch/` must not cost the real stats files, which are what
     // fill `freesurfer_aseg`/`_aparc`/`_measures`.
+    // The `segstats` route is pinned in-crate by
+    // `bidslake::schema::ingestion::tests::stats_files_are_read_by_fs_stats`, over the same
+    // fragment and so past the same `touch/` rule.
     let ing = freesurfer();
-    assert_eq!(
-        classify(&ing, "/sub-01_ses-V1/stats/aseg.stats", Some("segstats")),
-        Some((Disposition::Read, Some("fs_stats".to_string())))
-    );
     assert_eq!(
         classify(
             &ing,

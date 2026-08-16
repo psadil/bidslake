@@ -10,6 +10,7 @@ mod common;
 
 use bidslake::db::BidsDb;
 use bidslake::schema::Schema;
+use rstest::rstest;
 
 fn fresh() -> anyhow::Result<BidsDb> {
     let db = BidsDb::new(":memory:")?;
@@ -240,23 +241,32 @@ async fn every_walked_file_has_a_registry_row() -> anyhow::Result<()> {
         &extra[..extra.len().min(5)]
     );
     assert!(walked.len() > 2000, "expected a substantial corpus dataset");
+    Ok(())
+}
 
-    // The classes that used to be unrecorded, now addressable by their own path.
-    for (pattern, kind) in [
-        ("%_bold.json", "sidecar"),
-        ("%.bval", "gradient"),
-        ("%.bvec", "gradient"),
-        ("README", "other"),
-        ("participants.tsv", "tabular"),
-        ("dataset_description.json", "description"),
-    ] {
-        let n: i64 = db.conn.query_row(
-            "SELECT COUNT(*) FROM file_registry WHERE file_path LIKE ? AND kind = ?",
-            duckdb::params![pattern, kind],
-            |r| r.get(0),
-        )?;
-        assert!(n > 0, "no {kind} row for {pattern}");
-    }
+/// The file classes that used to be unrecorded, now addressable by their own path and
+/// carrying the `kind` that says what they are.
+#[rstest]
+#[case("%_bold.json", "sidecar")]
+#[case("%.bval", "gradient")]
+#[case("%.bvec", "gradient")]
+#[case("README", "other")]
+#[case("participants.tsv", "tabular")]
+#[case("dataset_description.json", "description")]
+#[tokio::test]
+async fn every_file_class_is_addressable_by_its_own_path(
+    #[case] pattern: &str,
+    #[case] kind: &str,
+) -> anyhow::Result<()> {
+    let db = common::ingest(common::bids_example("ds000117")).await?;
+
+    let n: i64 = db.conn.query_row(
+        "SELECT COUNT(*) FROM file_registry WHERE file_path LIKE ? AND kind = ?",
+        duckdb::params![pattern, kind],
+        |r| r.get(0),
+    )?;
+
+    assert!(n > 0, "no {kind} row for {pattern}");
     Ok(())
 }
 
@@ -288,34 +298,47 @@ async fn bidsignored_files_are_absent_from_the_registry() -> anyhow::Result<()> 
     Ok(())
 }
 
+/// The route the ingest uses: a plain JSON number, preserved exactly to the top of the
+/// range. This is the whole point of moving off `HUGEINT` — `u64::MAX` is representable in
+/// JSON, in `serde_json::Number`, in DuckDB, and in polars, with nothing in between rounding
+/// or refusing it.
+#[rstest]
+#[case(0)]
+#[case(1)]
+#[case(i64::MAX as u64)]
+#[case(u64::MAX)]
+fn a_json_number_id_round_trips_every_one_of_its_64_bits(#[case] n: u64) -> anyhow::Result<()> {
+    let schema = Schema::load(None)?;
+    let row = serde_json::json!({ "file_id": n, "dataset_id": "d" });
+
+    let got = registry_file_id(&schema, &row);
+
+    assert_eq!(
+        got,
+        Some(duckdb::types::Value::UBigInt(n)),
+        "a JSON number must round-trip every one of its 64 bits"
+    );
+    Ok(())
+}
+
+/// The `file_id` the write path shapes out of `row`.
+fn registry_file_id(schema: &Schema, row: &serde_json::Value) -> Option<duckdb::types::Value> {
+    let cols = schema
+        .write_columns("file_registry")
+        .expect("registry columns");
+    let idx = cols.iter().position(|c| c == "file_id").expect("file_id");
+    schema.row_values("file_registry", row).unwrap()[idx].clone()
+}
+
 /// `file_id` is a `UBIGINT`, and the write path shapes values from JSON — which represents a
-/// `u64` exactly, so unlike the 128-bit version it needs no decimal-string detour. Every route
-/// into the column is pinned here, because getting this wrong corrupts a primary key
-/// *silently*: `UBIGINT` sits in the same `is_numeric_col` set as the float types, whose
-/// fallback is `parse::<f64>()`, and an f64 holds 53 bits of mantissa.
+/// `u64` exactly, so unlike the 128-bit version it needs no decimal-string detour. The routes
+/// into the column that are *not* a plain JSON number are pinned here, because getting this
+/// wrong corrupts a primary key *silently*: `UBIGINT` sits in the same `is_numeric_col` set as
+/// the float types, whose fallback is `parse::<f64>()`, and an f64 holds 53 bits of mantissa.
 #[test]
 fn a_64_bit_id_survives_the_write_path_or_is_refused() -> anyhow::Result<()> {
     let schema = Schema::load(None)?;
-    let id_at = |row: &serde_json::Value| -> Option<duckdb::types::Value> {
-        let cols = schema
-            .write_columns("file_registry")
-            .expect("registry columns");
-        let idx = cols.iter().position(|c| c == "file_id").expect("file_id");
-        schema.row_values("file_registry", row).unwrap()[idx].clone()
-    };
-
-    // The route the ingest uses: a plain JSON number, preserved exactly to the top of the
-    // range. This is the whole point of moving off `HUGEINT` — `u64::MAX` is representable
-    // in JSON, in `serde_json::Number`, in DuckDB, and in polars, with nothing in between
-    // rounding or refusing it.
-    for n in [0u64, 1, i64::MAX as u64, u64::MAX] {
-        let row = serde_json::json!({ "file_id": n, "dataset_id": "d" });
-        assert_eq!(
-            id_at(&row),
-            Some(duckdb::types::Value::UBigInt(n)),
-            "a JSON number must round-trip every one of its 64 bits"
-        );
-    }
+    let id_at = |row: &serde_json::Value| registry_file_id(&schema, row);
 
     // A decimal string still works, for a hand-built row or a caller outside the ingest.
     let row = serde_json::json!({ "file_id": u64::MAX.to_string() });

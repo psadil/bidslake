@@ -705,17 +705,10 @@ mod tests {
                 "missing table {expected}; got {names:?}"
             );
         }
-        // 23 rules → 23 tables (the 5 conditional rules overlay their bases).
+        // 23 rules → 23 tables (the 5 conditional rules overlay their bases). This also pins
+        // uniqueness: 23 distinct expected names all present in a 23-element list leaves no
+        // room for two specs to share a table name.
         assert_eq!(t.tables().len(), 23, "tables: {names:?}");
-    }
-
-    #[test]
-    fn table_names_are_unique() {
-        let t = Tabular::load(&schema());
-        let mut seen = HashSet::new();
-        for spec in t.tables() {
-            assert!(seen.insert(&spec.table), "duplicate table {}", spec.table);
-        }
     }
 
     #[test]

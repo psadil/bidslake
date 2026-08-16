@@ -1,155 +1,105 @@
 use super::super::common::{tempdir, validate_dataset};
+use rstest::rstest;
 use std::fs;
 
+/// One incomplete piece of dataset metadata per case: write it, validate, and require the
+/// sub-code naming the field that is missing.
+///
+/// These were six functions built from the same three statements — a `dataset_description.json`,
+/// sometimes one more file to bring a rule into play, and the sub-code expected back. Three of
+/// them asserted two sub-codes each, so the second assertion never ran when the first failed;
+/// those are two cases now and report separately.
+#[rstest]
+#[case::missing_name(r#"{"DatasetType": "raw"}"#, None, "Name")]
+#[case::missing_bids_version(r#"{"DatasetType": "raw"}"#, None, "BIDSVersion")]
+#[case::derivative_without_generated_by(
+    r#"{"Name": "Test", "BIDSVersion": "1.8.0", "DatasetType": "derivative"}"#,
+    None,
+    "GeneratedBy"
+)]
+#[case::missing_authors(
+    r#"{"Name": "Test", "BIDSVersion": "1.8.0", "DatasetType": "raw"}"#,
+    None,
+    "Authors"
+)]
+// The presence of genetic_info.json is what makes the Genetics key required.
+#[case::missing_genetics(
+    r#"{"Name": "Test", "BIDSVersion": "1.8.0", "DatasetType": "raw"}"#,
+    Some(("genetic_info.json", "{}")),
+    "Genetics"
+)]
+#[case::missing_genetic_level(
+    r#"{"Name": "Test", "BIDSVersion": "1.8.0", "DatasetType": "raw", "Genetics": {}}"#,
+    Some(("genetic_info.json", "{}")),
+    "GeneticLevel"
+)]
+#[case::missing_sample_origin(
+    r#"{"Name": "Test", "BIDSVersion": "1.8.0", "DatasetType": "raw", "Genetics": {}}"#,
+    Some(("genetic_info.json", "{}")),
+    "SampleOrigin"
+)]
+// The schema key is "AtlasName", but its field name (via objects.metadata) is "Name".
+#[case::missing_atlas_name(
+    r#"{"Name": "Test", "BIDSVersion": "1.8.0", "DatasetType": "raw"}"#,
+    Some(("atlas/atlas-Test_description.json", "{}")),
+    "Name"
+)]
+#[case::missing_atlas_license(
+    r#"{"Name": "Test", "BIDSVersion": "1.8.0", "DatasetType": "raw"}"#,
+    Some(("atlas/atlas-Test_description.json", "{}")),
+    "License"
+)]
+#[tokio::test]
+async fn a_missing_metadata_field_raises_its_sub_code(
+    #[case] description: &str,
+    #[case] extra: Option<(&str, &str)>,
+    #[case] expected: &str,
+) {
+    let tmp = tempdir();
+    fs::write(tmp.join("dataset_description.json"), description).unwrap();
+    if let Some((rel, contents)) = extra {
+        let path = tmp.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, contents).unwrap();
+    }
+
+    let issues = validate_dataset(&tmp).await;
+
+    assert!(
+        issues
+            .issues
+            .iter()
+            .any(|i| i.sub_code.as_deref() == Some(expected)),
+        "expected sub_code {expected}, got {:?}",
+        issues
+            .issues
+            .iter()
+            .map(|i| (&i.code, &i.sub_code))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// No `dataset_description.json` at all — the one case with no description to parameterize.
+///
+/// The image sits beside its sidecar so the dataset errors for exactly one reason: an orphan
+/// `.json` raises `SIDECAR_WITHOUT_DATAFILE`, which is itself an error, and would have kept a
+/// `has_errors()` assertion green with the missing-description check deleted outright.
 #[tokio::test]
 async fn test_missing_dataset_description() {
     let tmp = tempdir();
     let sub_dir = tmp.join("sub-01").join("anat");
     fs::create_dir_all(&sub_dir).unwrap();
     fs::write(sub_dir.join("sub-01_T1w.json"), "{}").unwrap();
+    fs::write(sub_dir.join("sub-01_T1w.nii"), "").unwrap();
 
     let issues = validate_dataset(&tmp).await;
-    // Missing required fields (Name, BIDSVersion) in dataset_description.json
-    // Wait, the file itself is missing, so it should report an error?
-    // The previous test checked `has_errors()`. Let's just keep that or check the exact issue.
+
     assert!(
-        issues.has_errors(),
-        "Should report error for missing dataset_description.json"
+        issues
+            .issues
+            .iter()
+            .any(|i| i.code == "MISSING_DATASET_DESCRIPTION"),
+        "expected MISSING_DATASET_DESCRIPTION, got {:?}",
+        issues.issues.iter().map(|i| &i.code).collect::<Vec<_>>()
     );
-}
-
-#[tokio::test]
-async fn test_dataset_description_missing_fields() {
-    let tmp = tempdir();
-    fs::write(
-        tmp.join("dataset_description.json"),
-        r#"{"DatasetType": "raw"}"#, // missing Name and BIDSVersion
-    )
-    .unwrap();
-
-    let issues = validate_dataset(&tmp).await;
-    let missing_name = issues
-        .issues
-        .iter()
-        .any(|i| i.sub_code.as_deref() == Some("Name"));
-    let missing_bids_version = issues
-        .issues
-        .iter()
-        .any(|i| i.sub_code.as_deref() == Some("BIDSVersion"));
-    assert!(missing_name, "Expected Name missing error");
-    assert!(missing_bids_version, "Expected BIDSVersion missing error");
-}
-
-#[tokio::test]
-async fn test_derivative_description() {
-    let tmp = tempdir();
-    fs::write(
-        tmp.join("dataset_description.json"),
-        r#"{"Name": "Test", "BIDSVersion": "1.8.0", "DatasetType": "derivative"}"#, // missing GeneratedBy
-    )
-    .unwrap();
-
-    let issues = validate_dataset(&tmp).await;
-    let missing_gen_by = issues
-        .issues
-        .iter()
-        .any(|i| i.sub_code.as_deref() == Some("GeneratedBy"));
-    assert!(
-        missing_gen_by,
-        "Expected GeneratedBy missing error for derivative dataset"
-    );
-}
-
-#[tokio::test]
-async fn test_dataset_authors() {
-    let tmp = tempdir();
-    fs::write(
-        tmp.join("dataset_description.json"),
-        r#"{"Name": "Test", "BIDSVersion": "1.8.0", "DatasetType": "raw"}"#, // missing Authors
-    )
-    .unwrap();
-
-    let issues = validate_dataset(&tmp).await;
-    let missing_authors = issues
-        .issues
-        .iter()
-        .any(|i| i.sub_code.as_deref() == Some("Authors"));
-    assert!(
-        missing_authors,
-        "Expected Authors missing warning (dataset_authors)"
-    );
-}
-
-#[tokio::test]
-async fn test_dataset_description_with_genetics() {
-    let tmp = tempdir();
-    fs::write(
-        tmp.join("dataset_description.json"),
-        r#"{"Name": "Test", "BIDSVersion": "1.8.0", "DatasetType": "raw"}"#, // missing Genetics
-    )
-    .unwrap();
-    fs::write(tmp.join("genetic_info.json"), r#"{}"#).unwrap(); // triggers rule
-
-    let issues = validate_dataset(&tmp).await;
-    let missing_genetics = issues
-        .issues
-        .iter()
-        .any(|i| i.sub_code.as_deref() == Some("Genetics"));
-    assert!(missing_genetics, "Expected Genetics missing error");
-}
-
-#[tokio::test]
-async fn test_genetic_info() {
-    let tmp = tempdir();
-    fs::write(
-        tmp.join("dataset_description.json"),
-        r#"{"Name": "Test", "BIDSVersion": "1.8.0", "DatasetType": "raw", "Genetics": {}}"#,
-    )
-    .unwrap();
-    // genetic_info.json missing GeneticLevel and SampleOrigin
-    fs::write(tmp.join("genetic_info.json"), r#"{}"#).unwrap();
-
-    let issues = validate_dataset(&tmp).await;
-    let missing_level = issues
-        .issues
-        .iter()
-        .any(|i| i.sub_code.as_deref() == Some("GeneticLevel"));
-    let missing_origin = issues
-        .issues
-        .iter()
-        .any(|i| i.sub_code.as_deref() == Some("SampleOrigin"));
-    assert!(missing_level, "Expected GeneticLevel missing error");
-    assert!(missing_origin, "Expected SampleOrigin missing error");
-}
-
-#[tokio::test]
-async fn test_atlas_description() {
-    let tmp = tempdir();
-    // minimal valid dataset
-    fs::write(
-        tmp.join("dataset_description.json"),
-        r#"{"Name": "Test", "BIDSVersion": "1.8.0", "DatasetType": "raw"}"#,
-    )
-    .unwrap();
-
-    // Create atlas file
-    let atlas_dir = tmp.join("atlas");
-    fs::create_dir_all(&atlas_dir).unwrap();
-    fs::write(atlas_dir.join("atlas-Test_description.json"), r#"{}"#).unwrap(); // missing AtlasName, License
-
-    let issues = validate_dataset(&tmp).await;
-    // The schema key is "AtlasName" but its actual field name (via objects.metadata) is "Name"
-    let missing_atlas_name = issues
-        .issues
-        .iter()
-        .any(|i| i.sub_code.as_deref() == Some("Name"));
-    let missing_license = issues
-        .issues
-        .iter()
-        .any(|i| i.sub_code.as_deref() == Some("License"));
-    assert!(
-        missing_atlas_name,
-        "Expected Name (AtlasName) missing error"
-    );
-    assert!(missing_license, "Expected License missing error");
 }

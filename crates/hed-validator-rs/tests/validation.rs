@@ -69,6 +69,12 @@ fn parse_schema_field(schema: &Option<Value>) -> Option<Vec<String>> {
     }
 }
 
+/// Fixture cases the vendored `hed-tests` corpus declares today, across 25 files. The whole
+/// corpus runs inside a single `#[test]`, so this count is the only thing standing between a
+/// silently shrinking submodule and a suite that still reports one green test. Raise it when
+/// the corpus grows; a drop should be deliberate enough to edit.
+const EXPECTED_CASES: usize = 715;
+
 fn severity_for(warning: bool) -> &'static str {
     if warning { "WARNING" } else { "ERROR" }
 }
@@ -205,9 +211,10 @@ fn run_event_case(
     rows: &[Vec<Value>],
     base_defs: &DefinitionMap,
 ) -> Vec<HedError> {
-    let Ok(tabular) = TabularInput::parse(rows) else {
-        return Vec::new();
-    };
+    // Not `else { return Vec::new() }`: "no errors" is indistinguishable from a clean run, so
+    // an unparseable fixture made every `passes` case built on it succeed automatically.
+    let tabular = TabularInput::parse(rows)
+        .unwrap_or_else(|e| panic!("fixture event table should parse, got {e:?}: {rows:?}"));
     let columns = std::collections::HashMap::new();
     tabular_validator::validate_tabular(schemas, &tabular, &columns, base_defs)
 }
@@ -224,20 +231,47 @@ fn run_combo_case(
     let columns = Sidecar::parse(&case.sidecar)
         .map(|s| s.columns)
         .unwrap_or_default();
-    let Ok(tabular) = TabularInput::parse(&case.events) else {
-        return errors;
-    };
+    // As in `run_event_case`: returning only the sidecar's errors would silently skip the
+    // tabular half of a combo case rather than report that its fixture is malformed.
+    let tabular = TabularInput::parse(&case.events).unwrap_or_else(|e| {
+        panic!(
+            "fixture event table should parse, got {e:?}: {:?}",
+            case.events
+        )
+    });
     errors.extend(tabular_validator::validate_tabular(
         schemas, &tabular, &columns, &defs,
     ));
     errors
 }
 
-fn run_validation_test_file(default_schemas: &SchemaCollection, path: &std::path::Path) {
+/// Returns the number of fixture cases the file declares, which the suite asserts a floor on.
+/// The whole corpus runs inside one `#[test]`, so nothing else would notice the conformance
+/// data shrinking — a fixture file that stopped parsing into cases would simply run fewer.
+fn run_validation_test_file(default_schemas: &SchemaCollection, path: &std::path::Path) -> usize {
     let json_data =
         fs::read_to_string(path).unwrap_or_else(|e| panic!("failed to read {:?}: {}", path, e));
     let tests: Vec<ValidationTest> = serde_json::from_str(&json_data)
         .unwrap_or_else(|e| panic!("failed to parse {:?}: {}", path, e));
+
+    let cases = tests
+        .iter()
+        .map(|t| {
+            let g = &t.tests;
+            g.string_tests
+                .as_ref()
+                .map_or(0, |s| s.fails.len() + s.passes.len())
+                + g.sidecar_tests
+                    .as_ref()
+                    .map_or(0, |s| s.fails.len() + s.passes.len())
+                + g.event_tests
+                    .as_ref()
+                    .map_or(0, |e| e.fails.len() + e.passes.len())
+                + g.combo_tests
+                    .as_ref()
+                    .map_or(0, |c| c.fails.len() + c.passes.len())
+        })
+        .sum();
 
     for test in tests {
         let is_warning = test.warning.unwrap_or(false);
@@ -300,9 +334,9 @@ fn run_validation_test_file(default_schemas: &SchemaCollection, path: &std::path
 
         if let Some(st) = &test.tests.string_tests {
             for fail_case in &st.fails {
-                let Some(s) = fail_case.as_str() else {
-                    continue;
-                };
+                let s = fail_case.as_str().unwrap_or_else(|| {
+                    panic!("string-test fixture case should be a string, got {fail_case:?}")
+                });
                 let errors = run_string_case(
                     schemas,
                     s,
@@ -320,9 +354,9 @@ fn run_validation_test_file(default_schemas: &SchemaCollection, path: &std::path
                 );
             }
             for pass_case in &st.passes {
-                let Some(s) = pass_case.as_str() else {
-                    continue;
-                };
+                let s = pass_case.as_str().unwrap_or_else(|| {
+                    panic!("string-test fixture case should be a string, got {pass_case:?}")
+                });
                 let errors = run_string_case(
                     schemas,
                     s,
@@ -412,6 +446,8 @@ fn run_validation_test_file(default_schemas: &SchemaCollection, path: &std::path
             }
         }
     }
+
+    cases
 }
 
 #[test]
@@ -459,7 +495,16 @@ fn test_hed_tests_suite() {
         "expected to find validation_test_data/*.json files"
     );
 
+    let mut cases = 0;
     for path in paths {
-        run_validation_test_file(&schemas, &path);
+        cases += run_validation_test_file(&schemas, &path);
     }
+
+    // A floor, not an equality: new conformance fixtures should not need this edited, but the
+    // corpus quietly shrinking -- or a file that stops deserializing into cases -- must fail.
+    assert!(
+        cases >= EXPECTED_CASES,
+        "ran {cases} fixture cases, expected at least {EXPECTED_CASES}; \
+         has the hed-tests submodule changed?"
+    );
 }

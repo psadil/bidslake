@@ -1,26 +1,44 @@
 use bids_validator_rs::issues::DatasetIssues;
 use bids_validator_rs::schema::BidsSchema;
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::Path;
 
-static TEMP_DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
+/// A temporary directory that removes itself.
+///
+/// Derefs to `Path`, so it is used exactly like the `PathBuf` this replaced — `root.join(..)`
+/// and `&root` both still work — while the drop glue does what the old hand-rolled version
+/// never did. That version built a path from a timestamp and a counter, `create_dir_all`'d
+/// it, and returned it by value with no owner, so each of the ~45 tests calling it left its
+/// tree (NIfTI fixtures included) in the system temp directory on every run.
+///
+/// `tempfile` was already a declared dev-dependency of this crate, and unused.
+pub struct TestDir(tempfile::TempDir);
 
-pub fn tempdir() -> PathBuf {
-    let count = TEMP_DIR_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!(
-        "bids_validator_test_{}_{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis(),
-        count
-    ));
-    fs::create_dir_all(&dir).unwrap();
-    dir
+impl std::ops::Deref for TestDir {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        self.0.path()
+    }
 }
 
+impl AsRef<Path> for TestDir {
+    fn as_ref(&self) -> &Path {
+        self.0.path()
+    }
+}
+
+pub fn tempdir() -> TestDir {
+    TestDir(tempfile::tempdir().expect("temp dir should be creatable"))
+}
+
+/// A dataset the validator accepts: the errors a test asserts should be the ones it wrote.
+///
+/// The T1w *image* matters. Writing only the sidecar left every dataset built from here
+/// carrying a `SIDECAR_WITHOUT_DATAFILE` error — invisible to the ~27 tests that ask whether
+/// one specific code is present, and the reason `test_minimal_valid_dataset` could assert
+/// nothing for so long without anyone noticing. A test that wants a *broken* T1w overwrites
+/// this file, which is what the `rules/checks.rs` family already does.
 pub fn create_minimal_dataset(root: &Path) {
     fs::write(
         root.join("dataset_description.json"),
@@ -40,6 +58,21 @@ pub fn create_minimal_dataset(root: &Path) {
     fs::write(
         anat_dir.join("sub-01_T1w.json"),
         r#"{"RepetitionTime": 2.0, "MagneticFieldStrength": 3}"#,
+    )
+    .unwrap();
+
+    // 3D, unit millimetres, qform set — the combination the `rules/checks.rs` cases
+    // deliberately perturb one field at a time to trigger their codes.
+    fs::write(
+        anat_dir.join("sub-01_T1w.nii"),
+        create_nifti1_header(
+            &[3, 2, 2, 2, 1, 1, 1, 1],
+            &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            2,
+            1,
+            0,
+            None,
+        ),
     )
     .unwrap();
 }

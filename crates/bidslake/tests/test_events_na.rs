@@ -39,8 +39,22 @@ async fn test_events_tsv_na() -> anyhow::Result<()> {
     let fs = Box::new(LocalFileSystem::new(dataset_path));
     let mut parser = BidsParser::new(fs, None, schema, None, true, true);
 
-    // This should fail if onset is FLOAT and n/a is not handled
     parser.parse(&db).await?;
+
+    // Read the rows back. Parsing without erroring proves nothing on its own: a dropped row,
+    // or a file the walk never routed, would leave `events` empty and look identical from
+    // here — which is what this test did before it read anything.
+    let onsets: Vec<Option<f64>> = db
+        .conn
+        .prepare("SELECT onset FROM events ORDER BY onset NULLS LAST")?
+        .query_map([], |r| r.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    assert_eq!(
+        onsets,
+        vec![Some(1.0), None],
+        "`n/a` in the numeric `onset` column must store NULL, and must not cost its row"
+    );
 
     Ok(())
 }

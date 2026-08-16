@@ -1,148 +1,71 @@
 use super::super::common::{
     create_minimal_dataset, create_nifti1_header, tempdir, validate_dataset,
 };
+use rstest::rstest;
 use std::fs;
 
+/// One malformed NIfTI header per case: write it into an otherwise-valid dataset, validate,
+/// and require the code it should raise.
+///
+/// These were six functions whose bodies were the same six statements, differing only in the
+/// header arguments, where the image lands, and the expected code — so a rule that stopped
+/// firing used to cost one failing test out of six, and told you nothing about the other
+/// five. As cases they report independently, and the full ingest runs once per case either
+/// way. `sform` is 0 and `srow` absent throughout; only `qform` varies.
+#[rstest]
+#[case::empty_shape(
+    "sub-01/anat/sub-01_T2w.nii", [0, 1, 1, 1, 1, 1, 1, 1], [1.0; 8], 2, 1, "NIFTI_DIMENSION"
+)]
+#[case::unknown_units(
+    "sub-01/anat/sub-01_T2w.nii", [3, 2, 2, 2, 1, 1, 1, 1], [1.0; 8], 0, 1, "NIFTI_UNIT"
+)]
+#[case::zero_voxel_size(
+    "sub-01/anat/sub-01_T2w.nii",
+    [3, 2, 2, 2, 1, 1, 1, 1],
+    [1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+    2, 1, "NIFTI_PIXDIM"
+)]
+#[case::no_orientation(
+    "sub-01/anat/sub-01_T2w.nii",
+    [3, 2, 2, 2, 1, 1, 1, 1],
+    [1.0; 8],
+    2, 0, "SFORM_AND_QFORM_IN_IMAGE_HEADER_ARE_ZERO"
+)]
+#[case::anat_is_4d(
+    "sub-01/anat/sub-01_T1w.nii",
+    [4, 2, 2, 2, 2, 1, 1, 1],
+    [1.0; 8],
+    2, 1, "T1W_FILE_WITH_TOO_MANY_DIMENSIONS"
+)]
+#[case::bold_is_3d(
+    "sub-01/func/sub-01_task-rest_bold.nii", [3, 2, 2, 2, 1, 1, 1, 1], [1.0; 8], 2, 1, "BOLD_NOT_4D"
+)]
 #[tokio::test]
-async fn test_nifti_dimension() {
+async fn a_malformed_header_raises_its_code(
+    #[case] rel: &str,
+    #[case] dim: [i16; 8],
+    #[case] pixdim: [f32; 8],
+    #[case] xyzt_units: u8,
+    #[case] qform: i16,
+    #[case] expected: &str,
+) {
     let root = tempdir();
     create_minimal_dataset(&root);
-    let anat_dir = root.join("sub-01").join("anat");
-
-    let header = create_nifti1_header(
-        &[0, 1, 1, 1, 1, 1, 1, 1],
-        &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-        2,
-        1,
-        0,
-        None,
-    );
-    fs::write(anat_dir.join("sub-01_T2w.nii"), header).unwrap();
+    let path = root.join(rel);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        &path,
+        create_nifti1_header(&dim, &pixdim, xyzt_units, qform, 0, None),
+    )
+    .unwrap();
 
     let issues = validate_dataset(&root).await;
 
-    let has_dim = issues.issues.iter().any(|i| i.code == "NIFTI_DIMENSION");
-    assert!(has_dim, "Expected NIFTI_DIMENSION for empty shape");
-}
-
-#[tokio::test]
-async fn test_nifti_unit() {
-    let root = tempdir();
-    create_minimal_dataset(&root);
-    let anat_dir = root.join("sub-01").join("anat");
-
-    let header = create_nifti1_header(
-        &[3, 2, 2, 2, 1, 1, 1, 1],
-        &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-        0,
-        1,
-        0,
-        None,
-    );
-    fs::write(anat_dir.join("sub-01_T2w.nii"), header).unwrap();
-
-    let issues = validate_dataset(&root).await;
-
-    let has_unit = issues.issues.iter().any(|i| i.code == "NIFTI_UNIT");
-    assert!(has_unit, "Expected NIFTI_UNIT for unknown xyzt_units");
-}
-
-#[tokio::test]
-async fn test_nifti_pixdim() {
-    let root = tempdir();
-    create_minimal_dataset(&root);
-    let anat_dir = root.join("sub-01").join("anat");
-
-    let header = create_nifti1_header(
-        &[3, 2, 2, 2, 1, 1, 1, 1],
-        &[1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-        2,
-        1,
-        0,
-        None,
-    );
-    fs::write(anat_dir.join("sub-01_T2w.nii"), header).unwrap();
-
-    let issues = validate_dataset(&root).await;
-
-    let has_pixdim = issues.issues.iter().any(|i| i.code == "NIFTI_PIXDIM");
-    assert!(has_pixdim, "Expected NIFTI_PIXDIM for 0.0 voxel size");
-}
-
-#[tokio::test]
-async fn test_sform_qform_zero() {
-    let root = tempdir();
-    create_minimal_dataset(&root);
-    let anat_dir = root.join("sub-01").join("anat");
-
-    let header = create_nifti1_header(
-        &[3, 2, 2, 2, 1, 1, 1, 1],
-        &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-        2,
-        0,
-        0,
-        None,
-    );
-    fs::write(anat_dir.join("sub-01_T2w.nii"), header).unwrap();
-
-    let issues = validate_dataset(&root).await;
-
-    let has_sform = issues
-        .issues
-        .iter()
-        .any(|i| i.code == "SFORM_AND_QFORM_IN_IMAGE_HEADER_ARE_ZERO");
     assert!(
-        has_sform,
-        "Expected SFORM_AND_QFORM_IN_IMAGE_HEADER_ARE_ZERO"
+        issues.issues.iter().any(|i| i.code == expected),
+        "expected {expected} for {rel}, got {:?}",
+        issues.issues.iter().map(|i| &i.code).collect::<Vec<_>>()
     );
-}
-
-#[tokio::test]
-async fn test_anat_not_3d() {
-    let root = tempdir();
-    create_minimal_dataset(&root);
-    let anat_dir = root.join("sub-01").join("anat");
-
-    let header = create_nifti1_header(
-        &[4, 2, 2, 2, 2, 1, 1, 1],
-        &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-        2,
-        1,
-        0,
-        None,
-    );
-    fs::write(anat_dir.join("sub-01_T1w.nii"), header).unwrap();
-
-    let issues = validate_dataset(&root).await;
-
-    let has_anat = issues
-        .issues
-        .iter()
-        .any(|i| i.code == "T1W_FILE_WITH_TOO_MANY_DIMENSIONS");
-    assert!(has_anat, "Expected T1W_FILE_WITH_TOO_MANY_DIMENSIONS");
-}
-
-#[tokio::test]
-async fn test_bold_not_4d() {
-    let root = tempdir();
-    create_minimal_dataset(&root);
-    let func_dir = root.join("sub-01").join("func");
-    fs::create_dir_all(&func_dir).unwrap();
-
-    let header = create_nifti1_header(
-        &[3, 2, 2, 2, 1, 1, 1, 1],
-        &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-        2,
-        1,
-        0,
-        None,
-    );
-    fs::write(func_dir.join("sub-01_task-rest_bold.nii"), header).unwrap();
-
-    let issues = validate_dataset(&root).await;
-
-    let has_bold = issues.issues.iter().any(|i| i.code == "BOLD_NOT_4D");
-    assert!(has_bold, "Expected BOLD_NOT_4D");
 }
 
 #[tokio::test]

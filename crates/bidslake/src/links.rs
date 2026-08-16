@@ -255,82 +255,85 @@ fn strip_version(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
-    #[test]
-    fn bare_doi_and_url_doi_collide() {
-        // The load-bearing case: MRIQC declares the bare DOI, fMRIPrep the URL form.
-        let bare = canonicalize("10.18112/openneuro.ds001761.v2.0.1");
-        let url = canonicalize("https://doi.org/10.18112/openneuro.ds001761.v2.0.1");
-        let pfx = canonicalize("doi:10.18112/openneuro.ds001761.v2.0.1");
-        assert_eq!(bare.value, "doi:10.18112/openneuro.ds001761.v2.0.1");
-        assert_eq!(bare, url);
-        assert_eq!(bare, pfx);
-        assert_eq!(bare.kind, IdentityKind::Doi);
+    /// Every reference form, and the `(value, kind)` it canonicalizes to.
+    ///
+    /// These were eight functions checking different subsets — three asserted only `value`,
+    /// one only `kind`, and the collision cases asserted two calls were *equal to each other*,
+    /// which holds just as well when both are wrong. Pinning the exact value per case is the
+    /// stronger statement: the three DOI spellings collide because all three are named here as
+    /// the same string, not because they agree.
+    #[rstest]
+    // The load-bearing case: MRIQC declares the bare DOI, fMRIPrep the URL form, and the
+    // `doi:` prefix is the third spelling of the one identity.
+    #[case::bare_doi(
+        "10.18112/openneuro.ds001761.v2.0.1",
+        "doi:10.18112/openneuro.ds001761.v2.0.1",
+        IdentityKind::Doi
+    )]
+    #[case::url_doi(
+        "https://doi.org/10.18112/openneuro.ds001761.v2.0.1",
+        "doi:10.18112/openneuro.ds001761.v2.0.1",
+        IdentityKind::Doi
+    )]
+    #[case::prefixed_doi(
+        "doi:10.18112/openneuro.ds001761.v2.0.1",
+        "doi:10.18112/openneuro.ds001761.v2.0.1",
+        IdentityKind::Doi
+    )]
+    // DOIs are case-insensitive per the Handle spec, so the whole thing folds down.
+    #[case::case_folded_doi(
+        "https://doi.org/10.18112/OpenNeuro.DS001761.V2.0.1",
+        "doi:10.18112/openneuro.ds001761.v2.0.1",
+        IdentityKind::Doi
+    )]
+    #[case::bare_token(
+        "ds001761-fmriprep",
+        "dataset:ds001761-fmriprep",
+        IdentityKind::Dataset
+    )]
+    // Dataset ids are case-sensitive `Name`s, unlike DOIs.
+    #[case::explicit_dataset_prefix(
+        "dataset:MyStudy_Derivative",
+        "dataset:MyStudy_Derivative",
+        IdentityKind::Dataset
+    )]
+    // The host folds, the path does not.
+    #[case::url(
+        "https://GitHub.com/Nipreps/MRIQC/",
+        "https://github.com/Nipreps/MRIQC",
+        IdentityKind::Url
+    )]
+    #[case::absolute_path("/data/ds001761/", "file:///data/ds001761", IdentityKind::File)]
+    #[case::s3_uri("s3://bucket/prefix/", "s3://bucket/prefix", IdentityKind::File)]
+    #[case::file_uri("file:///data/ds/", "file:///data/ds", IdentityKind::File)]
+    // An unknown scheme is kept opaque rather than mis-typed as a URL...
+    #[case::unknown_scheme("ftp://host/x", "opaque:ftp://host/x", IdentityKind::Opaque)]
+    // ...and free text is kept verbatim, so two identical strings still collide — including
+    // when one of them arrives padded.
+    #[case::free_text("some free text", "opaque:some free text", IdentityKind::Opaque)]
+    #[case::padded_free_text("  some free text ", "opaque:some free text", IdentityKind::Opaque)]
+    fn canonicalize_maps_a_reference_to_one_identity(
+        #[case] declared: &str,
+        #[case] value: &str,
+        #[case] kind: IdentityKind,
+    ) {
+        let id = canonicalize(declared);
+
+        assert_eq!((id.value.as_str(), id.kind), (value, kind));
     }
 
-    #[test]
-    fn doi_is_case_folded() {
-        assert_eq!(
-            canonicalize("https://doi.org/10.18112/OpenNeuro.DS001761.V2.0.1").value,
-            "doi:10.18112/openneuro.ds001761.v2.0.1"
-        );
-    }
-
+    /// Two versions of one dataset are different identities that share a base — the
+    /// relationship between the two calls is the behaviour, so both are made here.
     #[test]
     fn doi_base_strips_version() {
         let id = canonicalize("10.18112/openneuro.ds001761.v2.0.1");
-        assert_eq!(id.base, "doi:10.18112/openneuro.ds001761");
-        // Different versions share a base but not a value.
         let older = canonicalize("10.18112/openneuro.ds001761.v2.0.0");
+
+        assert_eq!(id.base, "doi:10.18112/openneuro.ds001761");
         assert_eq!(id.base, older.base);
         assert_ne!(id.value, older.value);
-    }
-
-    #[test]
-    fn bare_token_is_a_dataset() {
-        let id = canonicalize("ds001761-fmriprep");
-        assert_eq!(id.value, "dataset:ds001761-fmriprep");
-        assert_eq!(id.kind, IdentityKind::Dataset);
-    }
-
-    #[test]
-    fn explicit_dataset_prefix_keeps_case() {
-        assert_eq!(
-            canonicalize("dataset:MyStudy_Derivative").value,
-            "dataset:MyStudy_Derivative"
-        );
-    }
-
-    #[test]
-    fn url_lowercases_host_not_path() {
-        let id = canonicalize("https://GitHub.com/Nipreps/MRIQC/");
-        assert_eq!(id.value, "https://github.com/Nipreps/MRIQC");
-        assert_eq!(id.kind, IdentityKind::Url);
-    }
-
-    #[test]
-    fn paths_become_file_uris() {
-        assert_eq!(
-            canonicalize("/data/ds001761/").value,
-            "file:///data/ds001761"
-        );
-        assert_eq!(canonicalize("/data/ds001761/").kind, IdentityKind::File);
-        assert_eq!(
-            canonicalize("s3://bucket/prefix/").value,
-            "s3://bucket/prefix"
-        );
-        assert_eq!(canonicalize("file:///data/ds/").value, "file:///data/ds");
-    }
-
-    #[test]
-    fn unrecognized_is_opaque_not_dropped() {
-        assert_eq!(canonicalize("ftp://host/x").kind, IdentityKind::Opaque);
-        assert_eq!(canonicalize("some free text").kind, IdentityKind::Opaque);
-        // Two identical opaque strings still collide.
-        assert_eq!(
-            canonicalize("some free text"),
-            canonicalize("  some free text ")
-        );
     }
 
     // -- DatasetLinks: values are relative to the dataset root -------------------
@@ -383,24 +386,23 @@ mod tests {
         );
     }
 
-    #[test]
-    fn absolute_references_pass_through_untouched() {
-        // Every form that stands on its own must be unaffected by the root, so the
-        // hand-written escape hatches keep working.
-        for reference in [
-            "dataset:studyB",
-            "10.18112/openneuro.ds001761.v2.0.1",
-            "https://doi.org/10.18112/openneuro.ds001761.v2.0.1",
-            "s3://bucket/other",
-            "file:///elsewhere/x",
-            "/elsewhere/x",
-            "https://example.org/repo",
-        ] {
-            assert_eq!(
-                canonicalize_relative_to(reference, "file:///data/study").value,
-                canonicalize(reference).value,
-                "{reference} must not be joined to the root"
-            );
-        }
+    /// Every form that stands on its own must be unaffected by the root, so the
+    /// hand-written escape hatches keep working.
+    #[rstest]
+    #[case("dataset:studyB")]
+    #[case("10.18112/openneuro.ds001761.v2.0.1")]
+    #[case("https://doi.org/10.18112/openneuro.ds001761.v2.0.1")]
+    #[case("s3://bucket/other")]
+    #[case("file:///elsewhere/x")]
+    #[case("/elsewhere/x")]
+    #[case("https://example.org/repo")]
+    fn an_absolute_reference_passes_through_untouched(#[case] reference: &str) {
+        let joined = canonicalize_relative_to(reference, "file:///data/study");
+
+        assert_eq!(
+            joined.value,
+            canonicalize(reference).value,
+            "{reference} must not be joined to the root"
+        );
     }
 }

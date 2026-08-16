@@ -51,6 +51,7 @@ pub fn parent_datatype<'a>(path: &'a str, datatypes: &HashSet<String>) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     fn datatypes() -> HashSet<String> {
         ["anat", "func", "eeg", "meg", "dwi"]
@@ -59,46 +60,43 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn parent_dir_is_the_second_to_last_non_empty_segment() {
-        assert_eq!(parent_dir("/sub-01/anat/sub-01_T1w.nii.gz"), Some("anat"));
-        assert_eq!(parent_dir("sub-01/anat/sub-01_T1w.nii.gz"), Some("anat"));
-        assert_eq!(parent_dir("sub-01//anat//x.nii.gz"), Some("anat"));
-        assert_eq!(parent_dir("/sub-01/sub-01_scans.tsv"), Some("sub-01"));
-    }
-
-    #[test]
-    fn parent_dir_needs_two_segments() {
-        assert_eq!(parent_dir("dataset_description.json"), None);
-        assert_eq!(parent_dir("/README"), None);
-        assert_eq!(parent_dir("/"), None);
-        assert_eq!(parent_dir(""), None);
+    #[rstest]
+    #[case::absolute("/sub-01/anat/sub-01_T1w.nii.gz", Some("anat"))]
+    #[case::relative("sub-01/anat/sub-01_T1w.nii.gz", Some("anat"))]
+    #[case::empty_segments("sub-01//anat//x.nii.gz", Some("anat"))]
+    #[case::subject_dir("/sub-01/sub-01_scans.tsv", Some("sub-01"))]
+    // Too few segments to have a parent at all.
+    #[case::bare_filename("dataset_description.json", None)]
+    #[case::root_file("/README", None)]
+    #[case::root("/", None)]
+    #[case::empty("", None)]
+    fn parent_dir_is_the_second_to_last_non_empty_segment(
+        #[case] path: &str,
+        #[case] expected: Option<&str>,
+    ) {
+        assert_eq!(parent_dir(path), expected);
     }
 
     /// The path set this rule is judged on, carried over from bidslake, which had its own copy
     /// of the rule and a test pinning it against bids-schema's. Both now call this.
-    #[test]
-    fn parent_datatype_over_the_corpus_shapes() {
-        let dts = datatypes();
-        for (path, expected) in [
-            ("sub-01/anat/sub-01_T1w.nii.gz", Some("anat")),
-            ("sub-01/func/sub-01_task-rest_bold.nii.gz", Some("func")),
-            ("sub-01/ses-1/eeg/sub-01_ses-1_task-x_eeg.vhdr", Some("eeg")),
-            ("sub-01/meg/sub-01_task-x_meg.ds", Some("meg")),
-            (
-                "derivatives/fmriprep/sub-01/anat/sub-01_desc-preproc_T1w.nii.gz",
-                Some("anat"),
-            ),
-            // Position is the whole rule: a datatype directory at the dataset root still
-            // counts, and a datatype that is not the *immediate* parent does not.
-            ("anat/loose.nii.gz", Some("anat")),
-            ("sub-01/anat/extra/nested.nii.gz", None),
-            // Not a datatype directory, or too few segments to have a parent at all.
-            ("sub-01/sub-01_scans.tsv", None),
-            ("dataset_description.json", None),
-            ("README", None),
-        ] {
-            assert_eq!(parent_datatype(path, &dts), expected, "on {path}");
-        }
+    #[rstest]
+    #[case("sub-01/anat/sub-01_T1w.nii.gz", Some("anat"))]
+    #[case("sub-01/func/sub-01_task-rest_bold.nii.gz", Some("func"))]
+    #[case("sub-01/ses-1/eeg/sub-01_ses-1_task-x_eeg.vhdr", Some("eeg"))]
+    #[case("sub-01/meg/sub-01_task-x_meg.ds", Some("meg"))]
+    #[case(
+        "derivatives/fmriprep/sub-01/anat/sub-01_desc-preproc_T1w.nii.gz",
+        Some("anat")
+    )]
+    // Position is the whole rule: a datatype directory at the dataset root still counts...
+    #[case::root_level_datatype("anat/loose.nii.gz", Some("anat"))]
+    // ...and a datatype that is not the *immediate* parent does not.
+    #[case::not_immediate_parent("sub-01/anat/extra/nested.nii.gz", None)]
+    // Not a datatype directory, or too few segments to have a parent at all.
+    #[case::subject_dir("sub-01/sub-01_scans.tsv", None)]
+    #[case::dataset_root("dataset_description.json", None)]
+    #[case::no_parent("README", None)]
+    fn parent_datatype_over_the_corpus_shapes(#[case] path: &str, #[case] expected: Option<&str>) {
+        assert_eq!(parent_datatype(path, &datatypes()), expected);
     }
 }

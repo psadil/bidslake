@@ -80,8 +80,9 @@ fn suffix_of(file_path: &str) -> String {
 }
 
 /// Ingests every dataset in the corpus, so it is slow (minutes). Run it
-/// explicitly — `cargo test --test tabular_coverage -- --ignored` — or in CI;
-/// it is excluded from the default `cargo test` to keep iteration fast.
+/// explicitly — `cargo test --test tabular_coverage -- --ignored`; it is
+/// excluded from the default `cargo test` (and from CI, which runs bare
+/// `cargo test`) to keep iteration fast.
 #[ignore = "comprehensive: ingests the whole corpus; run with --ignored"]
 #[tokio::test]
 async fn all_tabular_data_is_in_the_database() {

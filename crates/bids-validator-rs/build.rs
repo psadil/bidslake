@@ -2,8 +2,11 @@
 //! submodule. The generated file is `include!`d by `tests/integration_test.rs`, which
 //! provides the `bids_example_test!` macro and the `run_example` helper.
 //!
-//! If the submodule is not checked out (no dataset directories are found), a single
-//! placeholder test is generated that prints how to initialize it and passes.
+//! If the submodule is not checked out (no dataset directories are found), a single test is
+//! generated that *fails*, saying how to initialize it. It has to fail: this script is the
+//! only thing that knows the corpus is missing, and a passing placeholder meant a fresh
+//! clone without `--recurse-submodules` silently reduced 107 dataset tests to one green
+//! no-op.
 //!
 //! The BIDS schema itself and the expression-language conformance tests are owned by the
 //! `bids-schema` crate (`bids_schema::SCHEMA_JSON`); this build script no longer vendors a
@@ -55,7 +58,7 @@ fn generate_example_tests(manifest: &Path, out_dir: &Path) {
         out.push_str(concat!(
             "#[test]\n",
             "fn bids_examples_submodule_missing() {\n",
-            "    eprintln!(\"bids-examples submodule not checked out; no example datasets found. Run: git submodule update --init tests/data/bids-examples\");\n",
+            "    panic!(\"bids-examples submodule not checked out; no example datasets found. Run: git submodule update --init tests/data/bids-examples\");\n",
             "}\n",
         ));
     } else {

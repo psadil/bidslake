@@ -11,6 +11,7 @@ mod common;
 
 use bidslake::schema::{AppliedOverlay, Ingestion, Schema};
 use common::{count, ingest_with_schema};
+use rstest::rstest;
 use std::fs;
 use std::path::Path;
 
@@ -526,13 +527,12 @@ fn conflicting_overlay_is_rejected() {
 ///
 /// `datatype` is bound at the `Tabular::route` call site, so one selector per rule separates
 /// them completely. This pins that, and that each gets its own re-keying view.
-#[tokio::test]
-async fn fmriprep_and_qsiprep_confounds_do_not_collapse() -> anyhow::Result<()> {
-    let dir = tempfile::tempdir()?;
-    write_derivative_tree(dir.path());
+/// The derivative tree with a diffusion run beside the functional one, indexed with both
+/// pipelines' adapters applied — QSIPrep's confounds file is named exactly like fMRIPrep's.
+async fn ingest_both_pipelines(dir: &Path) -> anyhow::Result<bidslake::db::BidsDb> {
+    write_derivative_tree(dir);
 
-    // A diffusion run beside the functional one, with QSIPrep's own confounds table.
-    let dwi = dir.path().join("sub-01/dwi");
+    let dwi = dir.join("sub-01/dwi");
     fs::create_dir_all(&dwi).unwrap();
     fs::write(dwi.join("sub-01_desc-preproc_dwi.nii.gz"), b"").unwrap();
     fs::write(
@@ -551,7 +551,13 @@ async fn fmriprep_and_qsiprep_confounds_do_not_collapse() -> anyhow::Result<()> 
         content: bids_schema::overlay::bundled_overlay("qsiprep").expect("bundled qsiprep overlay"),
     };
     let schema = Schema::load_full(None, &[fmriprep_overlay(), qsiprep], ingestion, &[])?;
-    let db = ingest_with_schema(dir.path(), schema).await?;
+    ingest_with_schema(dir, schema).await
+}
+
+#[tokio::test]
+async fn fmriprep_and_qsiprep_confounds_do_not_collapse() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db = ingest_both_pipelines(dir.path()).await?;
 
     // Each pipeline's rows land in its own table — 3 functional volumes, 2 diffusion ones.
     assert_eq!(count(&db, "fmriprep_confounds")?, 3);
@@ -580,18 +586,27 @@ async fn fmriprep_and_qsiprep_confounds_do_not_collapse() -> anyhow::Result<()> 
         |r| r.get(0),
     )?;
     assert_eq!(dwi_first, 0.90, "the dwi view reads the dwi file's rows");
+    Ok(())
+}
 
-    // Both adapters ship `undeclared: catalog`, so neither table hoards the ~1,800
-    // undeclared regressors as per-row JSON (docs/adr/0004).
-    for table in ["fmriprep_confounds", "qsiprep_confounds"] {
-        let has_other_data: bool = db.conn.query_row(
-            "SELECT count(*) > 0 FROM information_schema.columns \
-             WHERE table_name = ? AND column_name = 'other_data'",
-            [table],
-            |r| r.get(0),
-        )?;
-        assert!(!has_other_data, "{table} should have no other_data column");
-    }
+/// Both adapters ship `undeclared: catalog`, so neither table hoards the ~1,800 undeclared
+/// regressors as per-row JSON (docs/adr/0004).
+#[rstest]
+#[case("fmriprep_confounds")]
+#[case("qsiprep_confounds")]
+#[tokio::test]
+async fn a_confounds_table_has_no_other_data_column(#[case] table: &str) -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db = ingest_both_pipelines(dir.path()).await?;
+
+    let has_other_data: bool = db.conn.query_row(
+        "SELECT count(*) > 0 FROM information_schema.columns \
+         WHERE table_name = ? AND column_name = 'other_data'",
+        [table],
+        |r| r.get(0),
+    )?;
+
+    assert!(!has_other_data, "{table} should have no other_data column");
     Ok(())
 }
 

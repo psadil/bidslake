@@ -1,17 +1,11 @@
 use super::super::common::{tempdir, validate_dataset};
-use bids_validator_rs::entities::read_entities;
 use std::fs;
 
-#[test]
-fn test_entity_parsing_in_context() {
-    let parts = read_entities("sub-01_ses-pre_task-rest_run-02_bold.nii.gz");
-    assert_eq!(parts.suffix, "bold");
-    assert_eq!(parts.extension, ".nii.gz");
-    assert_eq!(parts.entities.get("sub"), Some(&"01".to_string()));
-    assert_eq!(parts.entities.get("ses"), Some(&"pre".to_string()));
-    assert_eq!(parts.entities.get("task"), Some(&"rest".to_string()));
-    assert_eq!(parts.entities.get("run"), Some(&"02".to_string()));
-}
+// `test_entity_parsing_in_context` lived here, calling `bids_validator_rs::entities` — a bare
+// re-export of `bids_core::entities` — on `sub-01_ses-pre_task-rest_run-02_bold.nii.gz`. The
+// same filename is case `multiple_entities` of
+// `bids_core::entities::tests::read_entities_splits_a_bids_filename`, which asserts the whole
+// (suffix, extension, entities) triple at once and so also pins that nothing *extra* parsed.
 
 #[tokio::test]
 async fn test_invalid_entity_order() {

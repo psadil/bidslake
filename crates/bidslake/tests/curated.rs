@@ -194,17 +194,17 @@ async fn multi_dataset_coexistence() -> anyhow::Result<()> {
     // ds001 (16) + ds114 (10) participants, isolated by dataset_id.
     assert_eq!(count(&db, "participants")?, 26);
 
-    let ds114_participants: i64 = db
-        .conn
-        .query_row(
-            "SELECT COUNT(*) FROM participants p JOIN dataset_description d USING (dataset_id) \
-         WHERE d.\"Name\" = 'A test of retest reliability of resting-state connectivity'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap_or(-1);
-    // Name assertion is best-effort (ds114's exact Name may vary); the isolation
-    // guarantee is the participant sum above.
-    let _ = ds114_participants;
+    // The sum alone would also hold if the rows were mis-attributed, so ask which
+    // dataset ds114's participants actually hang off.
+    let ds114_participants: i64 = db.conn.query_row(
+        "SELECT COUNT(*) FROM participants p JOIN dataset_description d USING (dataset_id) \
+         WHERE d.\"Name\" = 'ds114'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(
+        ds114_participants, 10,
+        "ds114's 10 participants must be attributed to ds114, not merged into ds001"
+    );
     Ok(())
 }

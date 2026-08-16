@@ -30,31 +30,64 @@ async fn test_diffusion_data() -> Result<()> {
 }
 
 /// ieeg_visual_multimodal contains single-band reference (`_sbref`) images.
-/// sbref files are imaging data, so each must land in the scans table.
+///
+/// The image is the data file and the `.json` beside it is a sidecar, and the metadata is keyed
+/// by the *image's* `file_id` — which is the `sidecars` contract, and what a `LIKE '%_sbref%'`
+/// count over `all_files` cannot see. That count only asked whether the walk found a path.
 #[tokio::test]
-async fn test_sbref_files() -> Result<()> {
+async fn sbref_images_are_data_files_with_their_metadata_on_the_image() -> Result<()> {
     let db = ingest(bids_example("ieeg_visual_multimodal")).await?;
 
-    let sbref_count: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND file_path LIKE '%_sbref.nii%'",
+    let (data, sidecar_files, with_metadata): (i64, i64, i64) = db.conn.query_row(
+        "SELECT (SELECT COUNT(*) FROM all_files \
+                  WHERE suffix='sbref' AND datatype='func' AND kind='data' \
+                    AND extension='.nii.gz'), \
+                (SELECT COUNT(*) FROM all_files \
+                  WHERE suffix='sbref' AND kind='sidecar' AND extension='.json'), \
+                (SELECT COUNT(*) FROM sidecars s JOIN all_files f USING (file_id) \
+                  WHERE f.suffix='sbref')",
         [],
-        |r| r.get(0),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
-    assert!(sbref_count > 0, "should capture sbref files as scans");
+    assert_eq!(data, 12, "sbref images are data files, typed func/sbref");
+    assert_eq!(
+        sidecar_files, 12,
+        "their .json siblings are cataloged as sidecars"
+    );
+    assert_eq!(
+        with_metadata, data,
+        "and sidecar metadata is keyed by the image's file_id, not the json's"
+    );
     Ok(())
 }
 
-/// ds000117 has fmap acquisitions; every fmap imaging file must appear in scans.
+/// ds000117 has fmap acquisitions.
+///
+/// `datatype` and `suffix` are derived from the path grammar, so pinning them is the claim
+/// `all_files` exists to make — where a `LIKE '%/fmap/%'` count would pass on any dataset with
+/// a directory of that name holding any file at all. (15 magnitude1 against 16 magnitude2 is
+/// real: one subject ships no magnitude1.)
 #[tokio::test]
-async fn test_fieldmaps() -> Result<()> {
+async fn fmap_files_carry_their_derived_datatype_and_suffix() -> Result<()> {
     let db = ingest(bids_example("ds000117")).await?;
 
-    let fmap_count: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND file_path LIKE '%/fmap/%'",
-        [],
-        |r| r.get(0),
+    let mut stmt = db.conn.prepare(
+        "SELECT kind, suffix, extension, COUNT(*) FROM all_files \
+         WHERE datatype = 'fmap' GROUP BY ALL ORDER BY ALL",
     )?;
-    assert!(fmap_count > 0, "should have files in the fmap directory");
+    let rows: Vec<(String, String, String, i64)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<Result<_, _>>()?;
+    assert_eq!(
+        rows,
+        vec![
+            ("data".into(), "magnitude1".into(), ".nii".into(), 15),
+            ("data".into(), "magnitude2".into(), ".nii".into(), 16),
+            ("data".into(), "phasediff".into(), ".nii".into(), 16),
+            ("sidecar".into(), "phasediff".into(), ".json".into(), 16),
+        ],
+        "datatype/suffix/kind come from the path grammar, not a LIKE on it"
+    );
     Ok(())
 }
 

@@ -36,45 +36,45 @@ async fn test_participants_tsv_na() -> anyhow::Result<()> {
     let schema = Schema::load(None).unwrap();
     db.create_tables(&schema)?;
 
-    // Check the schema of participants table
+    // A precondition, not the claim: `n/a` is only interesting in `age` because the schema
+    // types that column numerically. These come from `create_tables`, so they say nothing
+    // about the file — which is why every assertion in this test used to run *before* the
+    // parse, and nothing after it.
     let columns: Vec<(String, String)> = db
         .conn
         .prepare("PRAGMA table_info(participants)")?
         .query_map([], |row| Ok((row.get(1)?, row.get(2)?)))?
         .collect::<Result<Vec<_>, _>>()?;
-
-    println!("Participants table schema:");
-    let mut found_age = false;
-    let mut found_sex = false;
-
-    for (name, type_) in &columns {
-        println!("  {}: {}", name, type_);
-        if name == "age" {
-            found_age = true;
-            assert!(
-                type_ == "DOUBLE" || type_ == "FLOAT" || type_ == "REAL",
-                "Age should be numeric, found {}",
-                type_
-            );
-        }
-        if name == "sex" {
-            found_sex = true;
-            assert!(
-                type_ == "TEXT" || type_ == "VARCHAR",
-                "Sex should be TEXT/VARCHAR, found {}",
-                type_
-            );
-        }
-    }
-
-    assert!(found_age, "Age column not found in participants table");
-    assert!(found_sex, "Sex column not found in participants table");
+    let age_type = columns
+        .iter()
+        .find(|(name, _)| name == "age")
+        .map(|(_, t)| t.as_str())
+        .expect("participants should declare an `age` column");
+    assert!(
+        matches!(age_type, "DOUBLE" | "FLOAT" | "REAL"),
+        "fixture assumption: `age` should be numeric, found {age_type}"
+    );
 
     let fs = Box::new(LocalFileSystem::new(dataset_path));
     let mut parser = BidsParser::new(fs, None, schema, None, true, true);
 
-    // This should fail if age is numeric and n/a is not handled
     parser.parse(&db).await?;
+
+    // The claim: `n/a` in the numeric column stores NULL, and does not take the rest of the
+    // row (or the other subject) with it.
+    let rows: Vec<(String, Option<f64>, Option<String>)> = db
+        .conn
+        .prepare("SELECT participant_id, age, sex FROM participants ORDER BY participant_id")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    assert_eq!(
+        rows,
+        vec![
+            ("sub-01".to_string(), Some(25.0), Some("M".to_string())),
+            ("sub-02".to_string(), None, Some("F".to_string())),
+        ],
+    );
 
     Ok(())
 }

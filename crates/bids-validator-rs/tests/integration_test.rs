@@ -17,15 +17,19 @@ async fn test_minimal_valid_dataset() {
 
     let issues = validate_dataset(&tmp).await;
 
-    // There should be no errors (warnings are OK)
+    // Warnings are fine — a minimal dataset draws NOT_INCLUDED for README/CHANGES/
+    // participants.tsv. Hard errors are not.
     let errors = issues.errors();
-    if !errors.is_empty() {
-        for e in &errors {
-            eprintln!("  ERROR: [{}] {} at {}", e.code, e.message, e.location);
-        }
-    }
-    // We may get NOT_INCLUDED warnings for README/CHANGES/participants.tsv,
-    // but no hard errors from a minimal valid dataset
+    assert!(
+        errors.is_empty(),
+        "minimal valid dataset produced {} error(s):\n{}",
+        errors.len(),
+        errors
+            .iter()
+            .map(|e| format!("  [{}] {} @ {}", e.code, e.message.trim(), e.location))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
 }
 
 #[test]
@@ -63,6 +67,10 @@ fn test_expression_evaluation_with_context() {
     assert!(evaluate_bool("sidecar.RepetitionTime > 0", &ctx).unwrap());
 }
 
+/// The bundled schema loads, and carries the rule families the validator dispatches through.
+///
+/// The `rules` half is the load-bearing one: `rules()` answers `&Value::Null` for a schema with
+/// no `rules` key at all, so without asking, this test's name was a claim it did not make.
 #[test]
 fn test_schema_loads_and_has_rules() {
     let schema = BidsSchema::bundled().unwrap();
@@ -75,6 +83,27 @@ fn test_schema_loads_and_has_rules() {
 
     // Verify key sections exist
     assert!(schema.objects().is_object());
+
+    let rules = schema
+        .rules()
+        .as_object()
+        .expect("schema.rules must be an object");
+    for family in [
+        "checks",
+        "errors",
+        "files",
+        "entities",
+        "dataset_metadata",
+        "sidecars",
+        "tabular_data",
+    ] {
+        assert!(rules.contains_key(family), "rules.{family} is missing");
+    }
+    // The lookup every ErrorValidator::key() goes through.
+    assert_eq!(
+        schema.get_issue("BFile").expect("rules.errors.BFile").code,
+        "B_FILE"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -135,16 +164,20 @@ fn extra_ignores(dataset: &str) -> &'static [&'static str] {
 }
 
 /// Validate a single example dataset, asserting it produces no (non-ignored) errors.
-/// Skips (does not fail) when the submodule dataset directory is not present.
+///
+/// A missing dataset directory fails rather than returning early. This is the body of all
+/// 107 generated tests, so an early return here is not one skipped case — it is the entire
+/// corpus suite reporting green while validating nothing.
 async fn run_example(name: &str) {
     use bids_validator_rs::config::{IgnoreRule, ValidatorConfig};
     use std::path::Path;
 
     let dataset_dir = Path::new("tests/data/bids-examples").join(name);
-    if !dataset_dir.is_dir() {
-        eprintln!("Skipping {name}: dataset directory not present (submodule not initialized)");
-        return;
-    }
+    assert!(
+        dataset_dir.is_dir(),
+        "{name}: dataset directory not present. \
+         Run `git submodule update --init tests/data/bids-examples`."
+    );
 
     let mut config = ValidatorConfig::from_file("tests/data/bids-examples-config.json")
         .expect("base bids-examples config should load");
@@ -156,7 +189,10 @@ async fn run_example(name: &str) {
 
     // Resolve HED library schemas from the vendored hed-schemas checkout when present, so HED
     // datasets validate offline and deterministically (falls back to cache/network otherwise).
-    let hed_dir = Path::new("lib/hed-validator-rs/tests/hed-schemas");
+    let hed_dir = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../hed-validator-rs/tests/hed-schemas"
+    ));
     if hed_dir.is_dir() {
         config.hed_schema_dir = Some(hed_dir.to_path_buf());
     }

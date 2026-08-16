@@ -3474,20 +3474,6 @@ fn kind_of(rel_path: &str, extension: &str, datatype: Option<&str>) -> Kind {
     }
 }
 
-/// Whether a file is a primary BIDS **data file**.
-///
-/// Superseded by [`kind_of`], and kept as its executable specification: the test
-/// `kind_of_agrees_with_is_datafile` asserts the two agree over every path in the corpus.
-/// Do not call from ingest.
-#[cfg(test)]
-fn is_datafile(rel_path: &str, extension: &str, datatypes: &HashSet<String>) -> bool {
-    const COMPANION_EXTS: &[&str] = &[".json", ".tsv", ".tsv.gz", ".bval", ".bvec"];
-    if COMPANION_EXTS.contains(&extension) {
-        return false;
-    }
-    bids_core::datatype::parent_datatype(rel_path, datatypes).is_some()
-}
-
 /// Compile `.bidsignore` file content into a [`Gitignore`] matcher.
 ///
 /// Patterns are relative to the dataset root; `walk()` yields root-relative paths,
@@ -3513,7 +3499,8 @@ pub fn build_bidsignore(content: &str) -> Result<Gitignore> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BidsParser, build_bidsignore};
+    use super::{BidsParser, Kind, build_bidsignore, kind_of};
+    use rstest::rstest;
     use std::path::Path;
 
     #[test]
@@ -3741,70 +3728,11 @@ mod tests {
     // datatype-directory rule against bids-schema's. There is one implementation now
     // (`bids_core::datatype`), and its cases went with it.
 
-    /// `kind_of` replaced `is_datafile` plus the two hardcoded JSON arms of `process_file`.
-    /// `is_datafile` is kept as its executable specification: `Kind::Data` must hold exactly
-    /// where it was true, over every path in the vendored corpus rather than a sample. A
-    /// divergence would silently change which files count as data files.
-    #[test]
-    fn kind_of_agrees_with_is_datafile() {
-        use super::{Kind, is_datafile, kind_of};
-        let schema: serde_json::Value = serde_json::from_str(bids_schema::SCHEMA_JSON).unwrap();
-        let datatypes: std::collections::HashSet<String> = schema["objects"]["datatypes"]
-            .as_object()
-            .unwrap()
-            .keys()
-            .cloned()
-            .collect();
-
-        let check = |rel: &str| {
-            let name = rel.rsplit('/').next().unwrap_or(rel);
-            let ext = bids_core::entities::read_entities(name).extension;
-            let kind = kind_of(
-                rel,
-                &ext,
-                bids_core::datatype::parent_datatype(rel, &datatypes),
-            );
-            assert_eq!(
-                kind == Kind::Data,
-                is_datafile(rel, &ext, &datatypes),
-                "disagreement on {rel} (kind = {kind:?})"
-            );
-        };
-
-        let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/bids-examples");
-        let mut seen = 0usize;
-        if corpus.is_dir() {
-            let mut stack = vec![corpus.clone()];
-            while let Some(dir) = stack.pop() {
-                let Ok(entries) = std::fs::read_dir(&dir) else {
-                    continue;
-                };
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    let name = entry.file_name();
-                    if name.to_string_lossy().starts_with('.') {
-                        continue;
-                    }
-                    if path.is_dir() {
-                        stack.push(path);
-                    } else if let Ok(rel) = path.strip_prefix(&corpus) {
-                        // Strip the dataset directory so paths are dataset-relative, the
-                        // frame `process_file` works in.
-                        let rel = rel.to_string_lossy();
-                        if let Some((_, inner)) = rel.split_once('/') {
-                            check(inner);
-                            seen += 1;
-                        }
-                    }
-                }
-            }
-        }
-        assert!(
-            seen > 1000,
-            "expected a substantial corpus walk, saw {seen} files — run \
-             `git submodule update --init`"
-        );
-    }
+    // `kind_of_agrees_with_is_datafile` lived here too, walking the corpus to compare `kind_of`
+    // against the `is_datafile` it replaced. Both sides called the same `parent_datatype`, so
+    // the datatype half cancelled and the only detectable divergence was between `is_datafile`'s
+    // hand-copied companion-extension list and the `kind_of` arms it was copied from. The
+    // extension table below is that comparison, written out.
 
     /// `file_id` is a *stored* primary key that every satellite foreign-keys to, so it must
     /// be reproducible from the three identity columns and nothing else. Pin the exact value:
@@ -3849,7 +3777,6 @@ mod tests {
     /// term-mapped path is a data file only by virtue of what the projection says it is.
     #[test]
     fn kind_of_reads_a_projected_datatype() {
-        use super::{Kind, kind_of};
         // What `data/term-maps/freesurfer.json` projects for this path.
         assert_eq!(
             kind_of("sub-01/mri/wmparc.mgz", ".mgz", Some("anat")),
@@ -3862,49 +3789,45 @@ mod tests {
 
     /// The non-`Data` kinds, including the ordering that makes a sidecar beside a data file a
     /// sidecar rather than a second data file.
-    #[test]
-    fn kind_of_classifies_companions_and_documentation() {
-        use super::{Kind, kind_of};
-        let cases = [
-            ("dataset_description.json", ".json", None, Kind::Description),
-            // A companion wins over the datatype it sits beside.
-            (
-                "sub-01/anat/sub-01_T1w.json",
-                ".json",
-                Some("anat"),
-                Kind::Sidecar,
-            ),
-            (
-                "sub-01/func/sub-01_task-x_events.tsv",
-                ".tsv",
-                Some("func"),
-                Kind::Tabular,
-            ),
-            (
-                "sub-01/func/sub-01_task-x_physio.tsv.gz",
-                ".tsv.gz",
-                Some("func"),
-                Kind::Tabular,
-            ),
-            (
-                "sub-01/dwi/sub-01_dwi.bval",
-                ".bval",
-                Some("dwi"),
-                Kind::Gradient,
-            ),
-            ("participants.tsv", ".tsv", None, Kind::Tabular),
-            ("README", "", None, Kind::Other),
-            ("CHANGES", "", None, Kind::Other),
-            // A nested description is NOT the dataset's own; only the exact root path is.
-            (
-                "derivatives/fmriprep/dataset_description.json",
-                ".json",
-                None,
-                Kind::Sidecar,
-            ),
-        ];
-        for (path, ext, datatype, want) in cases {
-            assert_eq!(kind_of(path, ext, datatype), want, "on {path}");
-        }
+    #[rstest]
+    #[case("dataset_description.json", ".json", None, Kind::Description)]
+    // A companion wins over the datatype it sits beside.
+    #[case::companion_beats_datatype(
+        "sub-01/anat/sub-01_T1w.json",
+        ".json",
+        Some("anat"),
+        Kind::Sidecar
+    )]
+    #[case(
+        "sub-01/func/sub-01_task-x_events.tsv",
+        ".tsv",
+        Some("func"),
+        Kind::Tabular
+    )]
+    #[case(
+        "sub-01/func/sub-01_task-x_physio.tsv.gz",
+        ".tsv.gz",
+        Some("func"),
+        Kind::Tabular
+    )]
+    #[case("sub-01/dwi/sub-01_dwi.bval", ".bval", Some("dwi"), Kind::Gradient)]
+    #[case("sub-01/dwi/sub-01_dwi.bvec", ".bvec", Some("dwi"), Kind::Gradient)]
+    #[case("participants.tsv", ".tsv", None, Kind::Tabular)]
+    #[case("README", "", None, Kind::Other)]
+    #[case("CHANGES", "", None, Kind::Other)]
+    // A nested description is NOT the dataset's own; only the exact root path is.
+    #[case::nested_description(
+        "derivatives/fmriprep/dataset_description.json",
+        ".json",
+        None,
+        Kind::Sidecar
+    )]
+    fn kind_of_classifies_companions_and_documentation(
+        #[case] path: &str,
+        #[case] ext: &str,
+        #[case] datatype: Option<&str>,
+        #[case] want: Kind,
+    ) {
+        assert_eq!(kind_of(path, ext, datatype), want, "on {path}");
     }
 }

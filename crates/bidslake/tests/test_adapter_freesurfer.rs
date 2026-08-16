@@ -8,6 +8,7 @@
 mod common;
 
 use common::{count, ingest, ingest_with_adapters};
+use rstest::rstest;
 use std::fs;
 use std::path::Path;
 
@@ -89,23 +90,6 @@ async fn aseg_stats_are_read_typed_across_all_subject_dir_forms() -> anyhow::Res
     )?;
     assert_eq!(seg_only, 12, "materialized `seg` concept column");
 
-    // One PCRE mapping resolved all three subject-dir forms.
-    for (sub, ses, n) in [("01", Some("1"), 3), ("02", None, 3), ("03", None, 3)] {
-        let got: i64 = match ses {
-            Some(s) => db.conn.query_row(
-                "SELECT COUNT(*) FROM freesurfer_aseg WHERE sub = ? AND ses = ?",
-                duckdb::params![sub, s],
-                |r| r.get(0),
-            )?,
-            None => db.conn.query_row(
-                "SELECT COUNT(*) FROM freesurfer_aseg WHERE sub = ? AND ses IS NULL",
-                duckdb::params![sub],
-                |r| r.get(0),
-            )?,
-        };
-        assert_eq!(got, n, "subject-dir form for sub={sub}");
-    }
-
     // Typed values (Volume_mm3 DOUBLE, SegId BIGINT).
     let (seg_id, vol): (i64, f64) = db.conn.query_row(
         "SELECT SegId, Volume_mm3 FROM freesurfer_aseg \
@@ -115,6 +99,38 @@ async fn aseg_stats_are_read_typed_across_all_subject_dir_forms() -> anyhow::Res
     )?;
     assert_eq!(seg_id, 17);
     assert!((vol - 4300.2).abs() < 1e-6);
+    Ok(())
+}
+
+/// One PCRE mapping resolves all three subject-dir forms, so each yields the same three
+/// `aseg` rows regardless of how the directory was named.
+#[rstest]
+#[case::session("01", Some("1"))]
+#[case::sessionless("02", None)]
+#[case::bare_label("03", None)]
+#[tokio::test]
+async fn one_mapping_resolves_every_subject_dir_form(
+    #[case] sub: &str,
+    #[case] ses: Option<&str>,
+) -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_fs_tree(dir.path());
+    let db = ingest_with_adapters(dir.path(), &["freesurfer"]).await?;
+
+    let got: i64 = match ses {
+        Some(s) => db.conn.query_row(
+            "SELECT COUNT(*) FROM freesurfer_aseg WHERE sub = ? AND ses = ?",
+            duckdb::params![sub, s],
+            |r| r.get(0),
+        )?,
+        None => db.conn.query_row(
+            "SELECT COUNT(*) FROM freesurfer_aseg WHERE sub = ? AND ses IS NULL",
+            duckdb::params![sub],
+            |r| r.get(0),
+        )?,
+    };
+
+    assert_eq!(got, 3, "subject-dir form for sub={sub}");
     Ok(())
 }
 
@@ -495,28 +511,41 @@ async fn projected_subjects_register_as_participants() -> anyhow::Result<()> {
 /// project no `datatype`, so no ingestion rule claims them (`bids.rs`: "recognized but no
 /// ingestion rule -> leave it alone"). Recognition is what keeps `bids-validator-rs` from
 /// reporting them as unknown; it is not a licence to fill `scans` with logs.
+#[rstest]
+#[case("%scripts/%")]
+#[case("%touch/%")]
 #[tokio::test]
-async fn recognized_bookkeeping_files_are_not_cataloged() -> anyhow::Result<()> {
+async fn recognized_bookkeeping_files_are_not_cataloged(
+    #[case] pattern: &str,
+) -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     write_fs_tree(dir.path());
     let db = ingest_with_adapters(dir.path(), &["freesurfer"]).await?;
 
-    for pattern in ["%scripts/%", "%touch/%"] {
-        let n: i64 = db.conn.query_row(
-            "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND file_path LIKE ?",
-            [pattern],
-            |r| r.get(0),
-        )?;
-        assert_eq!(n, 0, "{pattern} must not reach scans");
-    }
+    let n: i64 = db.conn.query_row(
+        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND file_path LIKE ?",
+        [pattern],
+        |r| r.get(0),
+    )?;
 
-    // ...but the subject they belong to is still registered, so a subject whose only files are
-    // bookkeeping does not vanish from `participants`.
+    assert_eq!(n, 0, "{pattern} must not reach scans");
+    Ok(())
+}
+
+/// ...but the subject they belong to is still registered, so a subject whose only files are
+/// bookkeeping does not vanish from `participants`.
+#[tokio::test]
+async fn a_subject_with_only_bookkeeping_files_is_still_a_participant() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_fs_tree(dir.path());
+    let db = ingest_with_adapters(dir.path(), &["freesurfer"]).await?;
+
     let n: i64 = db.conn.query_row(
         "SELECT COUNT(*) FROM participants WHERE participant_id = 'sub-02'",
         [],
         |r| r.get(0),
     )?;
+
     assert_eq!(n, 1);
     Ok(())
 }

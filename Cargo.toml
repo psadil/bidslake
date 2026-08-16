@@ -28,6 +28,10 @@ version = "0.1.0"
 debug = 1
 split-debuginfo = "unpacked"
 
+# A crate does not acquire a dependency by its appearing here — this table only says which
+# version and features a crate gets *if* it opts in with `dep = { workspace = true }`. What it
+# buys is that two crates cannot silently disagree, which they had: `bids-validator-rs` pinned
+# `ignore = "0.4.27"` against the 0.4.28 below.
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -38,3 +42,18 @@ ignore = "0.4.28"
 clap = { version = "4.6", features = ["derive"] }
 thiserror = "2"
 futures = "0.3"
+anyhow = "1"
+# Shared by `bidslake` and the `bidslake-py` extension, and they must not drift: cargo builds
+# the vendored engine once only while version and features match, and the Arrow types have to
+# line up across the FFI boundary. That invariant used to live in a comment.
+duckdb = { version = "1.0", features = ["bundled"] }
+
+# Dev-only, but shared, so declared on the same terms. `tempfile` was pinned three different
+# ways ("3", "3.8", "3") across three crates before this; "3.8" is the tightest of them, so
+# nothing loosens.
+criterion = "0.5"
+tempfile = "3.8"
+# Parameterized cases and fixtures. The suite had no such crate, so "one case per test" was
+# spelled as a `for` loop over an inline table — which reports one failing test for N cases
+# and stops at the first, the masking CONTRIBUTING.md asks contributors to avoid.
+rstest = "0.26"

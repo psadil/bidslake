@@ -496,12 +496,10 @@ pub enum SchemaError {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_load_bundled_schema() {
-        let schema = BidsSchema::bundled().unwrap();
-        assert!(!schema.bids_version.is_empty());
-        assert!(!schema.schema_version.is_empty());
-    }
+    // `test_load_bundled_schema` lived here, loading the bundled schema and asserting the two
+    // version strings are non-empty. `tests/integration_test.rs::test_schema_loads_and_has_rules`
+    // makes the same load and the same two assertions plus several more, over the same public
+    // API, so there was nothing this reached that it does not.
 
     #[test]
     fn test_entity_mappings() {
