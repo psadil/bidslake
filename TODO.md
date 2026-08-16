@@ -18,10 +18,6 @@ as issues. Roughly ordered by value.
   (now documented in the docstring). When the PyO3 PyCapsule stream bridge lands
   (`crates/bidslake-py/src/lib.rs`), stream Arrow batches so `get()` is O(1) memory.
 
-- [ ] **Recording bare-table const consolidation** (`pat-02`). `crates/bidslake/src/schema/dynamic.rs`'s
-  hardcoded `["motion", "stim"]` bare-table list could fold into the shared recording descriptor
-  if that descriptor is promoted to a shared location and carries a "bare" flag.
-
 - [ ] **Validator double-compute of datatype/modality/entities** (`dup-04`). Optional, low value:
   `crates/bids-validator-rs/src/context.rs` derives the core selector fields once for its struct
   and again via `build_file_context`. Fixing it re-introduces hand-assembly or needs a
@@ -182,6 +178,14 @@ accessors; and the opt-in `python -m bidslake.stubgen`. Remaining follow-ups:
   `csv` reader assumes tabs and schema-declared columns, so the `feat` adapter catalogs these
   rather than reading them. A `ContentReader` would make the mixing matrix and motion
   parameters queryable as tables instead of paths.
+
+  Not reachable by widening the recording path, which is why this needs a reader. BIDS'
+  headerless recordings are now derived rather than listed (`schema/recording.rs`: a tabular
+  suffix whose column names the schema locates outside the file, in the sidecar `Columns` or
+  an associated `_channels.tsv`). FSL's files are described by no BIDS rule at all — the
+  `feat` term map projects `mcf.par` to `datatype=func, suffix=timeseries, desc=motion`, but
+  nothing declares where its column names live, so no derivation can reach it. A reader is
+  the declarative hook it needs.
 
 - [ ] **Stamp a layout when one is used to *produce* a dataset**. Overlays, term maps and
   ingestion fragments are all recorded in `bidslake_*` tables, so a catalog records how its

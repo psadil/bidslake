@@ -184,6 +184,16 @@ impl TabularRule {
         })
     }
 
+    /// Whether this rule's selectors name `suffix` — via `suffix == "x"` or
+    /// `intersects([suffix], [...])`.
+    fn selects_suffix(&self, suffix: &str) -> bool {
+        self.selectors.iter().any(|s| match s {
+            Selector::Suffix(x) => x == suffix,
+            Selector::SuffixIn(xs) => xs.iter().any(|x| x == suffix),
+            _ => false,
+        })
+    }
+
     /// A canonical string of just the identity selectors, so rules that differ
     /// only by a `sidecar.*`/`DatasetType` condition group to the same table.
     fn identity_key(&self) -> String {
@@ -259,6 +269,22 @@ impl Tabular {
 
     pub fn tables(&self) -> &[TableSpec] {
         &self.tables
+    }
+
+    /// The table whose rules declare columns for `suffix`, or `None` if the schema
+    /// declares none.
+    ///
+    /// Asks about the *suffix*, not about a file: unlike [`Self::route`] it needs no
+    /// datatype, extension or sidecar, so it answers for a rule that constrains those
+    /// too (`nirs.nirsOptodes` names `datatype == "nirs"` alongside its suffix). Used
+    /// by [`super::recording`] to tell a recording whose columns the schema declares
+    /// from one whose table is generated bare.
+    pub fn table_for_suffix(&self, suffix: &str) -> Option<&TableSpec> {
+        self.rules
+            .iter()
+            .filter(|r| r.selects_suffix(suffix))
+            .find_map(|r| self.rule_table.get(&r.id))
+            .map(|&i| &self.tables[i])
     }
 
     /// Every rule whose selectors all pass for `ctx` (additive — a file can match

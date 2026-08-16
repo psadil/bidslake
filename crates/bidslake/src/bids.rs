@@ -32,6 +32,7 @@ use crate::links;
 use crate::readers::{self, ContentReader};
 use crate::schema::dynamic::{quote_ident, sql_lit};
 use crate::schema::ingestion::{Disposition, Undeclared};
+use crate::schema::recording::ColumnNames;
 use crate::schema::tabular::{ColumnSpec, FileContext, RowIdentity, TableSpec};
 use crate::schema::{Schema, Tenure};
 use crate::timing::{self, Counter, Phase};
@@ -2213,7 +2214,7 @@ impl BidsParser {
         // are still ingested. They have no header row; their column names come from
         // the merged sidecar `Columns` or the associated channels file, so they are
         // deferred to the flush once every sidecar has been collected.
-        if is_recording_suffix(&suffix) {
+        if self.schema.recordings().contains(&suffix) {
             self.pending_recordings.push(PendingRecording {
                 dataset_id: dataset_id.to_string(),
                 rel_path: rel_path.to_string(),
@@ -2581,23 +2582,20 @@ impl BidsParser {
         rec: &PendingRecording,
         index: &SidecarIndex<'_>,
     ) -> Result<Option<String>> {
-        // Map suffix → target table + column strategy via the single descriptor table.
-        let Some(kind) = recording_kind(rec.suffix.as_str()) else {
+        // Suffix → target table, from the schema-derived recording set.
+        let Some(kind) = self.schema.recordings().get(rec.suffix.as_str()) else {
             return Ok(None);
         };
-        let table = kind.table;
-        let columns: Vec<ColumnSpec> = if kind.schema_columns {
-            self.recording_columns(table)
-        } else {
-            Vec::new()
-        };
+        let table = kind.table.as_str();
+        // Typed columns if the schema declares any for this table (`physio`,
+        // `physio_events`), empty otherwise — which is what makes `stim`/`motion` bare.
+        let columns: Vec<ColumnSpec> = self.recording_columns(table);
 
         // Column names, in file order: from the associated channels file (motion) or
         // the merged sidecar `Columns` (physio/stim/physioevents).
-        let colnames = if kind.colnames_from_channels {
-            self.motion_columns(db, rec)?
-        } else {
-            self.sidecar_columns(rec, index)
+        let colnames = match kind.names {
+            ColumnNames::Channels => self.channel_columns(db, rec)?,
+            ColumnNames::Sidecar => self.sidecar_columns(rec, index),
         };
         if colnames.is_empty() {
             return Ok(None); // headerless file with no column names → skip
@@ -2674,8 +2672,9 @@ impl BidsParser {
         }
     }
 
-    /// The schema-declared columns of a rule-based recording table (`physio`,
-    /// `physio_events`).
+    /// The schema-declared columns of a recording table (`physio`, `physio_events`),
+    /// or empty when the schema declares none — which is what makes `stim` and
+    /// `motion` bare, every value landing untyped in `other_data`.
     fn recording_columns(&self, table: &str) -> Vec<ColumnSpec> {
         self.schema
             .tabular()
@@ -2708,19 +2707,37 @@ impl BidsParser {
             .unwrap_or_default()
     }
 
-    /// Column names for a motion recording: the `name` column of its associated
-    /// `_channels.tsv` (per `meta.associations.channels`), already ingested into
-    /// `motion_channels`.
-    fn motion_columns(&self, db: &BidsDb, rec: &PendingRecording) -> Result<Vec<String>> {
-        let Some(base) = rec.rel_path.strip_suffix("_motion.tsv") else {
+    /// Column names for a recording whose associated `_channels.tsv` names them
+    /// (per `meta.associations.channels`) — `motion` in base BIDS.
+    ///
+    /// Which table holds those rows is routed through the schema rather than named:
+    /// a `_channels.tsv` in this file's datatype is the same file that rule already
+    /// ingested, so `motion` reads `motion_channels` without either name appearing
+    /// here.
+    fn channel_columns(&self, db: &BidsDb, rec: &PendingRecording) -> Result<Vec<String>> {
+        let Some(base) = rec.rel_path.strip_suffix(&format!("_{}.tsv", rec.suffix)) else {
             return Ok(Vec::new());
         };
         let channels_path = format!("{base}_channels.tsv");
+        let path_with_slash = format!("/{channels_path}");
+        let datatype = self.datatype_dir_in_path(&rec.rel_path);
+        let sidecar = Value::Null;
+        let Some(spec) = self.schema.tabular().route(&FileContext {
+            path: &path_with_slash,
+            datatype: datatype.as_deref(),
+            suffix: Some("channels"),
+            extension: Some(".tsv"),
+            sidecar: &sidecar,
+            dataset_type: self.dataset_type.as_deref(),
+        }) else {
+            return Ok(Vec::new());
+        };
+        let channels_table = spec.table.clone();
         // Keyed by the channels file's own `file_id`, not its path: the per-row tables carry
         // only `file_id` now (docs/adr/0006). `row_idx` is what makes this correct — a
         // `_channels.tsv`'s line order maps onto the columns of the recording beside it.
         let sql = format!(
-            "SELECT name FROM motion_channels WHERE file_id = {} ORDER BY row_idx",
+            "SELECT name FROM {channels_table} WHERE file_id = {} ORDER BY row_idx",
             self.file_key(&rec.dataset_id, &channels_path)
         );
         let mut stmt = db.conn.prepare(&sql)?;
@@ -2891,62 +2908,6 @@ impl BidsParser {
 /// smaller is not safer — the batch also declares the file's full column list once per window,
 /// which for a table hundreds of columns wide is itself a large share of the statement.
 const BATCH_WINDOW_FILES: usize = 512;
-
-/// How one headerless continuous-recording suffix maps to a table and how its
-/// columns are built. Single source of truth for the recording suffix set, the
-/// suffix→table map (note `physioevents` → `physio_events`), and each table's
-/// column strategy — so adding a recording kind is a one-line change here rather
-/// than edits to three disjoint functions.
-struct RecordingKind {
-    /// The BIDS suffix (`physio`, `physioevents`, `stim`, `motion`).
-    suffix: &'static str,
-    /// The DuckDB table it maps to.
-    table: &'static str,
-    /// Whether the table carries schema-declared typed columns (`physio`,
-    /// `physio_events`) or is a bare all-VARCHAR table (`stim`, `motion`).
-    schema_columns: bool,
-    /// Where column names come from: the associated `_channels.tsv` (`motion`) or
-    /// the merged sidecar `Columns` (everything else).
-    colnames_from_channels: bool,
-}
-
-const RECORDING_KINDS: &[RecordingKind] = &[
-    RecordingKind {
-        suffix: "physio",
-        table: "physio",
-        schema_columns: true,
-        colnames_from_channels: false,
-    },
-    RecordingKind {
-        suffix: "physioevents",
-        table: "physio_events",
-        schema_columns: true,
-        colnames_from_channels: false,
-    },
-    RecordingKind {
-        suffix: "stim",
-        table: "stim",
-        schema_columns: false,
-        colnames_from_channels: false,
-    },
-    RecordingKind {
-        suffix: "motion",
-        table: "motion",
-        schema_columns: false,
-        colnames_from_channels: true,
-    },
-];
-
-/// The [`RecordingKind`] for a suffix, or `None` if it is not a continuous recording.
-fn recording_kind(suffix: &str) -> Option<&'static RecordingKind> {
-    RECORDING_KINDS.iter().find(|k| k.suffix == suffix)
-}
-
-/// Whether a suffix names a headerless continuous recording (columns come from the
-/// sidecar `Columns` or the associated channels file, not a header row).
-fn is_recording_suffix(suffix: &str) -> bool {
-    recording_kind(suffix).is_some()
-}
 
 /// Split a tabular filename into its BIDS `(suffix, extension)` via the shared
 /// bids-core parser. The suffix is the trailing token (or the stem for
