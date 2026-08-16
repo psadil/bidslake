@@ -5,6 +5,7 @@
 mod common;
 
 use common::{bids_example, ingest};
+use rstest::rstest;
 
 /// A non-NIfTI EEG source (`_eeg.vhdr`) resolves its sibling `channels.tsv` through the schema's
 /// `meta.associations`. This proves the resolver iterates every data file in the tree (the EEG
@@ -60,39 +61,59 @@ async fn channels_association_from_meg_pseudo_file() -> anyhow::Result<()> {
 /// to the source's, `dwi`, which the entity-less `dwi.bval` matches). Nothing but this test says
 /// the edges exist — they were being resolved and then ignored before `bvals`/`bvecs` consumed
 /// them.
+#[rstest]
+#[case("bval")]
+#[case("bvec")]
 #[tokio::test]
-async fn inherited_gradients_resolve_to_every_image_below() -> anyhow::Result<()> {
+async fn inherited_gradients_resolve_to_every_image_below(
+    #[case] kind: &str,
+) -> anyhow::Result<()> {
     let db = ingest(bids_example("ds114")).await?;
 
-    for kind in ["bval", "bvec"] {
-        let (n, targets): (i64, i64) = db.conn.query_row(
-            "SELECT COUNT(*), COUNT(DISTINCT target_file_path) FROM file_associations \
-             WHERE association_type = ?",
-            [kind],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        // 10 subjects x 2 sessions, all pointing at the single root-level file.
-        assert_eq!(n, 20, "{kind}: one edge per image");
-        assert_eq!(
-            targets, 1,
-            "{kind}: all edges share the one inherited target"
-        );
+    let (n, targets): (i64, i64) = db.conn.query_row(
+        "SELECT COUNT(*), COUNT(DISTINCT target_file_path) FROM file_associations \
+         WHERE association_type = ?",
+        [kind],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
 
-        // `target_file_id` must be resolved, not NULL: the gradient file is registered under
-        // its own path, so nothing here is a dangling reference.
-        let dangling: i64 = db.conn.query_row(
-            "SELECT COUNT(*) FROM file_associations \
-             WHERE association_type = ? AND target_file_id IS NULL",
-            [kind],
-            |r| r.get(0),
-        )?;
-        assert_eq!(
-            dangling, 0,
-            "{kind}: inherited target should resolve to an id"
-        );
-    }
+    // 10 subjects x 2 sessions, all pointing at the single root-level file.
+    assert_eq!(
+        (n, targets),
+        (20, 1),
+        "{kind}: one edge per image, all sharing the one inherited target"
+    );
+    Ok(())
+}
 
-    // The sources are the images themselves, addressable by concept through `all_files`.
+/// `target_file_id` must be resolved, not NULL: the gradient file is registered under its own
+/// path, so nothing here is a dangling reference.
+#[rstest]
+#[case("bval")]
+#[case("bvec")]
+#[tokio::test]
+async fn an_inherited_gradient_target_resolves_to_an_id(#[case] kind: &str) -> anyhow::Result<()> {
+    let db = ingest(bids_example("ds114")).await?;
+
+    let dangling: i64 = db.conn.query_row(
+        "SELECT COUNT(*) FROM file_associations \
+         WHERE association_type = ? AND target_file_id IS NULL",
+        [kind],
+        |r| r.get(0),
+    )?;
+
+    assert_eq!(
+        dangling, 0,
+        "{kind}: inherited target should resolve to an id"
+    );
+    Ok(())
+}
+
+/// The sources are the images themselves, addressable by concept through `all_files`.
+#[tokio::test]
+async fn inherited_gradient_sources_are_the_images_themselves() -> anyhow::Result<()> {
+    let db = ingest(bids_example("ds114")).await?;
+
     let sessions: i64 = db.conn.query_row(
         "SELECT COUNT(DISTINCT (f.sub, f.ses)) FROM file_associations a \
          JOIN all_files f ON f.file_id = a.source_file_id \
@@ -100,6 +121,7 @@ async fn inherited_gradients_resolve_to_every_image_below() -> anyhow::Result<()
         [],
         |r| r.get(0),
     )?;
+
     assert_eq!(sessions, 20);
     Ok(())
 }

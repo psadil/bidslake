@@ -3513,7 +3513,8 @@ pub fn build_bidsignore(content: &str) -> Result<Gitignore> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BidsParser, build_bidsignore};
+    use super::{BidsParser, Kind, build_bidsignore, kind_of};
+    use rstest::rstest;
     use std::path::Path;
 
     #[test]
@@ -3849,7 +3850,6 @@ mod tests {
     /// term-mapped path is a data file only by virtue of what the projection says it is.
     #[test]
     fn kind_of_reads_a_projected_datatype() {
-        use super::{Kind, kind_of};
         // What `data/term-maps/freesurfer.json` projects for this path.
         assert_eq!(
             kind_of("sub-01/mri/wmparc.mgz", ".mgz", Some("anat")),
@@ -3862,49 +3862,44 @@ mod tests {
 
     /// The non-`Data` kinds, including the ordering that makes a sidecar beside a data file a
     /// sidecar rather than a second data file.
-    #[test]
-    fn kind_of_classifies_companions_and_documentation() {
-        use super::{Kind, kind_of};
-        let cases = [
-            ("dataset_description.json", ".json", None, Kind::Description),
-            // A companion wins over the datatype it sits beside.
-            (
-                "sub-01/anat/sub-01_T1w.json",
-                ".json",
-                Some("anat"),
-                Kind::Sidecar,
-            ),
-            (
-                "sub-01/func/sub-01_task-x_events.tsv",
-                ".tsv",
-                Some("func"),
-                Kind::Tabular,
-            ),
-            (
-                "sub-01/func/sub-01_task-x_physio.tsv.gz",
-                ".tsv.gz",
-                Some("func"),
-                Kind::Tabular,
-            ),
-            (
-                "sub-01/dwi/sub-01_dwi.bval",
-                ".bval",
-                Some("dwi"),
-                Kind::Gradient,
-            ),
-            ("participants.tsv", ".tsv", None, Kind::Tabular),
-            ("README", "", None, Kind::Other),
-            ("CHANGES", "", None, Kind::Other),
-            // A nested description is NOT the dataset's own; only the exact root path is.
-            (
-                "derivatives/fmriprep/dataset_description.json",
-                ".json",
-                None,
-                Kind::Sidecar,
-            ),
-        ];
-        for (path, ext, datatype, want) in cases {
-            assert_eq!(kind_of(path, ext, datatype), want, "on {path}");
-        }
+    #[rstest]
+    #[case("dataset_description.json", ".json", None, Kind::Description)]
+    // A companion wins over the datatype it sits beside.
+    #[case::companion_beats_datatype(
+        "sub-01/anat/sub-01_T1w.json",
+        ".json",
+        Some("anat"),
+        Kind::Sidecar
+    )]
+    #[case(
+        "sub-01/func/sub-01_task-x_events.tsv",
+        ".tsv",
+        Some("func"),
+        Kind::Tabular
+    )]
+    #[case(
+        "sub-01/func/sub-01_task-x_physio.tsv.gz",
+        ".tsv.gz",
+        Some("func"),
+        Kind::Tabular
+    )]
+    #[case("sub-01/dwi/sub-01_dwi.bval", ".bval", Some("dwi"), Kind::Gradient)]
+    #[case("participants.tsv", ".tsv", None, Kind::Tabular)]
+    #[case("README", "", None, Kind::Other)]
+    #[case("CHANGES", "", None, Kind::Other)]
+    // A nested description is NOT the dataset's own; only the exact root path is.
+    #[case::nested_description(
+        "derivatives/fmriprep/dataset_description.json",
+        ".json",
+        None,
+        Kind::Sidecar
+    )]
+    fn kind_of_classifies_companions_and_documentation(
+        #[case] path: &str,
+        #[case] ext: &str,
+        #[case] datatype: Option<&str>,
+        #[case] want: Kind,
+    ) {
+        assert_eq!(kind_of(path, ext, datatype), want, "on {path}");
     }
 }

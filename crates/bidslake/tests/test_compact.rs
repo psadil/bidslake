@@ -9,6 +9,7 @@ mod common;
 
 use bidslake::db::BidsDb;
 use common::{bids_example, count, ingest};
+use rstest::rstest;
 use std::path::Path;
 
 /// Every table's row count, so a compaction can be checked wholesale rather than
@@ -28,34 +29,37 @@ fn row_counts(db: &BidsDb) -> anyhow::Result<Vec<(String, i64)>> {
         .collect()
 }
 
+/// Ingest `ds001` into a catalog *file* and churn it.
+///
+/// `ingest` builds in memory, so this re-does it against a file: compaction is about the
+/// on-disk block allocator, which `:memory:` does not exercise. The churn — delete a
+/// dataset's event rows, which is what a re-index does — is what leaves free blocks behind.
+/// Deleted by file, the same shape the re-index `DELETE` uses (and `events` has no `row_idx`
+/// to slice by; it is declared order-insensitive).
+async fn build_churned_catalog(src: &Path) -> anyhow::Result<()> {
+    use bidslake::{bids::BidsParser, fs::LocalFileSystem, schema::Schema};
+    let db = BidsDb::new(src.to_str().unwrap())?;
+    let schema = Schema::load(None).unwrap();
+    db.create_tables(&schema)?;
+    let fs = Box::new(LocalFileSystem::new(bids_example("ds001")));
+    let mut parser = BidsParser::new(fs, None, schema, None, true, true);
+    let txn = db.conn.unchecked_transaction()?;
+    parser.parse(&db).await?;
+    txn.commit()?;
+
+    db.conn
+        .execute("DELETE FROM events WHERE hash(file_id) % 2 = 0", [])?;
+    db.conn.execute("CHECKPOINT", [])?;
+    Ok(())
+}
+
 /// Ingest to a file, compact it, and assert the copy is complete and smaller.
 #[tokio::test]
 async fn compact_preserves_everything_and_reclaims_space() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let src = dir.path().join("catalog.duckdb");
     let dst = dir.path().join("compacted.duckdb");
-
-    // `ingest` builds in memory, so re-do it against a file: compaction is about the
-    // on-disk block allocator, which `:memory:` does not exercise.
-    {
-        use bidslake::{bids::BidsParser, fs::LocalFileSystem, schema::Schema};
-        let db = BidsDb::new(src.to_str().unwrap())?;
-        let schema = Schema::load(None).unwrap();
-        db.create_tables(&schema)?;
-        let fs = Box::new(LocalFileSystem::new(bids_example("ds001")));
-        let mut parser = BidsParser::new(fs, None, schema, None, true, true);
-        let txn = db.conn.unchecked_transaction()?;
-        parser.parse(&db).await?;
-        txn.commit()?;
-
-        // Churn: delete a dataset's event rows and re-insert them, which is what a
-        // re-index does and what leaves free blocks behind. Deleted by file, the same shape
-        // the re-index `DELETE` uses (and `events` has no `row_idx` to slice by — it is
-        // declared order-insensitive).
-        db.conn
-            .execute("DELETE FROM events WHERE hash(file_id) % 2 = 0", [])?;
-        db.conn.execute("CHECKPOINT", [])?;
-    }
+    build_churned_catalog(&src).await?;
 
     let before = {
         let db = BidsDb::new(src.to_str().unwrap())?;
@@ -102,26 +106,6 @@ async fn compact_preserves_everything_and_reclaims_space() -> anyhow::Result<()>
     );
     assert!(pks > 0);
 
-    // Views survive the schema copy — including the ones that depend on *another view*.
-    // `diffusion` selects from `bval_volumes`/`bvec_volumes`, which select from `bvals`/
-    // `bvecs` and `file_associations`, so it is the first object in the catalog needing
-    // `COPY FROM DATABASE (SCHEMA)` to emit views in dependency order. Nothing else asserts
-    // that it does.
-    for view in [
-        "dataset_relations",
-        "all_files",
-        "bval_volumes",
-        "bvec_volumes",
-        "diffusion",
-    ] {
-        let n: i64 = db.conn.query_row(
-            "SELECT count(*) FROM duckdb_views() WHERE view_name = ?",
-            [view],
-            |r| r.get(0),
-        )?;
-        assert_eq!(n, 1, "the {view} view must survive compaction");
-    }
-
     // And the point of the exercise.
     let free: i64 =
         db.conn
@@ -141,6 +125,37 @@ async fn compact_preserves_everything_and_reclaims_space() -> anyhow::Result<()>
 
 fn file_len(p: &Path) -> u64 {
     std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)
+}
+
+/// Views survive the schema copy — including the ones that depend on *another view*.
+/// `diffusion` selects from `bval_volumes`/`bvec_volumes`, which select from `bvals`/`bvecs`
+/// and `file_associations`, so it is the first object in the catalog needing
+/// `COPY FROM DATABASE (SCHEMA)` to emit views in dependency order. Nothing else asserts
+/// that it does.
+#[rstest]
+#[case("dataset_relations")]
+#[case("all_files")]
+#[case("bval_volumes")]
+#[case("bvec_volumes")]
+// The one that depends on the two above it.
+#[case("diffusion")]
+#[tokio::test]
+async fn a_view_survives_compaction(#[case] view: &str) -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let src = dir.path().join("catalog.duckdb");
+    let dst = dir.path().join("compacted.duckdb");
+    build_churned_catalog(&src).await?;
+    bidslake::compact::compact(src.to_str().unwrap(), dst.to_str().unwrap())?;
+
+    let db = BidsDb::new(dst.to_str().unwrap())?;
+
+    let n: i64 = db.conn.query_row(
+        "SELECT count(*) FROM duckdb_views() WHERE view_name = ?",
+        [view],
+        |r| r.get(0),
+    )?;
+    assert_eq!(n, 1, "the {view} view must survive compaction");
+    Ok(())
 }
 
 /// `sessions` foreign-keys into `participants`, and `COPY FROM DATABASE` copies tables

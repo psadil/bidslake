@@ -399,6 +399,7 @@ impl Ingestion {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     fn fs() -> Ingestion {
         Ingestion::from_sources(&[bids_schema::bundled_ingestion_source("freesurfer").unwrap()])
@@ -483,22 +484,27 @@ mod tests {
     /// `tablePolicy` is `additionalProperties: false`, so the new fields only work if
     /// they were actually added to the metaschema — and a typo in a policy value must
     /// be an error, not a silent fall back to the default.
-    #[test]
-    fn metaschema_rejects_bad_undeclared_policy() {
-        for bad in [
-            r#"{"IngestionSchemaVersion": "0.1.0",
-                "tables": { "t": { "undeclared": "cataolg" } } }"#,
-            r#"{"IngestionSchemaVersion": "0.1.0",
-                "tables": { "t": { "undecalred": "catalog" } } }"#,
-            // `undeclaredWhen` entries need both fields.
-            r#"{"IngestionSchemaVersion": "0.1.0",
-                "tables": { "t": { "undeclaredWhen": [{ "undeclared": "catalog" }] } } }"#,
-        ] {
-            assert!(
-                Ingestion::from_sources(&[bad]).is_err(),
-                "metaschema should reject: {bad}"
-            );
-        }
+    #[rstest]
+    // A typo in the policy *value*.
+    #[case::misspelled_value(
+        r#"{"IngestionSchemaVersion": "0.1.0",
+            "tables": { "t": { "undeclared": "cataolg" } } }"#
+    )]
+    // A typo in the policy *key*, which `additionalProperties: false` is what catches.
+    #[case::misspelled_key(
+        r#"{"IngestionSchemaVersion": "0.1.0",
+            "tables": { "t": { "undecalred": "catalog" } } }"#
+    )]
+    // `undeclaredWhen` entries need both fields.
+    #[case::incomplete_scoped_entry(
+        r#"{"IngestionSchemaVersion": "0.1.0",
+            "tables": { "t": { "undeclaredWhen": [{ "undeclared": "catalog" }] } } }"#
+    )]
+    fn metaschema_rejects_bad_undeclared_policy(#[case] bad: &str) {
+        assert!(
+            Ingestion::from_sources(&[bad]).is_err(),
+            "metaschema should reject: {bad}"
+        );
     }
 
     #[test]
@@ -512,44 +518,44 @@ mod tests {
         assert_eq!(ing.undeclared("events"), Undeclared::Store);
     }
 
+    /// A fragment cataloging undeclared sidecar keys for one suffix only.
+    const SCOPED_SIDECARS: &str = r#"{
+        "IngestionSchemaVersion": "0.1.0",
+        "tables": { "sidecars": { "undeclaredWhen": [
+            { "selectors": ["suffix == \"timeseries\""], "undeclared": "catalog" }
+        ] } }
+    }"#;
+
     /// `undeclaredWhen` scopes the policy to matching files only — the property that
     /// lets one derivative's sidecars be cataloged while raw BIDS sidecars in the same
     /// database keep their custom metadata.
-    #[test]
-    fn undeclared_when_scopes_to_matching_files() {
-        let ing = Ingestion::from_sources(&[r#"{
-            "IngestionSchemaVersion": "0.1.0",
-            "tables": { "sidecars": { "undeclaredWhen": [
-                { "selectors": ["suffix == \"timeseries\""], "undeclared": "catalog" }
-            ] } }
-        }"#])
-        .expect("fragment loads");
+    #[rstest]
+    #[case::selected("timeseries", Undeclared::Catalog)]
+    #[case::not_selected("bold", Undeclared::Store)]
+    fn undeclared_when_scopes_to_matching_files(#[case] suffix: &str, #[case] want: Undeclared) {
+        let ing = Ingestion::from_sources(&[SCOPED_SIDECARS]).expect("fragment loads");
+        let ctx = FileContext {
+            suffix: Some(suffix),
+            ..Default::default()
+        };
 
-        for (suffix, want) in [
-            ("timeseries", Undeclared::Catalog),
-            ("bold", Undeclared::Store),
-        ] {
-            let ctx = FileContext {
-                suffix: Some(suffix),
-                ..Default::default()
-            };
-            assert_eq!(
-                ing.undeclared_for("sidecars", &ctx),
-                want,
-                "suffix {suffix}"
-            );
-        }
-        // The static policy stays `Store`, so the table still gets its `other_data`
-        // column — the scoped form must not change the table's shape.
+        let got = ing.undeclared_for("sidecars", &ctx);
+
+        assert_eq!(got, want, "suffix {suffix}");
+    }
+
+    /// The static policy stays `Store`, so the table still gets its `other_data` column —
+    /// the scoped form must not change the table's shape.
+    #[test]
+    fn a_scoped_policy_leaves_the_static_one_alone() {
+        let ing = Ingestion::from_sources(&[SCOPED_SIDECARS]).expect("fragment loads");
+
         assert_eq!(ing.undeclared("sidecars"), Undeclared::Store);
     }
 
-    /// A later fragment touching one field of a shared table must not drop the others.
-    /// `tables.extend` used to replace the whole `TablePolicy`, silently losing an
-    /// earlier fragment's `concepts`/`ordered`.
-    #[test]
-    fn table_policies_merge_field_wise() {
-        let ing = Ingestion::from_sources(&[
+    /// Two fragments naming the same table, each setting fields the other does not.
+    fn merged_policies() -> Ingestion {
+        Ingestion::from_sources(&[
             r#"{
                 "IngestionSchemaVersion": "0.1.0",
                 "tables": { "t": { "concepts": ["sub"], "ordered": false,
@@ -561,19 +567,35 @@ mod tests {
                     "undeclaredWhen": [{ "selectors": ["suffix == \"b\""], "undeclared": "store" }] } }
             }"#,
         ])
-        .expect("fragments load");
+        .expect("fragments load")
+    }
+
+    /// A later fragment touching one field of a shared table must not drop the others.
+    /// `tables.extend` used to replace the whole `TablePolicy`, silently losing an
+    /// earlier fragment's `concepts`/`ordered`.
+    #[test]
+    fn table_policies_merge_field_wise() {
+        let ing = merged_policies();
 
         assert_eq!(ing.materialized_concepts("t"), ["sub"], "concepts survive");
         assert!(!ing.ordered("t"), "ordered survives");
         assert_eq!(ing.undeclared("t"), Undeclared::Catalog, "later field wins");
-        // Both fragments' scoped entries are live, in declaration order.
-        for (suffix, want) in [("a", Undeclared::Catalog), ("b", Undeclared::Store)] {
-            let ctx = FileContext {
-                suffix: Some(suffix),
-                ..Default::default()
-            };
-            assert_eq!(ing.undeclared_for("t", &ctx), want, "suffix {suffix}");
-        }
+    }
+
+    /// ...and both fragments' scoped entries are live, in declaration order.
+    #[rstest]
+    #[case::from_the_first_fragment("a", Undeclared::Catalog)]
+    #[case::from_the_second_fragment("b", Undeclared::Store)]
+    fn merged_scoped_entries_are_all_live(#[case] suffix: &str, #[case] want: Undeclared) {
+        let ing = merged_policies();
+        let ctx = FileContext {
+            suffix: Some(suffix),
+            ..Default::default()
+        };
+
+        let got = ing.undeclared_for("t", &ctx);
+
+        assert_eq!(got, want, "suffix {suffix}");
     }
 
     /// `ignoreKeys` sits on the shared table policy, so a fragment may name it on any table —

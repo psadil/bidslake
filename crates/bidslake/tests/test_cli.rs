@@ -1,6 +1,7 @@
 //! End-to-end CLI checks for the overlay experimentation surfaces (`schema --diff`)
 //! and dataset-embedded overlay auto-discovery.
 
+use rstest::rstest;
 use std::fs;
 use std::process::Command;
 
@@ -31,22 +32,26 @@ fn schema_diff_reports_overlay_additions() {
 
 /// An adapter is a *named bundle*, and its three artifacts are each optional: a name
 /// resolves if bidslake ships any of an overlay, a term map, or an ingestion fragment
-/// under it. `freesurfer` has all three; `fmriprep` has an overlay and an ingestion
-/// fragment but no term map (its filenames already carry BIDS entities), which is the
-/// case that used to be rejected outright.
-#[test]
-fn adapter_resolves_with_a_partial_artifact_set() {
-    for name in ["fmriprep", "mriqc", "qsiprep", "freesurfer"] {
-        let output = Command::new(env!("CARGO_BIN_EXE_bidslake"))
-            .args(["schema", "--adapter", name, "--diff"])
-            .output()
-            .expect("run bidslake");
-        assert!(
-            output.status.success(),
-            "--adapter {name} should resolve: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+/// under it.
+#[rstest]
+// An overlay and an ingestion fragment but no term map — its filenames already carry BIDS
+// entities. This is the case that used to be rejected outright.
+#[case("fmriprep")]
+#[case("mriqc")]
+#[case("qsiprep")]
+// All three artifacts.
+#[case("freesurfer")]
+fn adapter_resolves_with_a_partial_artifact_set(#[case] name: &str) {
+    let output = Command::new(env!("CARGO_BIN_EXE_bidslake"))
+        .args(["schema", "--adapter", name, "--diff"])
+        .output()
+        .expect("run bidslake");
+
+    assert!(
+        output.status.success(),
+        "--adapter {name} should resolve: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 /// An unknown adapter names the union of the bundled registries, not just one of them.

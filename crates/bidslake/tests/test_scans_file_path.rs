@@ -1,5 +1,6 @@
 use anyhow::Result;
 use bidslake::{bids::BidsParser, db::BidsDb, fs::LocalFileSystem, schema::Schema};
+use rstest::rstest;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -122,10 +123,9 @@ mod common;
 /// batch inserts `OR REPLACE`, so a wrong `file_path` adds a *second* row at the bare filename
 /// instead of replacing the walk-synthesized one — duplicate rows, a lost `acq_time`, and no
 /// primary-key error to notice.
-#[tokio::test]
-async fn scans_tsv_file_path_is_composed_from_its_directory() -> Result<()> {
-    let dir = TempDir::new()?;
-    let root = dir.path().join("ds");
+/// A dataset whose `sub-01/sub-01_scans.tsv` names its two data files relative to its own
+/// directory, so composing them against anything else is visible.
+fn write_scans_dataset(root: &std::path::Path) -> Result<()> {
     std::fs::create_dir_all(root.join("sub-01/anat"))?;
     std::fs::create_dir_all(root.join("sub-01/func"))?;
     std::fs::write(
@@ -144,21 +144,36 @@ async fn scans_tsv_file_path_is_composed_from_its_directory() -> Result<()> {
          anat/sub-01_T1w.nii.gz\t2026-08-12T09:00:00\n\
          func/sub-01_task-rest_bold.nii.gz\t2026-08-12T09:15:00\n",
     )?;
+    Ok(())
+}
 
+/// Composed against the scans.tsv's own directory, not stored bare.
+#[rstest]
+#[case("sub-01/anat/sub-01_T1w.nii.gz")]
+#[case("sub-01/func/sub-01_task-rest_bold.nii.gz")]
+#[tokio::test]
+async fn a_scans_row_lands_at_the_composed_path(#[case] expected: &str) -> Result<()> {
+    let dir = TempDir::new()?;
+    let root = dir.path().join("ds");
+    write_scans_dataset(&root)?;
     let db = common::ingest(&root).await?;
 
-    // Composed against the scans.tsv's own directory, not stored bare.
-    for expected in [
-        "sub-01/anat/sub-01_T1w.nii.gz",
-        "sub-01/func/sub-01_task-rest_bold.nii.gz",
-    ] {
-        let n: i64 = db.conn.query_row(
-            "SELECT count(*) FROM all_files WHERE kind = 'data' AND file_path = ?",
-            [expected],
-            |r| r.get(0),
-        )?;
-        assert_eq!(n, 1, "expected exactly one scans row at {expected}");
-    }
+    let n: i64 = db.conn.query_row(
+        "SELECT count(*) FROM all_files WHERE kind = 'data' AND file_path = ?",
+        [expected],
+        |r| r.get(0),
+    )?;
+
+    assert_eq!(n, 1, "expected exactly one scans row at {expected}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn scans_tsv_file_path_is_composed_from_its_directory() -> Result<()> {
+    let dir = TempDir::new()?;
+    let root = dir.path().join("ds");
+    write_scans_dataset(&root)?;
+    let db = common::ingest(&root).await?;
 
     // The failure mode: a row at the bare `filename` value, alongside the real one.
     let bare: i64 = db.conn.query_row(
