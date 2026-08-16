@@ -23,6 +23,14 @@ s3 = ["s3fs"]
 [dependency-groups]
 dev = ["pytest>=8", "ty", "ruff", "prek"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# `--strict-markers` so a mistyped `@pytest.mark.parametrise` is an error rather than an
+# unknown marker silently attached to a test that then runs once, unparametrized — the
+# suite leans on `parametrize` heavily enough for that to matter. `--strict-config` so a
+# typo in this table is an error too.
+addopts = "--strict-markers --strict-config"
+
 [tool.maturin]
 module-name = "bidslake._bidslake"
 python-source = "python"

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -25,41 +26,61 @@ import pytest
 DATASETS = ["ds210", "eyetracking_fmri", "ds001"]
 
 
-def _repo_root() -> Path:
+@pytest.fixture(scope="session")
+def repo_root() -> Path:
     out = subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True)
     return Path(out.strip())
 
 
 @pytest.fixture(scope="session")
-def lake_db(tmp_path_factory: pytest.TempPathFactory) -> Path:
+def bidslake_cli(repo_root: Path) -> Callable[..., None]:
+    """Run the `bidslake` CLI, building it once for the whole session.
+
+    Built rather than `cargo run`-ed per call for two reasons. Every fixture here reaches
+    for the *same* binary, so probing `target/debug/bidslake` and skipping when it is absent
+    (which is what `test_adapter`, `test_overlay` and `test_layouts` used to do) silently
+    dropped a tenth of the suite wherever nobody had run a debug build — CI included, since
+    its Python job never builds one. And `cargo run` re-checks the whole workspace's
+    freshness on every invocation, which this fixture alone makes seventeen times.
+
+    `--release` because that is the profile the session ingest already needs; asking for
+    debug as well would mean compiling the bundled DuckDB engine a second time.
+    """
+    subprocess.run(
+        ["cargo", "build", "-q", "--release", "-p", "bidslake"],
+        cwd=repo_root,
+        check=True,
+    )
+    binary = repo_root / "target" / "release" / "bidslake"
+
+    def run(*args: str | Path) -> None:
+        subprocess.run([str(binary), *map(str, args)], check=True, capture_output=True)
+
+    return run
+
+
+@pytest.fixture(scope="session")
+def lake_db(
+    request: pytest.FixtureRequest,
+    tmp_path_factory: pytest.TempPathFactory,
+    repo_root: Path,
+) -> Path:
     override = os.environ.get("BIDSLAKE_TEST_DB")
     if override:
         return Path(override)
 
-    repo = _repo_root()
-    examples = repo / "crates" / "bidslake" / "tests" / "bids-examples"
+    # Requested here rather than as a parameter so that the override path needs no cargo
+    # at all — building the CLI is the expensive half of this fixture.
+    bidslake_cli: Callable[..., None] = request.getfixturevalue("bidslake_cli")
+
+    examples = repo_root / "crates" / "bidslake" / "tests" / "bids-examples"
     if not (examples / DATASETS[0]).exists():
         pytest.skip("bids-examples submodule not initialized")
 
     db = tmp_path_factory.mktemp("bidslake") / "test.duckdb"
 
-    def bidslake(*args: str) -> None:
-        subprocess.run(
-            ["cargo", "run", "-q", "--release", "-p", "bidslake", "--", *args],
-            cwd=repo,
-            check=True,
-        )
-
     for name in DATASETS:
-        bidslake(
-            "index",
-            "--input",
-            str(examples / name),
-            "--output",
-            str(db),
-            "--dataset-id",
-            name,
-        )
+        bidslake_cli("index", "--input", examples / name, "--output", db, "--dataset-id", name)
 
     # Let every dataset reach every dataset by name, so a binding can scope an input with
     # `via=` instead of a hardcoded id. Declared in *each* dataset, including for itself,
@@ -67,11 +88,11 @@ def lake_db(tmp_path_factory: pytest.TempPathFactory) -> Path:
     # declared only in a neighbour is not in scope for a binding anchored here.
     for definer in DATASETS:
         for name in DATASETS:
-            bidslake(
+            bidslake_cli(
                 "link",
                 "alias",
                 "-d",
-                str(db),
+                db,
                 "--dataset",
                 definer,
                 "--as",
