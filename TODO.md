@@ -4,22 +4,6 @@ Deferred / optional items surfaced by the July 2026 design sweep but left out of
 remediation pass (see the finding ids in parentheses). Recorded here for later; not filed
 as issues. Roughly ordered by value.
 
-- [x] **An inherited `.bval`/`.bvec` applies to many images, and nothing models that.**
-  Resolved by [ADR 0007](docs/adr/0007-within-dataset-file-associations.md), taking the
-  second of the two routes this entry named: the payload keys on the *gradient file*
-  (`bvals`/`bvecs`) and the image-facing `diffusion` is a view joining through
-  `file_associations`. The first route — duplicating the values per inheriting image — was
-  rejected because it leaves the catalog handling one BIDS rule two ways (`events` shared,
-  gradients copied) and because it would make the *writer* depend on association edges,
-  which are not available on every backend.
-
-  The entry assumed the many-to-many had to be built. It did not: the schema already
-  declares `meta.associations.bval`/`.bvec` with `inherit: true`, and
-  `resolve_structural_associations` was already writing exactly those edges — 20 of them for
-  ds114 — with nothing consuming them. `events` had been reading the same shape correctly
-  all along. Two adjacent bugs fell out with the stem swap: the hardcoded `.nii.gz` (which
-  had silently skipped `dwi_deriv`'s uncompressed image) and the `epi` suffix.
-
 - [ ] **`*_channels.tsv` should declare `describes` too.** The `channels` association exists
   and the table is ordered, so `{ "association": "channels", "axis": "channel", "view": … }`
   would give the same re-keying every other per-row table now gets. Deferred only so that
@@ -29,49 +13,10 @@ as issues. Roughly ordered by value.
   and `coordsystem` are the multi-association case — several targets per source, so
   `(file_id, channel_idx)` would not be unique — which is permitted but wants a look first.
 
-- [x] **Every SQL error collapsed to `RuntimeError: preparing query`.** `anyhow_err` built the
-  Python exception with `e.to_string()`, which for an `anyhow::Error` prints only the outermost
-  `.context()` — so the `.context("preparing query")` *replaced* DuckDB's diagnostic rather than
-  adding to it, and a missing table, an unknown column and a syntax error were byte-identical.
-  Fixed with `format!("{e:#}")` (anyhow's alternate `Display` walks the chain).
-
-  Two things fell out that were not in the original entry. The chain walks one link too far:
-  `duckdb::Error`'s source is the raw FFI code, whose `Display` is the constant `Error code 1:
-  Unknown error code`, so `{:#}` appended it to *every* message — hence `duck()`, which re-wraps
-  a `duckdb::Error` as a leaf, in both `bidslake-py` and `bidslake`. And the same collapse
-  existed on the ingest side, where `main` renders the chain the same way. Regression tests:
-  `crates/bidslake-py/tests/test_errors.py` (eight, including one asserting the three mistakes
-  above now give three different messages) and `crates/bidslake/tests/test_write_errors.rs`.
-
 - [ ] **Genuine lazy `get()` streaming** (`py-04`). `get()` is typed `Iterator[BidsFile]` but
   materializes the whole Arrow-IPC buffer + Polars frame first, so its laziness is cosmetic
   (now documented in the docstring). When the PyO3 PyCapsule stream bridge lands
   (`crates/bidslake-py/src/lib.rs`), stream Arrow batches so `get()` is O(1) memory.
-
-- [x] **Fully convert `db.rs`/`dynamic.rs` to `anyhow`** (`eh-05`). Done alongside the SQL-error
-  collapse above, since both were the same bug wearing different clothes: an error that knew
-  what went wrong and threw it away.
-
-  There were **three** `ToSqlConversionFailure` constructions, not two — the entry missed
-  `db.rs::file_id_value`, the only one of them honestly named, though it still hid the value that
-  failed. The other two claimed an `io::Error(NotFound)` for a table absent from an in-memory
-  `HashMap`, which is neither I/O nor a conversion; they existed solely so the function could keep
-  returning `duckdb::Result`, and converting the signatures removed the reason for them.
-
-  The context pushed inside is the part a call site cannot supply. `bids.rs` knows it is writing
-  `sidecars`; only the write layer knows *which row of how many*, the bound-value count, the row's
-  keys (bounded and key-only — a `sidecars` row is 451 columns and `other_data` can carry
-  participant data), and which stage of the upsert failed. `fs.rs` gained the same treatment for
-  the case that actually greets a mistyped `--input`: `No such file or directory (os error 2)`
-  now reads `walking /no/such/dataset`.
-
-- [x] **First-writer-wins `dataset_description` rows** (`eh-04`). Resolved by
-  [ADR 0005](docs/adr/0005-multi-root-datasets.md) §5: a real `dataset_description.json` now
-  upserts (`Schema::insert_or_replace`, a `guard: bool` on `build_insert_sql`), so a description
-  added or corrected since the first index reaches the catalog on re-index. The synthesized row
-  for a dataset that has none keeps its `WHERE NOT EXISTS` guard so it can never shadow a real
-  one, and only the *shallowest* description is written — with `OR REPLACE`, a derivative's
-  would otherwise overwrite its parent's.
 
 - [ ] **Recording bare-table const consolidation** (`pat-02`). `crates/bidslake/src/schema/dynamic.rs`'s
   hardcoded `["motion", "stim"]` bare-table list could fold into the shared recording descriptor
@@ -81,15 +26,6 @@ as issues. Roughly ordered by value.
   `crates/bids-validator-rs/src/context.rs` derives the core selector fields once for its struct
   and again via `build_file_context`. Fixing it re-introduces hand-assembly or needs a
   precomputed-inputs `build_file_context` variant, to save three cheap in-memory calls.
-
-- [x] **`dataset_id` conflates the catalog partition with the ingest root.** Resolved by
-  [ADR 0005](docs/adr/0005-multi-root-datasets.md) and
-  [ADR 0006](docs/adr/0006-file-registry.md). `dataset_roots(dataset_id, root_uri)` holds one
-  row per root, so subject-sharded pipeline output is one dataset with N roots and needs no
-  flags; `root_uri` is off `dataset_description` entirely. The per-root identity that
-  `(dataset_id, file_path)` could no longer supply became `file_id`, a hash of
-  `(dataset_id, root_uri, file_path)`, which every file-keyed table now keys on. The
-  no-`root_id`-label decision is recorded in ADR 0005 §2.
 
 - [ ] **Enforced referential integrity for the concept columns?** `all_files.sub`/`ses` cannot be
   foreign keys as built: they are select items of a *view* now (ADR 0006 §3) rather than the
@@ -177,15 +113,6 @@ accessors; and the opt-in `python -m bidslake.stubgen`. Remaining follow-ups:
   files while `.bidsignore` is in force now says so, instead of reporting success over an empty
   database (see `promote_orphan_sidecars`' call site in `bids.rs`).
 
-- [x] **Cross-dataset association** — landed at the *dataset* level, not by entity guessing
-  (`docs/adr/0003`). Datasets declaring the same `SourceDatasets` are co-derivatives
-  (`shares_source`, resolved by the `dataset_relations` view); `lake.related_datasets(id, relation)`
-  gives a consumer the sound relation, within which it can then match files by entity. Validated on
-  `ds001761-fmriprep`/`-mriqc`. **Remaining:** the precise *file*-level link via the BIDS `Sources`
-  metadata field (a `target_dataset_id` on `file_associations`, BIDS-URI resolution through
-  `DatasetLinks`) — deferred because no producer we have emits `Sources` (MRIQC emits neither it nor
-  the deprecated `RawSources`; an issue has been filed with nipreps/mriqc). See ADR 0003 §6.
-
 - [ ] **YAML overlay authoring**. Overlays are JSON-only; accept `.yaml`/`.yml` (parse to `Value`
   before merge) behind an optional `yaml` cargo feature.
 
@@ -195,31 +122,7 @@ accessors; and the opt-in `python -m bidslake.stubgen`. Remaining follow-ups:
 - [ ] **Consider filtering `bidslake_*` meta tables** from the generated `COLUMNS`/`C` typed surface
   (they are internal provenance tables; `bidslake_meta`/`bidslake_schema` currently appear there).
 
-- [x] **Batched-insert crash on empty header columns** (pre-existing, unrelated to overlays). A TSV
-  with a trailing tab (an empty-string column name) made the batched insert emit
-  `json_object('', raw."")`, a "zero-length delimited identifier" parser error that dropped the
-  file — and, since the batched path has no per-file fallback, every other file in its header group
-  too. Both SQL builders now filter empty column names out of the `other_data` extras. Regression
-  test: `tabular_row_order::trailing_tab_header_still_ingests` (the vendored `ds001` no longer
-  carries such a header, so the test ships its own fixture).
-
 ## Derivation layer
-
-- [x] **Promote unit specs to a stamped artifact** — dropped, along with the unit spec. The
-  entry asked when a `UnitSpec`/`Role`/`Rows` declaration should become a stamped JSON
-  document. The answer turned out to be that it should not become one, because it should not
-  exist: thirteen names that transfer nowhere outside bidslake, to express what SQLAlchemy
-  Core already expresses as one `LEFT JOIN LATERAL` per role. Users know SQL and ORMs; they
-  are not tolerant of learning a new kind of object. The query layer took its place — models
-  generated from the catalog, `lake.sql()` taking a statement, and `stubgen` emitting both for
-  an augmented catalog — and the resolver, the spec dataclasses and their type-pinning went
-  with it. The two `a2cps` pipelines that motivated the spec were ported as the acceptance
-  test, and each shrank. What survives is the *soundness* rule the spec enforced, now enforced
-  by the query instead: a cross-dataset sibling joins `dataset_link_targets` on a link name
-  (ADR 0003 §7), and a match count of 2+ is ambiguous rather than silently taken.
-  ADR 0002 §1's verdict on the `x_bidslake` prototype — "one artifact, three concerns, no
-  standards path, bespoke parser" — applies to a work-unit language too, which is the reason
-  this never shipped as one.
 
 - [ ] **A narrower later run silently strips concept columns off `all_files`.** The other edge
   of docs/adr/0006 §3's `CREATE OR REPLACE VIEW`. Widening is retroactive, which is the win;
