@@ -18,16 +18,18 @@ as issues. Roughly ordered by value.
   (now documented in the docstring). When the PyO3 PyCapsule stream bridge lands
   (`crates/bidslake-py/src/lib.rs`), stream Arrow batches so `get()` is O(1) memory.
 
-- [ ] **A per-file subject-directory lookup whose result is discarded.**
-  `crates/bids-validator-rs/src/context.rs` builds `subject_dir` with `format!("sub-{}", …)` and
-  then linear-scans the root's subdirectories via `find_dir` (`bids-core/src/filetree.rs`, a pure
-  `iter().find`) — and drops both; the binding is `let _subject`. The root's subdirectories *are*
-  the `sub-*` dirs, so this is O(files × subjects) of thrown-away string comparison: ~10⁸
-  comparisons on a 1000-subject, 100k-file dataset, for nothing. It is a vestige of the
-  unfinished `subject` scope, whose actual expression binding is the stub
-  `DatasetContext::subject_context_value` (empty `ses_dirs`, null `session_id`). Deleting the two
-  lines is behaviour-preserving; finishing the `subject` scope is the larger question, and this
-  should not wait on it.
+- [ ] **The `subject` expression scope is a stub, and it is bound at the wrong altitude.**
+  `DatasetContext::subject_context_value` hands every file the same
+  `{ sessions: { ses_dirs: [], session_id: null } }`, so any schema rule selecting on
+  `subject.sessions.*` reads an empty answer rather than the file's own. But in the schema's
+  `meta.context`, `subject` is *the current file's* subject: a real binding reads `ses_dirs`
+  from that file's `sub-*` directory and `session_id` from that subject's `sessions.tsv`, which
+  makes it per-file state, not a dataset-wide binding built once in `validator.rs` beside
+  `dataset`/`schema`. The cheap shape is to resolve it per subject (there are few) and hand each
+  file the entry for its own — not per file, and not once for the dataset. Until then the stub is
+  silently permissive: rules gated on sessions never fire. Related: `DatasetContext.subjects`
+  already carries `sub_dirs` and `participants.tsv`'s `participant_id`, so half the inputs are
+  already collected.
 
 - [ ] **Two raw-schema datatype lookups that per-file loops no longer need.** `find_datatype`
   now has a table-driven twin — `bids_core::datatype::parent_datatype`, reached via

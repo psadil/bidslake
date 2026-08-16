@@ -391,15 +391,6 @@ impl BidsContext {
             (None, None)
         };
 
-        // Build subject context
-        let subject_dir = file_ctx
-            .entities
-            .get("subject")
-            .map(|s| format!("sub-{}", s));
-        let _subject = subject_dir
-            .as_ref()
-            .and_then(|sd| dataset.tree.find_dir(sd));
-
         // Resolve the schema's `meta.associations` for this file via the shared, pure resolver
         // in `bids-schema` (selector eval + tree search, no content reads), then build the typed
         // `BidsAssociations` on top (the content reads stay here). The selector context is
@@ -541,6 +532,13 @@ impl DatasetContext {
 
     /// Build the `subject` binding shared by every file. Currently a stub: sessions are
     /// not yet populated, so `subject.sessions.ses_dirs` is empty and `session_id` is null.
+    ///
+    /// Note the shape this stub commits to. `subject` is the *current file's* subject in the
+    /// schema's `meta.context`, so a real binding is per-file — it would read `ses_dirs` from
+    /// the file's own `sub-*` directory and `session_id` from that subject's `sessions.tsv` —
+    /// and would not be built here, once per dataset, at all. `BidsContext::new` used to reach
+    /// for exactly that (a `find_dir` on the file's subject whose result was then dropped);
+    /// that dead lookup is gone, and this is the stub it was groping toward.
     pub fn subject_context_value(&self) -> Value {
         serde_json::json!({
             "sessions": {
