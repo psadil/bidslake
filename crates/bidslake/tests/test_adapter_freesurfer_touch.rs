@@ -60,11 +60,10 @@ fn touch_stamps_are_ignored(#[case] path: &str, #[case] suffix: Option<&str>) {
 fn the_stats_files_they_shadowed_still_read() {
     // The other half: ignoring `touch/` must not cost the real stats files, which are what
     // fill `freesurfer_aseg`/`_aparc`/`_measures`.
+    // The `segstats` route is pinned in-crate by
+    // `bidslake::schema::ingestion::tests::stats_files_are_read_by_fs_stats`, over the same
+    // fragment and so past the same `touch/` rule.
     let ing = freesurfer();
-    assert_eq!(
-        classify(&ing, "/sub-01_ses-V1/stats/aseg.stats", Some("segstats")),
-        Some((Disposition::Read, Some("fs_stats".to_string())))
-    );
     assert_eq!(
         classify(
             &ing,

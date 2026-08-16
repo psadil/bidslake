@@ -215,6 +215,12 @@ mod tests {
     /// derived, so this is what makes a schema bump that changes it *visible* rather
     /// than silent — the same "derive in code, pin in test" shape as
     /// `tabular::tests::table_names_are_as_expected`.
+    ///
+    /// Two things the exact list decides. `physioevents` is the one suffix whose table is not
+    /// its own name — it comes from the `PhysioEventsColumns` rule rather than a hardcoded
+    /// mapping. And `optodes` is absent: it is selected by the same `channels` association as
+    /// `motion`, but has its own columns and a header, which is the condition that separates
+    /// them.
     #[test]
     fn the_derived_set_is_the_four_bids_recordings() {
         let r = recordings();
@@ -231,24 +237,6 @@ mod tests {
                 ("stim", "stim", ColumnNames::Sidecar),
             ]
         );
-    }
-
-    /// `physioevents` is the one suffix whose table is not its own name; it comes from
-    /// the `PhysioEventsColumns` rule, not from a hardcoded mapping.
-    #[test]
-    fn the_table_name_comes_from_the_column_rule_when_there_is_one() {
-        let r = recordings();
-        assert_eq!(r.get("physioevents").unwrap().table, "physio_events");
-        assert_eq!(r.get("stim").unwrap().table, "stim");
-    }
-
-    /// `optodes` is selected by the same `channels` association as `motion`, but has
-    /// its own columns and a header — the condition that separates them.
-    #[test]
-    fn a_channels_associated_table_with_its_own_columns_is_not_a_recording() {
-        let r = recordings();
-        assert!(!r.contains("optodes"), "optodes has its own column rule");
-        assert!(r.contains("motion"));
     }
 
     /// An overlay that declares columns for a recording changes where its rows land,

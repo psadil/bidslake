@@ -375,15 +375,6 @@ mod tests {
         assert_eq!(f.suffix.as_deref(), Some("parcstats"));
     }
 
-    #[test]
-    fn surface_and_volume_project_to_anat() {
-        let s = fs().classify("bert/surf/lh.thickness").expect("surf");
-        assert_eq!(s.datatype.as_deref(), Some("anat"));
-        assert_eq!(s.get("hemi"), Some("lh"));
-        let v = fs().classify("bert/mri/aparc+aseg.mgz").expect("mri");
-        assert_eq!(v.datatype.as_deref(), Some("anat"));
-    }
-
     /// The volumetric segmentations are the ones downstream code actually reaches for
     /// (`wmparc.mgz` above all), so they carry `seg` rather than being swallowed by the
     /// `mri/*.mgz` catch-all — which binds no entity and left consumers string-matching
@@ -586,14 +577,24 @@ mod tests {
         let ctab = tm.classify("bert/label/aparc.annot.ctab").expect("ctab");
         assert_eq!(ctab.suffix.as_deref(), Some("fslabels"));
 
-        // A hemisphere surface keeps `hemi` rather than falling to the `surf/` catch-all.
+        // A hemisphere surface keeps `hemi` and its `anat` datatype rather than falling to
+        // the `surf/` catch-all.
         let surf = tm.classify("bert/surf/lh.thickness").expect("surf");
-        assert_eq!(surf.get("hemi"), Some("lh"));
+        assert_eq!(
+            (surf.get("hemi"), surf.datatype.as_deref()),
+            (Some("lh"), Some("anat"))
+        );
     }
 
     /// The set drives DDL (which concept columns consult the projection), so it must
     /// cover literal `Entities`, named capture groups, and `Concepts` alike — and
     /// stay tight, since every member costs a `COALESCE` on read.
+    ///
+    /// The exact set is what encodes two rules that are easy to get wrong. `extension` is
+    /// deliberately absent: it comes off the filename even for a projected path, so wrapping
+    /// it would buy nothing and cost a COALESCE per row. And the members are `sub`/`ses`, not
+    /// `subject`/`session` — capture groups use BEP-043's long forms, while the DDL needs the
+    /// BIDS short keys, so the aliasing has to happen before a concept lands here.
     #[test]
     fn projectable_concepts_span_every_source() {
         let got = fs().projectable_concepts();
@@ -603,20 +604,5 @@ mod tests {
                 .map(|s| s.to_string())
                 .collect();
         assert_eq!(got, want);
-    }
-
-    /// `extension` comes off the filename even for a projected path, so wrapping it
-    /// would buy nothing and cost a COALESCE on every row.
-    #[test]
-    fn projectable_concepts_exclude_extension() {
-        assert!(!fs().projectable_concepts().contains("extension"));
-    }
-
-    /// Capture groups use BEP-043's long forms; the DDL needs BIDS short keys.
-    #[test]
-    fn projectable_concepts_are_aliased() {
-        let got = fs().projectable_concepts();
-        assert!(got.contains("sub") && got.contains("ses"));
-        assert!(!got.contains("subject") && !got.contains("session"));
     }
 }

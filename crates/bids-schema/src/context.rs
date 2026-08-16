@@ -238,27 +238,12 @@ mod tests {
         );
     }
 
-    /// What the index answers for a path, against the real schema. Stated as expected values
-    /// rather than differentially against a second implementation — there is only one now.
-    #[rstest]
-    #[case("/sub-01/anat/sub-01_T1w.nii.gz", Some("anat"))]
-    #[case("/sub-01/ses-1/eeg/sub-01_ses-1_task-x_eeg.vhdr", Some("eeg"))]
-    #[case(
-        "/derivatives/fmriprep/sub-01/anat/sub-01_desc-preproc_T1w.nii.gz",
-        Some("anat")
-    )]
-    // Position is the whole rule: a datatype directory at the root counts...
-    #[case::root_level_datatype("/anat/loose.nii.gz", Some("anat"))]
-    // ...and a datatype that is not the *immediate* parent does not.
-    #[case::not_immediate_parent("/sub-01/anat/extra/nested.nii.gz", None)]
-    #[case::subject_dir("/sub-01/sub-01_scans.tsv", None)]
-    #[case::dataset_root("/dataset_description.json", None)]
-    #[case::no_parent("/README", None)]
-    fn the_index_resolves_datatype(#[case] path: &str, #[case] expected: Option<&str>) {
-        let index = SchemaIndex::new(&schema());
-
-        assert_eq!(index.datatype(path), expected, "datatype of {path}");
-    }
+    // `the_index_resolves_datatype` lived here, restating the eight corpus shapes that
+    // `bids_core::datatype::tests::parent_datatype_over_the_corpus_shapes` already covers —
+    // `SchemaIndex::datatype` is a one-line delegation to it. What is specific to this crate
+    // is that the *real* schema fills `SchemaIndex.datatypes`, and that is pinned by
+    // `datatypes::tests::the_schema_declares_the_expected_vocabulary` plus the end-to-end
+    // `selector_value_shape_is_pinned` below.
 
     #[rstest]
     #[case("anat", Some("mri"))]

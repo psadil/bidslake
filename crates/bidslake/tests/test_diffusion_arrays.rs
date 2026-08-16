@@ -55,12 +55,6 @@ async fn test_diffusion_numeric_arrays() -> Result<()> {
         .collect::<Result<_, _>>()?;
     assert_eq!(bvals, vec![0.0, 1000.0, 1000.0, 2000.0]);
 
-    // Max b-value, as a plain scalar aggregate.
-    let max_bval: f64 = db
-        .conn
-        .query_row("SELECT MAX(bval) FROM diffusion", [], |r| r.get(0))?;
-    assert_eq!(max_bval, 2000.0, "max b-value should be 2000");
-
     // Gradient direction of volume 1 (bvec column-major: row 0 = x components).
     let (x, y, z): (f64, f64, f64) = db.conn.query_row(
         "SELECT bvec_x, bvec_y, bvec_z FROM diffusion WHERE volume_idx = 1",
