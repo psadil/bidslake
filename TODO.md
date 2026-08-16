@@ -110,6 +110,19 @@ accessors; and the opt-in `python -m bidslake.stubgen`. Remaining follow-ups:
 - [ ] **Consider filtering `bidslake_*` meta tables** from the generated `COLUMNS`/`C` typed surface
   (they are internal provenance tables; `bidslake_meta`/`bidslake_schema` currently appear there).
 
+- [x] **Overlay array merging was order-dependent, against docs/adr/0001 §2.** Fixed by
+  `overlay::merge_all`, which applies the overlays as a *set*: it orders them by their
+  serialized content before folding, so the result is a function of which overlays were named
+  rather than of the order they were named in. `Schema::load_full` now calls it.
+
+  Recording the fix that was considered and rejected, because it is the obvious one: sorting
+  each array's *appended tail* also produces a deterministic result, and is wrong. An
+  overlay's own array order is intent — `rules.entities` is the BIDS entity ordering, so an
+  overlay declaring `from`, `to`, `mode` means that sequence, and canonicalizing it to `from`,
+  `mode`, `to` would make `from-X_to-Y_mode-Z` fail entity-order validation. Only the order the
+  overlays are applied *in* is canonicalized. `one_overlays_own_array_order_is_preserved`
+  pins the half that rules the other fix out.
+
 ## Derivation layer
 
 - [ ] **A narrower later run silently strips concept columns off `all_files`.** The other edge

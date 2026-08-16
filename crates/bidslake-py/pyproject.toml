@@ -21,7 +21,7 @@ dependencies = [
 s3 = ["s3fs"]
 
 [dependency-groups]
-dev = ["pytest>=8", "ty", "ruff", "prek"]
+dev = ["pytest>=8", "hypothesis>=6.100", "ty", "ruff", "prek"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -782,7 +782,13 @@ fn func_length(args: &[Value]) -> Result<Value, String> {
     propagate_null!(args);
     match &args[0] {
         Value::Array(a) => Ok(serde_json::json!(a.len() as i64)),
-        Value::String(s) => Ok(serde_json::json!(s.len() as i64)),
+        // UTF-16 code units, not bytes. This module is the counterpart to the reference TS
+        // validator, whose `.length` is a UTF-16 count, and the schema pins `length` only for
+        // arrays and null — so `s.len()` was unconstrained upstream and wrong against the thing
+        // it mirrors. It also disagreed with this module's own `substr` and `[i]`, which index
+        // by `chars()`: the function that measured a string and the ones that cut it were in
+        // different units, and every case that would have shown it was ASCII.
+        Value::String(s) => Ok(serde_json::json!(s.encode_utf16().count() as i64)),
         Value::Object(m) => Ok(serde_json::json!(m.len() as i64)),
         _ => Ok(Value::Null),
     }
@@ -908,25 +914,43 @@ fn func_max(args: &[Value]) -> Result<Value, String> {
     aggregate_array(args, "max", f64::max)
 }
 
-/// `substr(string, start, end)` — substring by character indices.
+/// `substr(string, start, end)` — substring by character indices, both clamped to the string.
+///
+/// Clamping is not an invention: the schema's own `substr('string', 0, 20) == 'string'` requires
+/// an `end` past the last character to mean "the end". The same rule is applied to the other
+/// three ways an index can fall outside — a negative bound, and an `end` before `start` — for
+/// which the schema has no case and the spec no prose. Both used to reach `end_idx - start_idx`
+/// on `usize`, so `substr(s, 2, 1)` and any negative bound aborted the process in a debug build
+/// and returned a wrong string in a release one.
+///
+/// Clamping rather than `null` deliberately, and the reason is this module's own hazard: an
+/// `Err` or a `null` out of a selector is read as "this rule does not apply"
+/// ([`do_selectors_select`]), so answering an out-of-range span with `null` would silently
+/// switch off the rule that asked. An empty string is a value the selector can go on to test.
 fn func_substr(args: &[Value]) -> Result<Value, String> {
     require_args!(args, 3, "substr");
     propagate_null!(args);
-    match (&args[0], &args[1], &args[2]) {
-        (Value::String(s), Value::Number(start), Value::Number(end))
-            if start.is_i64() && end.is_i64() =>
-        {
-            let start_idx = start.as_i64().unwrap() as usize;
-            let end_idx = end.as_i64().unwrap() as usize;
-            let result: String = s
-                .chars()
-                .skip(start_idx)
-                .take(end_idx - start_idx)
-                .collect();
-            Ok(Value::String(result))
-        }
-        _ => Ok(Value::Null),
-    }
+    let (Value::String(s), Value::Number(start), Value::Number(end)) =
+        (&args[0], &args[1], &args[2])
+    else {
+        return Ok(Value::Null);
+    };
+    let (Some(start), Some(end)) = (start.as_i64(), end.as_i64()) else {
+        return Ok(Value::Null);
+    };
+
+    // Character indices, matching `resolve_index`; `len` is therefore a char count, not
+    // `s.len()`.
+    let len = s.chars().count() as i64;
+    let start = start.clamp(0, len) as usize;
+    let end = end.clamp(0, len) as usize;
+
+    Ok(Value::String(
+        s.chars()
+            .skip(start)
+            .take(end.saturating_sub(start))
+            .collect(),
+    ))
 }
 
 /// `sorted(array[, method])` — return a sorted copy.
@@ -1112,7 +1136,10 @@ fn func_exists(args: &[Value], ctx: &EvalContext) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::strategy;
+    use proptest::prelude::*;
     use rstest::rstest;
+    use serde_json::json;
 
     static NULL: Value = Value::Null;
 
@@ -1322,4 +1349,90 @@ mod tests {
     // in tests/expression_conformance.rs recurses the whole tree, and calls the crate's own
     // `evaluate` — so it parses the same expressions through the same parser, in the
     // backslash-doubled form production actually compiles, and then evaluates them too.
+
+    /// What an index outside the string means, which the schema does not say.
+    ///
+    /// `substr('string', 0, 20) == 'string'` is upstream, so clamping `end` past the last
+    /// character is settled. These are the three neighbouring shapes upstream has no case for,
+    /// and the property that found them cannot state the choice — it only says nothing panics.
+    /// Clamped to the string, no swap: `substring`'s argument-swap is the more surprising
+    /// invention, and `null` would silently disable the rule doing the asking.
+    #[rstest]
+    #[case::end_before_start("substr('string', 4, 1)", "")]
+    #[case::negative_start("substr('string', -2, 3)", "str")]
+    #[case::negative_end("substr('string', 1, -1)", "")]
+    #[case::both_past_the_end("substr('string', 20, 30)", "")]
+    fn an_out_of_range_substr_span_clamps_to_the_string(
+        #[case] expression: &str,
+        #[case] expected: &str,
+    ) {
+        let got = evaluate(expression, &ec(&Value::Null));
+
+        assert_eq!(got, Ok(Value::String(expected.to_string())));
+    }
+
+    proptest! {
+        // 64 rather than the default 256: every case allocates an oxc arena and parses, and
+        // this is a debug build. The generator reaches the arithmetic quickly enough that the
+        // extra cases buy little.
+        #![proptest_config(ProptestConfig { cases: 64, ..ProptestConfig::default() })]
+
+        /// `evaluate` is total: any selector source either evaluates or returns `Err`.
+        ///
+        /// Selectors are **user-authored** — they arrive on `--overlay`, `--adapter` and in a
+        /// dataset's own `.bidslake/ingestion.json` — so a panic here is reachable from input
+        /// bidslake does not control. `every_schema_expression_evaluates` covers the *bundled*
+        /// schema's 1043 selectors, which are by construction the ones already known to work.
+        ///
+        /// There is no `prop_assert!`: the law is the absence of a panic, and the failure mode
+        /// is the test aborting. That is a failure the test can have — it had it when this was
+        /// written, on `substr`'s `usize` subtraction — not a vacuous pass.
+        #[test]
+        fn evaluate_is_total_over_arbitrary_selector_source(
+            source in strategy::dsl_expression()
+        ) {
+            let ctx = json!({ "path": "/sub-01/anat/sub-01_T1w.nii.gz", "suffix": "T1w" });
+
+            let _ = evaluate(&source, &ec(&ctx));
+        }
+
+        /// `substr` is total for any index pair, including a backwards one.
+        ///
+        /// Targeted rather than left to the sweep above: reaching `substr` with two numeric
+        /// arguments through the general grammar takes on the order of 10^5 cases, so the sweep
+        /// is a net for shapes nobody predicted and this is the one for the arithmetic. `end <
+        /// start` is not exotic — it is what a selector computing its bounds produces the first
+        /// time the bounds cross.
+        #[test]
+        fn substr_is_total_over_any_index_pair(
+            s in "[a-z]{0,8}",
+            start in -4i64..8,
+            end in -4i64..8,
+        ) {
+            let ctx = json!({ "s": s });
+
+            let _ = evaluate(&format!("substr(s, {start}, {end})"), &ec(&ctx));
+        }
+
+        /// `length` counts a string the way the evaluator it mirrors does.
+        ///
+        /// The module documents itself as the Rust counterpart to the reference TS validator,
+        /// whose `.length` is UTF-16 code units. `func_length` returns `s.len()` — *bytes* —
+        /// which agrees only while the input stays ASCII, as every hand-written case was.
+        ///
+        /// This also makes `length` disagree with its own neighbours: `substr` and `[i]` index
+        /// by `chars()`, so on non-ASCII the function that measures a string and the functions
+        /// that cut it are using different units.
+        #[test]
+        fn length_counts_a_string_in_the_units_the_reference_validator_uses(
+            s in "[a-zé\u{4e2d}\u{1f600}]{0,10}"
+        ) {
+            let expected = s.encode_utf16().count() as i64;
+            let ctx = json!({ "s": s });
+
+            let measured = evaluate("length(s)", &ec(&ctx));
+
+            prop_assert_eq!(measured, Ok(Value::Number(expected.into())));
+        }
+    }
 }

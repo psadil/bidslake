@@ -15,6 +15,11 @@ pub mod layout;
 pub mod overlay;
 pub mod term_map;
 
+/// Proptest strategies for the JSON and selector source this crate handles, for use by this
+/// crate's own tests and by crates above it. Behind the `proptest` feature — see `Cargo.toml`.
+#[cfg(any(test, feature = "proptest"))]
+pub mod strategy;
+
 use serde_json::Value;
 
 /// The BIDS "pseudo-file" extensions (`objects.extensions` values ending in `/`, e.g. `.ds/`,

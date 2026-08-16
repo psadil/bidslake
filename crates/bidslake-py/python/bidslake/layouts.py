@@ -86,9 +86,10 @@ class LayoutAt:
     def path(self, role: str, **bindings: str) -> Path:
         """The absolute path for ``role`` under this root.
 
-        Raises rather than returning a guess: an unknown role is a typo, and an unbound
+        Raises rather than returning a guess: an unknown role is a typo, an unbound
         ``{placeholder}`` would otherwise render as a plausible path pointing at the
-        wrong file.
+        wrong file, and a binding carrying a path separator would render one that leaves
+        this root entirely.
 
         Keywords here are merged over whatever :meth:`Layout.under` bound, and win — so a
         run-wide value is stated once and a per-call one still overrides it.
@@ -101,13 +102,23 @@ class LayoutAt:
                 msg = f"unknown role {role!r}; this layout declares: {known}"
             else:
                 # Naming what *is* bound is what makes a mistyped binding visible. Without
-                # it, `under(root, trainng=…)` fails with "unbound placeholders" for a
-                # caller who is certain they bound it.
+                # it, `under(root, trainng=…)` fails for a caller who is certain they bound
+                # it.
+                #
+                # Both causes are named rather than guessed at. `render` returns None for an
+                # unbound placeholder *and* for bindings that would render a path leaving the
+                # root, and which one applies depends on the role's template — which is on
+                # the Rust side. Inferring it from the binding values gets it wrong in both
+                # directions: `training='..'` is perfectly safe in a mid-segment placeholder
+                # (it renders `fix4melview_.._thr20.txt`, one component), while `'x/../..'`
+                # is not.
                 have = ", ".join(f"{k}={v!r}" for k, v in sorted(merged.items())) or "nothing"
                 msg = (
-                    f"role {role!r} has unbound placeholders; bound here: {have}. "
-                    f"Pass them as keywords, e.g. path({role!r}, training='UKBiobank'), "
-                    f"or bind them once with layout.under(root, training='UKBiobank')"
+                    f"role {role!r} could not be rendered; bound here: {have}. Either a "
+                    f"{{placeholder}} is unbound — pass it as a keyword, e.g. "
+                    f"path({role!r}, training='UKBiobank'), or bind it once with "
+                    f"layout.under(root, training='UKBiobank') — or a binding would put the "
+                    f"path outside {self.root}, which is refused."
                 )
             raise KeyError(msg)
         return self.root / rel

@@ -283,6 +283,22 @@ fn resolve_uri(root_uri: &str, file_path: &str) -> String {
 
 /// Convert a Python scalar into a DuckDB bind value. `bool` is checked before
 /// `int` because Python `bool` is an `int` subclass.
+///
+/// The integer arms are widened in order, and the `u64` one is load-bearing: `file_id` is a
+/// `UBIGINT` derived from a SHA-256, so **half of every catalog's ids are above `i64::MAX`**.
+/// Without it those fell past `BigInt` into `Double`, where an `f64` has 53 bits of mantissa
+/// and does not reject what it cannot hold — it rounds. `WHERE file_id = ?` then matched a
+/// number no row had, and returned nothing.
+///
+/// This is the parameter half of a trip `bids::file_id` documents the result half of. That
+/// note explains why the key moved from `HUGEINT` to `UBIGINT` — `HUGEINT` "does not survive
+/// the trip to Python", arriving as `Decimal128(38, 0)` with 41% of the id space outside its
+/// own type. `i64` here was exactly as narrow for a `UBIGINT` as `Decimal128` was for a
+/// `HUGEINT`, in the other direction.
+///
+/// `i128`/`u128` follow so the ladder covers every DuckDB integer width; past that an `int`
+/// still reaches `f64`, which is the right answer for a Python value that is genuinely not an
+/// integer the engine can store, and the wrong one only for the range now claimed above.
 fn py_to_duck_value(ob: &Bound<'_, PyAny>) -> PyResult<DuckValue> {
     if ob.is_none() {
         return Ok(DuckValue::Null);
@@ -292,6 +308,15 @@ fn py_to_duck_value(ob: &Bound<'_, PyAny>) -> PyResult<DuckValue> {
     }
     if let Ok(i) = ob.extract::<i64>() {
         return Ok(DuckValue::BigInt(i));
+    }
+    if let Ok(u) = ob.extract::<u64>() {
+        return Ok(DuckValue::UBigInt(u));
+    }
+    if let Ok(i) = ob.extract::<i128>() {
+        return Ok(DuckValue::HugeInt(i));
+    }
+    if let Ok(u) = ob.extract::<u128>() {
+        return Ok(DuckValue::UHugeInt(u));
     }
     if let Ok(f) = ob.extract::<f64>() {
         return Ok(DuckValue::Double(f));

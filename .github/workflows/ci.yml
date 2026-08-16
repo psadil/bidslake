@@ -12,11 +12,18 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # A failing property shrinks until it cannot simplify further. `max_shrink_iters` already
+  # caps that at 4x the case count, but shrinking a case that itself runs the oxc parser is
+  # slow in a debug build — bound it by wall clock too, so a red CI reports its counterexample
+  # instead of hitting the job timeout with nothing to show.
+  PROPTEST_MAX_SHRINK_TIME: "60000"
 
 jobs:
   rust:
     name: rust (fmt · clippy · test)
     runs-on: ubuntu-latest
+    # Generated input makes a hang a real failure mode rather than a theoretical one.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
@@ -37,6 +44,8 @@ jobs:
   python:
     name: python (pytest · ty)
     runs-on: ubuntu-latest
+    # Generated input makes a hang a real failure mode rather than a theoretical one.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
@@ -50,7 +59,10 @@ jobs:
         run: uv venv --python 3.14
       - name: Install build + test tooling
         working-directory: crates/bidslake-py
-        run: uv pip install maturin pytest ty
+        # Installed by name rather than from `[dependency-groups] dev`, so this list and that
+        # one have to be kept in step; hypothesis is imported unconditionally by conftest.py,
+        # so omitting it here is a collection error, not a silent loss of the properties.
+        run: uv pip install maturin pytest hypothesis ty
       - name: Build the extension (editable)
         working-directory: crates/bidslake-py
         run: .venv/bin/maturin develop
@@ -66,6 +78,8 @@ jobs:
   codegen-drift:
     name: codegen drift (emit-types == committed)
     runs-on: ubuntu-latest
+    # No property tests here, but no job should be able to hang the queue either.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:

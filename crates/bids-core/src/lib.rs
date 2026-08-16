@@ -20,3 +20,9 @@ pub mod datatype;
 pub mod entities;
 pub mod filetree;
 pub mod inheritance;
+
+/// Proptest strategies for the filename shapes this crate parses, for use by this crate's own
+/// tests and by the tests of crates above it. Behind the `proptest` feature, which nothing but
+/// a `[dev-dependencies]` line ever turns on — see `Cargo.toml`.
+#[cfg(any(test, feature = "proptest"))]
+pub mod strategy;
