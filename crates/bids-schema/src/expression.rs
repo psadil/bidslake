@@ -1112,6 +1112,7 @@ fn func_exists(args: &[Value], ctx: &EvalContext) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     static NULL: Value = Value::Null;
 
@@ -1187,25 +1188,25 @@ mod tests {
     ///
     /// bids-specification's prose claims ordering behaves like `==` here. It does not; see
     /// bids-specification#2149.
-    #[test]
-    fn ordering_comparisons_coerce_null_to_zero() {
+    #[rstest]
+    #[case("null > 1", false)]
+    #[case("null >= -60", true)]
+    #[case("null < 1", true)]
+    #[case("null <= -60", false)]
+    // Absent Authors ⇒ TOO_FEW_AUTHORS fires.
+    #[case::absent_authors("length(json.Authors) > 1", false)]
+    // Absent onset column ⇒ no warning.
+    #[case::absent_onset_min("min(columns.onset) >= -60", true)]
+    #[case::absent_onset_max("max(columns.onset) < 2678400", true)]
+    // Non-numeric operands compare false, like NaN in JS.
+    #[case::non_numeric_gt("\"n/a\" > 1", false)]
+    #[case::non_numeric_le("\"n/a\" <= 1", false)]
+    fn ordering_comparisons_coerce_null_to_zero(#[case] expr: &str, #[case] want: bool) {
         let v = empty_ctx();
-        let ctx = ec(&v);
-        for (expr, want) in [
-            ("null > 1", false),
-            ("null >= -60", true),
-            ("null < 1", true),
-            ("null <= -60", false),
-            ("length(json.Authors) > 1", false), // absent Authors ⇒ TOO_FEW_AUTHORS fires
-            ("min(columns.onset) >= -60", true), // absent onset column ⇒ no warning
-            ("max(columns.onset) < 2678400", true),
-            // Non-numeric operands compare false, like NaN in JS.
-            ("\"n/a\" > 1", false),
-            ("\"n/a\" <= 1", false),
-        ] {
-            let got = evaluate(expr, &ctx).unwrap();
-            assert_eq!(got, Value::Bool(want), "`{expr}` should be {want}");
-        }
+
+        let got = evaluate(expr, &ec(&v)).unwrap();
+
+        assert_eq!(got, Value::Bool(want), "`{expr}` should be {want}");
     }
 
     #[test]

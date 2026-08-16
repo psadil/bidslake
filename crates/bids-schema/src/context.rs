@@ -172,6 +172,7 @@ impl FileContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use std::path::PathBuf;
 
     fn schema() -> Value {
@@ -237,54 +238,57 @@ mod tests {
         );
     }
 
-    /// What the index answers, against the real schema. Stated as expected values rather than
-    /// differentially against a second implementation — there is only one now.
-    #[test]
-    fn the_index_resolves_datatype_and_modality() {
+    /// What the index answers for a path, against the real schema. Stated as expected values
+    /// rather than differentially against a second implementation — there is only one now.
+    #[rstest]
+    #[case("/sub-01/anat/sub-01_T1w.nii.gz", Some("anat"))]
+    #[case("/sub-01/ses-1/eeg/sub-01_ses-1_task-x_eeg.vhdr", Some("eeg"))]
+    #[case(
+        "/derivatives/fmriprep/sub-01/anat/sub-01_desc-preproc_T1w.nii.gz",
+        Some("anat")
+    )]
+    // Position is the whole rule: a datatype directory at the root counts...
+    #[case::root_level_datatype("/anat/loose.nii.gz", Some("anat"))]
+    // ...and a datatype that is not the *immediate* parent does not.
+    #[case::not_immediate_parent("/sub-01/anat/extra/nested.nii.gz", None)]
+    #[case::subject_dir("/sub-01/sub-01_scans.tsv", None)]
+    #[case::dataset_root("/dataset_description.json", None)]
+    #[case::no_parent("/README", None)]
+    fn the_index_resolves_datatype(#[case] path: &str, #[case] expected: Option<&str>) {
         let index = SchemaIndex::new(&schema());
 
-        for (path, expected) in [
-            ("/sub-01/anat/sub-01_T1w.nii.gz", Some("anat")),
-            (
-                "/sub-01/ses-1/eeg/sub-01_ses-1_task-x_eeg.vhdr",
-                Some("eeg"),
-            ),
-            (
-                "/derivatives/fmriprep/sub-01/anat/sub-01_desc-preproc_T1w.nii.gz",
-                Some("anat"),
-            ),
-            // Position is the whole rule: a datatype directory at the root counts, and a
-            // datatype that is not the *immediate* parent does not.
-            ("/anat/loose.nii.gz", Some("anat")),
-            ("/sub-01/anat/extra/nested.nii.gz", None),
-            ("/sub-01/sub-01_scans.tsv", None),
-            ("/dataset_description.json", None),
-            ("/README", None),
-        ] {
-            assert_eq!(index.datatype(path), expected, "datatype of {path}");
-        }
+        assert_eq!(index.datatype(path), expected, "datatype of {path}");
+    }
 
-        for (datatype, expected) in [
-            ("anat", Some("mri")),
-            ("func", Some("mri")),
-            ("dwi", Some("mri")),
-            ("fmap", Some("mri")),
-            ("eeg", Some("eeg")),
-            ("meg", Some("meg")),
-            ("not-a-datatype", None),
-        ] {
-            assert_eq!(index.modality(datatype), expected, "modality of {datatype}");
-        }
+    #[rstest]
+    #[case("anat", Some("mri"))]
+    #[case("func", Some("mri"))]
+    #[case("dwi", Some("mri"))]
+    #[case("fmap", Some("mri"))]
+    #[case("eeg", Some("eeg"))]
+    #[case("meg", Some("meg"))]
+    #[case::not_a_datatype("not-a-datatype", None)]
+    fn the_index_resolves_modality(#[case] datatype: &str, #[case] expected: Option<&str>) {
+        let index = SchemaIndex::new(&schema());
 
-        // `objects.datatypes` and `rules.modalities` do not cover the same set: `phenotype` is
-        // a datatype that belongs to no modality, so `modality()` answers `None` for a file
-        // that has a perfectly good datatype. Pinned because it is easy to assume otherwise,
-        // and because a *second* uncovered datatype appearing should be a decision, not a
-        // silent `None` reaching `dataset.modalities` and the rules gated on it.
-        let uncovered: Vec<String> = crate::datatypes::datatypes(&schema())
+        assert_eq!(index.modality(datatype), expected, "modality of {datatype}");
+    }
+
+    /// `objects.datatypes` and `rules.modalities` do not cover the same set: `phenotype` is
+    /// a datatype that belongs to no modality, so `modality()` answers `None` for a file
+    /// that has a perfectly good datatype. Pinned because it is easy to assume otherwise,
+    /// and because a *second* uncovered datatype appearing should be a decision, not a
+    /// silent `None` reaching `dataset.modalities` and the rules gated on it.
+    #[test]
+    fn phenotype_is_the_only_datatype_with_no_modality() {
+        let schema = schema();
+        let index = SchemaIndex::new(&schema);
+
+        let uncovered: Vec<String> = crate::datatypes::datatypes(&schema)
             .into_iter()
             .filter(|dt| index.modality(dt).is_none())
             .collect();
+
         assert_eq!(uncovered, ["phenotype"]);
     }
 }

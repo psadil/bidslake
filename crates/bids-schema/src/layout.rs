@@ -335,6 +335,7 @@ pub fn load_layout(path: &Path) -> Result<Layout, LayoutError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     fn feat() -> Layout {
         bundled_layout("feat").expect("bundled")
@@ -432,18 +433,21 @@ mod tests {
         assert!(err.to_string().contains("does not recognize"), "{err}");
     }
 
-    #[test]
-    fn unsafe_templates_are_rejected() {
-        for template in ["/etc/passwd", "../escape.txt", ""] {
-            let raw = format!(
-                r#"{{"LayoutVersion":"0.1.0","TermMap":"feat",
-                    "Roles":{{"r":{{"Template":{}}}}},
-                    "Examples":[{{"Root":"x"}}]}}"#,
-                serde_json::to_string(template).unwrap()
-            );
-            let err = load_layout_str(&raw, "<test>");
-            assert!(err.is_err(), "should reject template {template:?}");
-        }
+    #[rstest]
+    #[case::absolute("/etc/passwd")]
+    #[case::parent_escape("../escape.txt")]
+    #[case::empty("")]
+    fn unsafe_templates_are_rejected(#[case] template: &str) {
+        let raw = format!(
+            r#"{{"LayoutVersion":"0.1.0","TermMap":"feat",
+                "Roles":{{"r":{{"Template":{}}}}},
+                "Examples":[{{"Root":"x"}}]}}"#,
+            serde_json::to_string(template).unwrap()
+        );
+
+        let err = load_layout_str(&raw, "<test>");
+
+        assert!(err.is_err(), "should reject template {template:?}");
     }
 
     #[test]
