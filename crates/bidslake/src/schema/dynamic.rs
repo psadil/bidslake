@@ -182,10 +182,19 @@ impl Schema {
             // Keep the pre-overlay schema to validate only what the overlays *add*
             // (the base schema itself has known, tolerated metaschema deviations).
             let base = schema.clone();
-            for overlay in overlays {
-                bids_schema::overlay::merge_into(&mut schema, &overlay.content)
-                    .with_context(|| format!("merging schema overlay {:?}", overlay.source))?;
-            }
+            // `merge_all`, not a fold of `merge_into`: applying the overlays as a *set* is what
+            // makes `--adapter fmriprep --adapter freesurfer` and the reverse produce the same
+            // schema. A fold appends array elements in the order the overlays arrive, so any
+            // two that extend one array — `rules.entities` above all, the BIDS entity ordering
+            // — would order it by argv. It also names the failing overlay itself, which is why
+            // the per-overlay context is gone from here.
+            bids_schema::overlay::merge_all(
+                &mut schema,
+                overlays
+                    .iter()
+                    .map(|overlay| (overlay.source.as_str(), &overlay.content)),
+            )
+            .context("merging schema overlays")?;
             bids_schema::overlay::validate_effective(&base, &schema)
                 .context("validating augmented schema against the BIDS metaschema")?;
         }

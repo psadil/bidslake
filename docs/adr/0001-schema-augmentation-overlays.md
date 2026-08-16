@@ -42,6 +42,21 @@ the base already defines; a conflicting scalar is an error naming the JSON point
 This makes merging order-independent and prevents a typo from shadowing BIDS
 semantics. See `overlay::merge_into`.
 
+*Amended (2026-08-16).* Additive-only gets order-independence for objects but not for
+arrays: merging appends the overlay's new elements after the base's, so folding two
+overlays that extend one array orders it by which was applied first. It went unnoticed
+because no bundled overlay extends a base array — every array they carry sits under a
+new rule id — so the fold was order-independent in practice while not being so in
+general. A set of overlays is now applied through `overlay::merge_all`, which orders
+them by serialized content before folding; the result depends on *which* overlays were
+named, not the order they were named in.
+
+Deliberately **not** fixed by canonicalizing each array's appended tail. An overlay's own
+array order is intent: `rules.entities` is the BIDS entity ordering, so an overlay
+declaring `from`, `to`, `mode` means that sequence, and reordering it to `from`, `mode`,
+`to` would make `from-X_to-Y_mode-Z` fail entity-order validation. Only the application
+order is canonical; each overlay's declarations are preserved as written.
+
 ### 3. Metaschema validation by *delta*
 
 Overlays are validated against the BIDS metaschema — but the vendored base schema

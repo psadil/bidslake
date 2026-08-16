@@ -50,6 +50,14 @@ pub enum OverlayError {
     },
     #[error("overlay makes the schema violate the BIDS metaschema:\n{}", .violations.join("\n"))]
     Invalid { violations: Vec<String> },
+    /// Which overlay of a set failed, so [`merge_all`] can name it without the caller
+    /// having to track the fold position itself.
+    #[error("merging overlay {name}")]
+    InOverlay {
+        name: String,
+        #[source]
+        source: Box<OverlayError>,
+    },
 }
 
 /// Read and parse an overlay file. Validates only that the top level is a JSON
@@ -114,6 +122,50 @@ pub fn bundled_overlay(name: &str) -> Option<Value> {
 pub fn merge_into(base: &mut Value, overlay: &Value) -> Result<(), OverlayError> {
     let mut candidate = base.clone();
     merge_at(&mut candidate, overlay, &mut Vec::new())?;
+    *base = candidate;
+    Ok(())
+}
+
+/// Apply a whole *set* of overlays, in an order that does not depend on the order the caller
+/// named them.
+///
+/// This is the entry point callers with more than one overlay should use, and the reason it
+/// exists is [`merge_into`]'s array branch. Merging appends the overlay's new elements after
+/// the base's, so folding `merge_into` over `[a, b]` and over `[b, a]` gives arrays that differ
+/// in element *order*. Objects do not have this problem — a key lands in the same place either
+/// way — which is why the fold looked order-independent for as long as no two overlays extended
+/// one array. ADR 0001 §2 states that additive-only merging "makes merging order-independent";
+/// this is what makes that true rather than nearly true.
+///
+/// **The fix is the application order, not the array order.** Sorting each array's appended
+/// tail would also produce a deterministic result, and would be wrong: `rules.entities` is the
+/// BIDS entity *ordering*, so an overlay that declares `from`, `to`, `mode` means that
+/// sequence, and canonicalizing it to `from`, `mode`, `to` would make `from-X_to-Y_mode-Z`
+/// fail entity-order validation. Each overlay's own declaration order is intent and is
+/// preserved; only the order the overlays are applied *in* is canonicalized.
+///
+/// The key is the overlay's serialized content rather than its name, so the order is a
+/// function of what is being merged and nothing else — two callers naming the same set
+/// differently still get the same schema. `serde_json::Map` is a `BTreeMap` here
+/// (`preserve_order` is off), so that serialization is itself stable.
+///
+/// Atomic on failure, like [`merge_into`]: on `Err`, `base` is untouched.
+pub fn merge_all<'a>(
+    base: &mut Value,
+    overlays: impl IntoIterator<Item = (&'a str, &'a Value)>,
+) -> Result<(), OverlayError> {
+    let mut ordered: Vec<(&str, &Value)> = overlays.into_iter().collect();
+    ordered.sort_by_cached_key(|(_, content)| content.to_string());
+
+    let mut candidate = base.clone();
+    for (name, content) in ordered {
+        merge_at(&mut candidate, content, &mut Vec::new()).map_err(|source| {
+            OverlayError::InOverlay {
+                name: name.to_string(),
+                source: Box::new(source),
+            }
+        })?;
+    }
     *base = candidate;
     Ok(())
 }
@@ -400,52 +452,63 @@ mod tests {
             prop_assert_eq!(outcome, Ok(value));
         }
 
-        /// Two overlays extending one array contribute the same *elements* in either order.
+        /// A set of overlays merges to the same schema whatever order it is given in.
         ///
-        /// Acts four times on purpose: the behaviour *is* the relationship between the two
-        /// orders, which is why `multiple_overlays_are_order_independent` exists. That test
-        /// uses two disjoint *objects* and no array at all, so it cannot fail on the case its
-        /// name claims — this is that case.
+        /// Acts twice on purpose: the behaviour *is* the relationship between the two orders,
+        /// which is why `multiple_overlays_are_order_independent` exists. That test uses two
+        /// disjoint *objects* and no array at all, so it cannot fail on the case its name
+        /// claims — this is that case, and it is an exact equality rather than a comparison of
+        /// element sets.
         ///
-        /// **Element sets, not element order, and that is a known gap.** ADR 0001 §2 states
-        /// that additive-only merging "makes merging order-independent", and for arrays it does
-        /// not: `merge_at` appends in overlay order, so base `[]` extended by `[1]` then `[0]`
-        /// gives `[1, 0]` and the reverse gives `[0, 1]`. That matters because the module doc
-        /// names `rules.entities` — the BIDS entity ordering — as the array overlays extend, so
-        /// element order is what filenames validate against. Sorting the appended tail does not
-        /// fix it, because after the first merge nothing distinguishes base elements from
-        /// appended ones; the fix is to apply overlays as a *set*. Recorded in `TODO.md`.
+        /// The array is `rules.entities` because the module doc names it: the BIDS entity
+        /// ordering, so a difference in element order is a difference in what filenames
+        /// validate against. Folding `merge_into` here gives `[1, 0]` one way and `[0, 1]` the
+        /// other; [`merge_all`] canonicalizes the application order instead.
         ///
         /// Values are drawn from a small range so the generator produces overlapping and
         /// disjoint extensions in the same run — dedup is half the rule being tested.
         #[test]
-        fn two_overlays_extending_one_array_contribute_the_same_elements_in_either_order(
+        fn a_set_of_overlays_merges_the_same_whatever_order_it_is_given_in(
             base_items in prop::collection::vec(0i64..5, 0..3),
             first in prop::collection::vec(0i64..5, 0..3),
             second in prop::collection::vec(0i64..5, 0..3),
         ) {
             let doc = |items: &[i64]| json!({ "rules": { "entities": items } });
-            let elements = |v: &Value| {
-                let mut xs: Vec<i64> = v["rules"]["entities"]
-                    .as_array()
-                    .expect("the document is built with an array here")
-                    .iter()
-                    .map(|x| x.as_i64().expect("built from i64s"))
-                    .collect();
-                xs.sort_unstable();
-                xs
-            };
+            let (a, b) = (doc(&first), doc(&second));
 
-            // Array merge has no conflict branch, so neither order can error.
             let mut forward = doc(&base_items);
-            merge_into(&mut forward, &doc(&first)).unwrap();
-            merge_into(&mut forward, &doc(&second)).unwrap();
+            merge_all(&mut forward, [("a", &a), ("b", &b)]).unwrap();
 
             let mut backward = doc(&base_items);
-            merge_into(&mut backward, &doc(&second)).unwrap();
-            merge_into(&mut backward, &doc(&first)).unwrap();
+            merge_all(&mut backward, [("b", &b), ("a", &a)]).unwrap();
 
-            prop_assert_eq!(elements(&forward), elements(&backward));
+            prop_assert_eq!(forward, backward);
+        }
+
+        /// Order-independence does not come at the cost of an overlay's own declared order.
+        ///
+        /// The distinction that rules out the other candidate fix. Canonicalizing each array's
+        /// appended tail would also make the result deterministic, and would reorder what a
+        /// single overlay declared — for `rules.entities` that is the entity ordering, so
+        /// `from`, `to`, `mode` becoming `from`, `mode`, `to` would make `from-X_to-Y_mode-Z`
+        /// fail entity-order validation. One overlay onto an empty base must come back exactly
+        /// as written.
+        #[test]
+        fn one_overlays_own_array_order_is_preserved(
+            items in prop::collection::vec("[a-z]{1,4}", 1..6),
+        ) {
+            let mut deduped: Vec<String> = Vec::new();
+            for item in &items {
+                if !deduped.contains(item) {
+                    deduped.push(item.clone());
+                }
+            }
+            let overlay = json!({ "rules": { "entities": deduped } });
+            let mut merged = json!({ "rules": { "entities": [] } });
+
+            merge_all(&mut merged, [("only", &overlay)]).unwrap();
+
+            prop_assert_eq!(merged, overlay);
         }
 
         /// A merge that conflicts leaves the base as it found it.
@@ -472,6 +535,36 @@ mod tests {
 
             prop_assert!(outcome.is_err() && base == before, "base is {base}");
         }
+    }
+
+    /// The real instance of the law above: `--adapter fmriprep --adapter freesurfer` and the
+    /// reverse produce the same schema, byte for byte.
+    ///
+    /// `bundled_overlays_are_co_applicable` proves the set does not conflict, in one fixed
+    /// order. This proves the order does not matter, on the actual documents — the property
+    /// states the rule on generated ones, and neither substitutes for the other: today every
+    /// array a bundled overlay carries sits under a *new* rule id, so none of them merges with
+    /// a base array, and this test would pass even with `merge_all` reduced to a fold. It is
+    /// here to fail the day a bundled overlay first extends `rules.entities`.
+    #[test]
+    fn the_bundled_overlays_merge_the_same_in_either_direction() {
+        let loaded: Vec<Value> = BUNDLED_OVERLAY_NAMES
+            .iter()
+            .map(|name| bundled_overlay(name).expect("bundled overlay should resolve"))
+            .collect();
+        let forward: Vec<(&str, &Value)> = BUNDLED_OVERLAY_NAMES
+            .iter()
+            .copied()
+            .zip(loaded.iter())
+            .collect();
+        let reversed: Vec<(&str, &Value)> = forward.iter().rev().copied().collect();
+
+        let mut a = base_schema();
+        merge_all(&mut a, forward).expect("bundled overlays are co-applicable");
+        let mut b = base_schema();
+        merge_all(&mut b, reversed).expect("bundled overlays are co-applicable");
+
+        assert_eq!(a, b);
     }
 
     #[test]
