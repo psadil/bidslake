@@ -178,9 +178,18 @@ impl Layout {
     /// `None` if the role is unknown or a placeholder is unbound — an unbound placeholder
     /// must not silently render as empty, since that produces a plausible-looking path
     /// pointing at the wrong file.
+    /// `None` also when the bindings would render a path that leaves the root — see
+    /// [`check_template`], which runs here against the interpolated result as well as at load
+    /// time against the template.
     pub fn render(&self, role: &str, bindings: &BTreeMap<String, String>) -> Option<String> {
         let spec = self.file.roles.get(role)?;
-        interpolate(&spec.template, bindings)
+        let rendered = interpolate(&spec.template, bindings)?;
+        // `check_template` ran at load time against the *template*, which is the half of the
+        // guarantee the document controls. Binding values are substituted verbatim, so a
+        // caller's `training = "../.."` reconstitutes exactly what the template was checked
+        // for. Re-checking the rendered path is what makes the guarantee whole.
+        check_template(role, &rendered).ok()?;
+        Some(rendered)
     }
 
     /// Render every role under every example and check the named term map reads each back
@@ -245,8 +254,19 @@ fn interpolate(template: &str, bindings: &BTreeMap<String, String>) -> Option<St
     Some(out)
 }
 
-/// A template must stay inside the unit's output root: it is joined to a caller-supplied
-/// directory, so an absolute path or a `..` would silently write outside the tree.
+/// A path must stay findable from the root it is joined to: it is appended to a
+/// caller-supplied directory, so an absolute path or a `..` would silently address something
+/// outside the tree.
+///
+/// "Findable from the root" rather than "textually inside it", because the two come apart. A
+/// rendered `sub-01.feat/x_../../../etc/cron.d/y` still *starts with* the root and normalizes
+/// outside it, so a `starts_with` check reports a safety that is not there. And the root may be
+/// an `s3://` URI, where joining is pure concatenation and `..` is a literal key component — so
+/// a traversal segment does not escape, it addresses a different object that will never be
+/// found again. One rule avoids both: no traversal segment at all.
+///
+/// Applied at load time to the template, which is the half the document controls, and again in
+/// [`Layout::render`] to the interpolated result, which is the half the caller controls.
 fn check_template(role: &str, template: &str) -> Result<(), LayoutError> {
     let bad = |reason| LayoutError::UnsafeTemplate {
         role: role.to_string(),
@@ -335,6 +355,7 @@ pub fn load_layout(path: &Path) -> Result<Layout, LayoutError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use rstest::rstest;
 
     fn feat() -> Layout {
@@ -456,6 +477,46 @@ mod tests {
                      if t == template && *r == reason),
             "expected UnsafeTemplate({reason:?}) for {template:?}, got {err:?}"
         );
+    }
+
+    proptest! {
+        /// A rendered path never carries a traversal segment, whatever the bindings say.
+        ///
+        /// `unsafe_templates_are_rejected` above covers the half of this the *document*
+        /// controls. This is the half the *caller* controls, and it was open: `interpolate`
+        /// substitutes binding values verbatim, so `training = "../.."` rebuilds exactly the
+        /// shape `check_template` exists to refuse. On the bundled `feat` layout that rendered
+        /// `<root>/fix4melview_../../../../../etc/cron.d/x_thr20.txt`, which normalizes to
+        /// `/etc/cron.d/x_thr20.txt` — and `LayoutAt.mkdir` calls `mkdir(parents=True)` on
+        /// whatever comes back.
+        ///
+        /// A `starts_with(root)` check does not catch it: that string *does* start with the
+        /// root. Asserting on the segments is also what makes this true for an `s3://` root,
+        /// where `..` is a literal key component rather than a parent.
+        #[test]
+        fn a_rendered_path_never_carries_a_traversal_segment(
+            training in prop_oneof![
+                "[0-9A-Za-z]{1,6}",
+                Just("..".to_string()),
+                Just("/etc/passwd".to_string()),
+                "[0-9A-Za-z]{0,3}(/\\.\\.){1,3}/[0-9A-Za-z]{0,3}",
+            ],
+            threshold in "[0-9]{1,3}",
+        ) {
+            let bindings = BTreeMap::from([
+                ("training".to_string(), training),
+                ("threshold".to_string(), threshold),
+            ]);
+
+            let rendered = feat().render("classification", &bindings);
+
+            prop_assert!(
+                rendered.as_deref().is_none_or(|p| {
+                    !p.starts_with('/') && !p.split('/').any(|segment| segment == "..")
+                }),
+                "rendered {rendered:?}"
+            );
+        }
     }
 
     #[test]

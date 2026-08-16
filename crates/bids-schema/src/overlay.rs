@@ -103,8 +103,19 @@ pub fn bundled_overlay(name: &str) -> Option<Value> {
 /// - **anything else**: equal values are a no-op (so re-applying an overlay is
 ///   idempotent); a differing value — including an object-vs-scalar kind mismatch —
 ///   is an [`OverlayError::Conflict`] naming the RFC 6901 JSON pointer.
+///
+/// On [`OverlayError::Conflict`], `base` is left exactly as it was found.
+///
+/// `merge_at` walks and mutates in one pass, so a conflict discovered part-way used to leave
+/// every earlier key already written — a caller told the merge failed, holding a schema with
+/// half an overlay applied to it. Merging into a copy and committing only on success is the
+/// whole fix; the clone costs one deep copy of the schema per overlay, paid at startup where a
+/// handful of overlays are resolved, not per file.
 pub fn merge_into(base: &mut Value, overlay: &Value) -> Result<(), OverlayError> {
-    merge_at(base, overlay, &mut Vec::new())
+    let mut candidate = base.clone();
+    merge_at(&mut candidate, overlay, &mut Vec::new())?;
+    *base = candidate;
+    Ok(())
 }
 
 fn merge_at(base: &mut Value, overlay: &Value, path: &mut Vec<String>) -> Result<(), OverlayError> {
@@ -208,6 +219,8 @@ fn truncate(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::strategy;
+    use proptest::prelude::*;
     use serde_json::json;
 
     #[test]
@@ -359,6 +372,106 @@ mod tests {
             });
         }
         validate_effective(&base_schema(), &effective).unwrap();
+    }
+
+    proptest! {
+        // 128 rather than 256: generating a recursive `Value` dominates the cost here, not the
+        // merge.
+        #![proptest_config(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
+
+        /// Merging a document into itself changes nothing and cannot conflict.
+        ///
+        /// The law the additive-only rule rests on, and the one `equal_scalar_is_idempotent`
+        /// above states for a single flat shape: every branch of `merge_at` has to read "the
+        /// overlay restates what the base says" as a no-op — equal scalars, array elements
+        /// already present, keys already there — at every depth, not just the top.
+        ///
+        /// Asserted over the `Result` rather than through an `unwrap()`: a merge that started
+        /// erroring shows its message instead of panicking somewhere that says nothing about
+        /// which branch went wrong.
+        #[test]
+        fn merging_a_document_into_itself_leaves_it_unchanged(value in strategy::json_object()) {
+            let mut merged = value.clone();
+
+            let outcome = merge_into(&mut merged, &value)
+                .map(|()| merged)
+                .map_err(|e| e.to_string());
+
+            prop_assert_eq!(outcome, Ok(value));
+        }
+
+        /// Two overlays extending one array contribute the same *elements* in either order.
+        ///
+        /// Acts four times on purpose: the behaviour *is* the relationship between the two
+        /// orders, which is why `multiple_overlays_are_order_independent` exists. That test
+        /// uses two disjoint *objects* and no array at all, so it cannot fail on the case its
+        /// name claims — this is that case.
+        ///
+        /// **Element sets, not element order, and that is a known gap.** ADR 0001 §2 states
+        /// that additive-only merging "makes merging order-independent", and for arrays it does
+        /// not: `merge_at` appends in overlay order, so base `[]` extended by `[1]` then `[0]`
+        /// gives `[1, 0]` and the reverse gives `[0, 1]`. That matters because the module doc
+        /// names `rules.entities` — the BIDS entity ordering — as the array overlays extend, so
+        /// element order is what filenames validate against. Sorting the appended tail does not
+        /// fix it, because after the first merge nothing distinguishes base elements from
+        /// appended ones; the fix is to apply overlays as a *set*. Recorded in `TODO.md`.
+        ///
+        /// Values are drawn from a small range so the generator produces overlapping and
+        /// disjoint extensions in the same run — dedup is half the rule being tested.
+        #[test]
+        fn two_overlays_extending_one_array_contribute_the_same_elements_in_either_order(
+            base_items in prop::collection::vec(0i64..5, 0..3),
+            first in prop::collection::vec(0i64..5, 0..3),
+            second in prop::collection::vec(0i64..5, 0..3),
+        ) {
+            let doc = |items: &[i64]| json!({ "rules": { "entities": items } });
+            let elements = |v: &Value| {
+                let mut xs: Vec<i64> = v["rules"]["entities"]
+                    .as_array()
+                    .expect("the document is built with an array here")
+                    .iter()
+                    .map(|x| x.as_i64().expect("built from i64s"))
+                    .collect();
+                xs.sort_unstable();
+                xs
+            };
+
+            // Array merge has no conflict branch, so neither order can error.
+            let mut forward = doc(&base_items);
+            merge_into(&mut forward, &doc(&first)).unwrap();
+            merge_into(&mut forward, &doc(&second)).unwrap();
+
+            let mut backward = doc(&base_items);
+            merge_into(&mut backward, &doc(&second)).unwrap();
+            merge_into(&mut backward, &doc(&first)).unwrap();
+
+            prop_assert_eq!(elements(&forward), elements(&backward));
+        }
+
+        /// A merge that conflicts leaves the base as it found it.
+        ///
+        /// `merge_at` walks and mutates in one pass, so a conflict found late used to leave
+        /// every earlier key already written — a half-applied overlay in a `Schema` whose
+        /// caller was told the merge failed. The keys are ordered so the mergeable one is
+        /// visited first (`serde_json::Map` is a `BTreeMap` here, `preserve_order` being off),
+        /// which is what makes a partial write observable.
+        ///
+        /// The two leaves differ by construction rather than through a `prop_assume!`: a
+        /// filter that drops a fifth of its cases is a fifth of the budget spent proving
+        /// nothing, and the strategy can simply not generate them.
+        #[test]
+        fn a_conflicting_merge_leaves_the_base_untouched(
+            addition in strategy::json_value(),
+            (base_leaf, overlay_leaf) in (0i64..5, 1i64..5)
+                .prop_map(|(base, delta)| (base, (base + delta) % 5)),
+        ) {
+            let mut base = json!({ "a": {}, "z": base_leaf });
+            let before = base.clone();
+
+            let outcome = merge_into(&mut base, &json!({ "a": addition, "z": overlay_leaf }));
+
+            prop_assert!(outcome.is_err() && base == before, "base is {base}");
+        }
     }
 
     #[test]

@@ -215,9 +215,15 @@ impl TermMap {
                 entities.insert(alias_entity(name).to_string(), m.as_str().to_string());
             }
         }
-        // Literal Entities override/augment.
+        // Literal Entities override/augment — aliased on the same terms as the capture groups
+        // above. BEP-043 spells these long (`subject`, `session`) while BIDS keys are short, so
+        // an unaliased literal produced a fact keyed `subject` while `projectable_concepts`
+        // advertised `sub`. `bidslake::schema::dynamic` reads that set to decide which
+        // generated columns consult the stored projection, so the column never looked and the
+        // value read NULL. Both bundled maps happen to use short keys, which is why no test
+        // over them could see it.
         for (k, v) in &mapping.spec.entities {
-            entities.insert(k.clone(), v.clone());
+            entities.insert(alias_entity(k).to_string(), v.clone());
         }
 
         Some(FileFacts {
@@ -301,10 +307,55 @@ pub fn load_term_map(path: &Path) -> Result<TermMap, TermMapError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use rstest::rstest;
 
     fn fs() -> TermMap {
         bundled_term_map("freesurfer").expect("bundled")
+    }
+
+    proptest! {
+        /// Every concept a path actually projects is one the map said it could project.
+        ///
+        /// `projectable_concepts` is the *static* upper bound `bidslake::schema::dynamic` uses
+        /// to decide which generated columns consult the stored projection. If `classify`
+        /// produces a key outside it, the column that key belongs to is never told to look, and
+        /// the value reads NULL — a wrong answer with nothing logged.
+        ///
+        /// The entity key is generated across both spellings BEP-043 allows. Both bundled maps
+        /// happen to use the short forms, so no test over them can reach this: the long forms
+        /// are exactly what a BEP-043 author writes, which is why `alias_entity` exists.
+        #[test]
+        fn every_concept_a_path_projects_was_declared_projectable(
+            declared in prop::sample::select(&["subject", "session", "sub", "ses", "desc"][..]),
+            captured in prop::sample::select(&["subject", "session", "desc"][..]),
+            label in "[0-9A-Za-z]{1,6}",
+        ) {
+            let doc = serde_json::json!({
+                "BIDSVersion": "1.11.1",
+                "BIDSMapVersion": "0.1.0",
+                "Mappings": [{
+                    "Template": format!("(?P<{captured}>[0-9A-Za-z]+)/stats/aseg.stats"),
+                    "Entities": { declared: "fixed" },
+                    "Concepts": { "datatype": "anat", "suffix": "segstats" }
+                }]
+            });
+            let file: TermMapFile = serde_json::from_value(doc).expect("built well-formed");
+            let map = TermMap::from_file(file).expect("template is a valid regex");
+            let declarable = map.projectable_concepts();
+
+            let facts = map.classify(&format!("{label}/stats/aseg.stats"));
+
+            let projected: std::collections::BTreeSet<String> = facts
+                .expect("the template matches this path by construction")
+                .entities
+                .into_keys()
+                .collect();
+            prop_assert!(
+                projected.is_subset(&declarable),
+                "projected {projected:?} but declared {declarable:?}"
+            );
+        }
     }
 
     /// Every bundled term map, not just one — a new map that violates the metaschema or

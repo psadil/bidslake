@@ -23,6 +23,25 @@ An assertion also has to be able to fail: no bare `is_err()` where several thing
 at once, no `all()` over a possibly-empty sequence, no `if df.is_empty(): continue`, no skip
 guard that turns a missing fixture into a pass.
 
+## Properties
+
+Rules that hold over a whole input space — a parser and its printer agree, a merge is
+order-independent, a function never panics — are written as property tests: `proptest` in Rust
+(inline in `#[cfg(test)] mod tests`, never in `tests/`, where it cannot find its regression
+directory), `hypothesis` in Python. Generators live in each crate's `strategy` module.
+
+Three phases still. The generated input is Arrange, so it belongs in the strategy — and the
+strategy returns the expected value alongside the input, by *rendering* a structure it already
+holds. A strategy that leaves the body to work out what the answer should be has written the
+code under test a second time, and will agree with it when it is wrong.
+
+Prefer a total strategy to `prop_assume!`/`assume()`: a filter that rejects most of what it
+sees spends the budget proving nothing, which is the empty-`all()` problem again.
+
+A counterexample is pinned in source — a `#[case::…]` row or an `@example(...)` — not left in
+`proptest-regressions/` or `.hypothesis/`. Those are gitignored seed caches, and a seed stops
+reproducing the moment the strategy changes.
+
 ## Running them
 
 Rust — default members only; the `bidslake-py` crate builds under maturin, not cargo:
@@ -39,6 +58,16 @@ to the Rust extension:
 ```
 
 `-rs` lists skip reasons. The suite should report zero skips.
+
+Both generators are configured per test and can be turned up from the shell without editing
+anything — proptest reads its environment after applying a per-test `ProptestConfig`, so the
+variable wins:
+
+```bash
+PROPTEST_CASES=10000 cargo test
+PROPTEST_RNG_SEED=1234 cargo test
+.venv/bin/python -m pytest --hypothesis-profile=thorough
+```
 
 The session fixture ingests three `bids-examples` datasets, which dominates the runtime. To
 iterate against an already-built catalog:

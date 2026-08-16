@@ -110,6 +110,28 @@ accessors; and the opt-in `python -m bidslake.stubgen`. Remaining follow-ups:
 - [ ] **Consider filtering `bidslake_*` meta tables** from the generated `COLUMNS`/`C` typed surface
   (they are internal provenance tables; `bidslake_meta`/`bidslake_schema` currently appear there).
 
+- [ ] **Overlay array merging is order-dependent, against docs/adr/0001 §2.** That ADR states
+  additive-only merging "makes merging order-independent". For objects it does. For arrays it
+  does not: `merge_at` appends the overlay's new elements in overlay order, so a base `[]`
+  extended by `[1]` then `[0]` is `[1, 0]` while the reverse is `[0, 1]`. The array the module
+  doc names as the one overlays extend is `rules.entities` — the BIDS entity ordering — so the
+  difference is what filenames validate against, and `--adapter fmriprep --adapter freesurfer`
+  can disagree with the reverse. Latent today only because no two bundled overlays extend the
+  same array; `bundled_overlays_are_co_applicable` passes for that reason, not because the
+  property holds.
+
+  Sorting the appended tail does **not** fix it: after the first merge nothing distinguishes a
+  base element from an appended one, so the second merge cannot canonicalize what the first
+  produced. The fix is to apply overlays as a *set* rather than a fold — a `merge_all(base,
+  &[overlay])` that keeps the original base, applies each overlay, then canonicalizes each
+  array's suffix beyond the original length. That is a public API change plus its call sites
+  (`Schema::load_with_overlays`, the `--overlay`/`--adapter` resolution in `main.rs`), which is
+  why it was recorded rather than done alongside the property that found it.
+
+  `two_overlays_extending_one_array_contribute_the_same_elements_in_either_order`
+  (`overlay.rs`) pins the half that is true — the element *sets* agree — and its doc comment
+  states the gap, so the weaker property cannot be mistaken for the ADR's claim.
+
 ## Derivation layer
 
 - [ ] **A narrower later run silently strips concept columns off `all_files`.** The other edge

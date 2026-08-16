@@ -22,6 +22,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from hypothesis import settings
 
 DATASETS = ["ds210", "eyetracking_fmri", "ds001"]
 
@@ -108,3 +109,30 @@ def lake(lake_db: Path):
     import bidslake
 
     return bidslake.open(str(lake_db))
+
+
+# -- hypothesis ------------------------------------------------------------------------
+#
+# Imported unconditionally, so a missing hypothesis is a collection error rather than a
+# suite that quietly loses its property tests. A `try: import / except: skip` here would be
+# the skip guard CONTRIBUTING.md bans, one level up.
+
+#: ``deadline=None`` in every profile. Hypothesis defaults to 200 ms *per example*, and
+#: every property here goes through DuckDB — prepare, execute, Arrow IPC, Polars — which is
+#: over that on a cold cache and reliably over it on a loaded CI runner. A per-example wall
+#: clock is the wrong instrument for a suite that talks to a database; the job's
+#: ``timeout-minutes`` is the right one.
+settings.register_profile("dev", max_examples=50, deadline=None)
+
+#: ``print_blob=True`` so a CI failure carries the ``@reproduce_failure(...)`` line needed to
+#: replay it locally — the runner's ``.hypothesis/`` does not survive the job.
+settings.register_profile("ci", max_examples=200, deadline=None, print_blob=True)
+
+#: For a deliberate long run: ``pytest --hypothesis-profile=thorough``.
+settings.register_profile("thorough", max_examples=5000, deadline=None, print_blob=True)
+
+# Selected from the environment rather than from `addopts`, because `--hypothesis-profile`
+# is a plugin-registered flag: putting it in `addopts` would make the whole suite refuse to
+# start if hypothesis were ever absent. GitHub Actions sets CI=true. An explicit
+# `--hypothesis-profile` on the command line still wins over this.
+settings.load_profile("ci" if os.environ.get("CI") else "dev")
