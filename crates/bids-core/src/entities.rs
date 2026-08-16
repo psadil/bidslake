@@ -130,71 +130,53 @@ pub fn resolve_entities(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
-    #[test]
-    fn test_basic_filename() {
-        let parts = read_entities("sub-01_T1w.nii.gz");
-        assert_eq!(parts.suffix, "T1w");
-        assert_eq!(parts.extension, ".nii.gz");
-        assert_eq!(parts.entities.get("sub"), Some(&"01".to_string()));
-        assert_eq!(parts.entities.len(), 1);
-    }
+    /// Every filename shape the splitter has to get right, and the whole result each yields.
+    ///
+    /// One assertion over the full `(suffix, extension, entities)` triple rather than a
+    /// handful of `get()`s: the previous eight functions checked different subsets — some
+    /// pinned `entities.len()`, most did not — so a stray entity was only caught in the two
+    /// cases that happened to count.
+    #[rstest]
+    #[case::basic("sub-01_T1w.nii.gz", "T1w", ".nii.gz", &[("sub", "01")])]
+    #[case::multiple_entities(
+        "sub-01_ses-pre_task-rest_run-02_bold.nii.gz",
+        "bold",
+        ".nii.gz",
+        &[("run", "02"), ("ses", "pre"), ("sub", "01"), ("task", "rest")]
+    )]
+    #[case::json_sidecar("sub-01_T1w.json", "T1w", ".json", &[("sub", "01")])]
+    #[case::tabular(
+        "sub-01_ses-01_task-rest_events.tsv",
+        "events",
+        ".tsv",
+        &[("ses", "01"), ("sub", "01"), ("task", "rest")]
+    )]
+    // "dataset_description" has no `-` in either part, so the whole stem's last segment
+    // becomes the suffix and nothing is an entity.
+    #[case::no_entities("dataset_description.json", "description", ".json", &[])]
+    #[case::participants("participants.tsv", "participants", ".tsv", &[])]
+    #[case::entity_without_label("sub-_T1w.nii.gz", "T1w", ".nii.gz", &[("sub", "NOENTITY")])]
+    #[case::compressed("sub-01_physio.tsv.gz", "physio", ".tsv.gz", &[("sub", "01")])]
+    fn read_entities_splits_a_bids_filename(
+        #[case] name: &str,
+        #[case] suffix: &str,
+        #[case] extension: &str,
+        #[case] entities: &[(&str, &str)],
+    ) {
+        let parts = read_entities(name);
 
-    #[test]
-    fn test_multiple_entities() {
-        let parts = read_entities("sub-01_ses-pre_task-rest_run-02_bold.nii.gz");
-        assert_eq!(parts.suffix, "bold");
-        assert_eq!(parts.extension, ".nii.gz");
-        assert_eq!(parts.entities.get("sub"), Some(&"01".to_string()));
-        assert_eq!(parts.entities.get("ses"), Some(&"pre".to_string()));
-        assert_eq!(parts.entities.get("task"), Some(&"rest".to_string()));
-        assert_eq!(parts.entities.get("run"), Some(&"02".to_string()));
-        assert_eq!(parts.entities.len(), 4);
-    }
-
-    #[test]
-    fn test_json_sidecar() {
-        let parts = read_entities("sub-01_T1w.json");
-        assert_eq!(parts.suffix, "T1w");
-        assert_eq!(parts.extension, ".json");
-        assert_eq!(parts.entities.get("sub"), Some(&"01".to_string()));
-    }
-
-    #[test]
-    fn test_tsv_file() {
-        let parts = read_entities("sub-01_ses-01_task-rest_events.tsv");
-        assert_eq!(parts.suffix, "events");
-        assert_eq!(parts.extension, ".tsv");
-    }
-
-    #[test]
-    fn test_no_entities() {
-        let parts = read_entities("dataset_description.json");
-        // "dataset_description" has no `-`, so entire stem becomes suffix
-        assert_eq!(parts.suffix, "description");
-        assert_eq!(parts.extension, ".json");
-        // "dataset" part has no `-` either — it's not an entity
-    }
-
-    #[test]
-    fn test_participants_tsv() {
-        let parts = read_entities("participants.tsv");
-        assert_eq!(parts.suffix, "participants");
-        assert_eq!(parts.extension, ".tsv");
-        assert!(parts.entities.is_empty());
-    }
-
-    #[test]
-    fn test_entity_no_label() {
-        let parts = read_entities("sub-_T1w.nii.gz");
-        assert_eq!(parts.entities.get("sub"), Some(&"NOENTITY".to_string()));
-    }
-
-    #[test]
-    fn test_compressed_tsv() {
-        let parts = read_entities("sub-01_physio.tsv.gz");
-        assert_eq!(parts.suffix, "physio");
-        assert_eq!(parts.extension, ".tsv.gz");
+        let mut got: Vec<(&str, &str)> = parts
+            .entities
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        got.sort_unstable();
+        assert_eq!(
+            (parts.suffix.as_str(), parts.extension.as_str(), got),
+            (suffix, extension, entities.to_vec())
+        );
     }
 
     #[test]
