@@ -363,11 +363,15 @@ mod tests {
 
     #[test]
     fn rejects_non_object_overlay_from_disk() {
-        let dir = std::env::temp_dir();
-        let path = dir.join("bidslake_overlay_test_array.json");
+        // A `TempDir` rather than a fixed name under `std::env::temp_dir()`: the fixed path
+        // collided with any concurrent run of this test, and was only removed on the success
+        // path, so a failure leaked it and the next run read the previous one's file.
+        let dir = tempfile::tempdir().expect("temp dir should be creatable");
+        let path = dir.path().join("overlay_array.json");
         std::fs::write(&path, "[1, 2, 3]").unwrap();
+
         let err = load_overlay(&path).unwrap_err();
+
         assert!(matches!(err, OverlayError::NotObject { .. }));
-        let _ = std::fs::remove_file(&path);
     }
 }
