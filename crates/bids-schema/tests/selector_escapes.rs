@@ -72,29 +72,50 @@ fn no_bundled_selector_pre_doubles_a_backslash() {
     );
 }
 
-/// Each `match()` pattern compiles, and is not accidentally inert.
+/// Every `match()` pattern in a bundled selector is a valid regex.
 ///
-/// Weaker than "matches the right paths" — that belongs with each adapter's own tests — but
-/// it catches the class of mistake a metaschema cannot: a pattern that is well-formed JSON,
-/// well-formed JS, and a valid regex, yet cannot match any path.
+/// Only compilability. "Not accidentally inert" is what the sibling
+/// `no_bundled_selector_pre_doubles_a_backslash` above covers — a pre-doubled `\\.touch$` is a
+/// perfectly valid regex and would pass here — and matching the *right* paths belongs with
+/// each adapter's own tests.
+///
+/// Every drop is loud, because the ways this can quietly check nothing all look like a pass:
+/// a selector with two `match()` calls (only the first was read), a pattern the extractor
+/// cannot parse (skipped), or the extractor picking up some later string literal in the
+/// expression instead of the pattern. Hence the `panic` in place of a `continue`, the loop
+/// over every occurrence, and the final count.
 #[test]
 fn every_match_pattern_compiles() {
+    let mut checked = 0usize;
     for (name, src) in fragments() {
         for (idx, sel) in selectors(src) {
-            let Some(rest) = sel.split_once("match(").map(|(_, r)| r) else {
-                continue;
-            };
-            // The pattern is the second argument: the last double-quoted run before the `)`.
-            let Some(open) = rest
-                .rfind('"')
-                .and_then(|close| rest[..close].rfind('"').map(|o| (o, close)))
-            else {
-                continue;
-            };
-            let pattern = &rest[open.0 + 1..open.1];
-            regex::Regex::new(pattern).unwrap_or_else(|e| {
-                panic!("{name}.json rule {idx}: pattern {pattern:?} is not a valid regex: {e}")
-            });
+            let mut rest = sel.as_str();
+            let mut seen = 0usize;
+            while let Some((_, tail)) = rest.split_once("match(") {
+                seen += 1;
+                // The pattern is the second argument: the quoted run after the comma.
+                let pattern = tail
+                    .split_once(',')
+                    .and_then(|(_, args)| args.split_once('"'))
+                    .and_then(|(_, r)| r.split_once('"').map(|(p, _)| p))
+                    .unwrap_or_else(|| {
+                        panic!("{name}.json rule {idx}: cannot read the pattern out of {sel:?}")
+                    });
+                regex::Regex::new(pattern).unwrap_or_else(|e| {
+                    panic!("{name}.json rule {idx}: pattern {pattern:?} is not a valid regex: {e}")
+                });
+                checked += 1;
+                rest = tail;
+            }
+            assert_eq!(
+                seen,
+                sel.matches("match(").count(),
+                "{name}.json rule {idx}"
+            );
         }
     }
+    assert_eq!(
+        checked, 4,
+        "bundled match() patterns checked; update when adding rules"
+    );
 }

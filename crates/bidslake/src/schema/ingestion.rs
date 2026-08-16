@@ -484,27 +484,39 @@ mod tests {
     /// `tablePolicy` is `additionalProperties: false`, so the new fields only work if
     /// they were actually added to the metaschema — and a typo in a policy value must
     /// be an error, not a silent fall back to the default.
+    ///
+    /// Each case names the violation it expects, because `from_sources` has three failure
+    /// modes on this path — JSON parse, metaschema violation, and deserialization — and a
+    /// case whose fixture was mistyped into a parse error would satisfy a bare `is_err()`
+    /// without the metaschema ever having an opinion.
     #[rstest]
     // A typo in the policy *value*.
     #[case::misspelled_value(
         r#"{"IngestionSchemaVersion": "0.1.0",
-            "tables": { "t": { "undeclared": "cataolg" } } }"#
+            "tables": { "t": { "undeclared": "cataolg" } } }"#,
+        "at `/tables/t/undeclared`"
     )]
     // A typo in the policy *key*, which `additionalProperties: false` is what catches.
     #[case::misspelled_key(
         r#"{"IngestionSchemaVersion": "0.1.0",
-            "tables": { "t": { "undecalred": "catalog" } } }"#
+            "tables": { "t": { "undecalred": "catalog" } } }"#,
+        "Additional properties are not allowed ('undecalred' was unexpected)"
     )]
     // `undeclaredWhen` entries need both fields.
     #[case::incomplete_scoped_entry(
         r#"{"IngestionSchemaVersion": "0.1.0",
-            "tables": { "t": { "undeclaredWhen": [{ "undeclared": "catalog" }] } } }"#
+            "tables": { "t": { "undeclaredWhen": [{ "undeclared": "catalog" }] } } }"#,
+        "\"selectors\" is a required property"
     )]
-    fn metaschema_rejects_bad_undeclared_policy(#[case] bad: &str) {
+    fn metaschema_rejects_bad_undeclared_policy(#[case] bad: &str, #[case] violation: &str) {
+        let err = Ingestion::from_sources(&[bad]).expect_err("metaschema should reject");
+
+        let msg = format!("{err:#}");
         assert!(
-            Ingestion::from_sources(&[bad]).is_err(),
-            "metaschema should reject: {bad}"
+            msg.contains("violates its metaschema"),
+            "should fail metaschema validation, not JSON parsing: {msg}"
         );
+        assert!(msg.contains(violation), "expected {violation:?} in: {msg}");
     }
 
     #[test]

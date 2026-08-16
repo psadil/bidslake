@@ -76,6 +76,9 @@ include!(concat!(env!("OUT_DIR"), "/expression_tests.rs"));
 /// cannot handle would otherwise be swallowed (`do_selectors_select` treats `Err` as "does not
 /// apply"; `check_expression_rules` skips the check), silently disabling the rule.
 ///
+/// Replaces the older parse-only walk in `expression.rs`, which nested only two levels into
+/// `rules` and so reached 37 of the 1043 selectors and none of the 158 checks.
+///
 /// This is the regression guard for exactly that class of bug: `ParenthesizedExpression` was
 /// unsupported, which quietly disabled nine rules — among them `B0_FIELD_IDENTIFIER_RECOMMENDED`,
 /// `EXCESSIVE_ELECTRODE_SPECIFICITY` and `DEPRECATED_ACQUISITION_DURATION`.

@@ -335,6 +335,11 @@ mod tests {
     ///
     /// Uses the same exhaustive `match` trick as the `label` methods: adding a variant makes
     /// this fail to *compile* until it is listed, which is a better failure than a panic.
+    ///
+    /// The labels are checked for uniqueness rather than non-emptiness. Both `label` methods
+    /// are exhaustive matches over string literals, so emptiness can only be violated by
+    /// editing a literal to `""` in this same file; two variants sharing a label is the
+    /// reachable mistake, and it would make the timing report ambiguous.
     #[test]
     fn every_phase_and_counter_has_a_slot() {
         let all_phases = [
@@ -355,9 +360,14 @@ mod tests {
         ];
         // If this fails, a variant was added to `Phase` without being added above.
         assert_eq!(all_phases.len(), PHASES.len(), "PHASES vs the enum");
+        let mut phase_labels = std::collections::BTreeSet::new();
         for p in all_phases {
             phase_slot(p); // panics if absent from PHASES
-            assert!(!p.label().is_empty());
+            assert!(
+                phase_labels.insert(p.label()),
+                "duplicate phase label {}",
+                p.label()
+            );
         }
 
         let all_counters = [
@@ -374,9 +384,14 @@ mod tests {
             Counter::MergedKeys,
         ];
         assert_eq!(all_counters.len(), COUNTERS.len(), "COUNTERS vs the enum");
+        let mut counter_labels = std::collections::BTreeSet::new();
         for c in all_counters {
             counter_slot(c);
-            assert!(!c.label().is_empty());
+            assert!(
+                counter_labels.insert(c.label()),
+                "duplicate counter label {}",
+                c.label()
+            );
         }
     }
 

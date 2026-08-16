@@ -1316,67 +1316,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_bundled_schema_expressions() {
-        fn parse_only(expr_str: &str) -> Result<(), String> {
-            if expr_str.trim().is_empty() {
-                return Ok(());
-            }
-            let allocator = oxc_allocator::Allocator::default();
-            let parser =
-                oxc_parser::Parser::new(&allocator, expr_str, oxc_span::SourceType::default());
-            let ret = parser.parse();
-            if !ret.diagnostics.is_empty() {
-                return Err(format!(
-                    "Parse error for '{}': {:?}",
-                    expr_str, ret.diagnostics[0]
-                ));
-            }
-            Ok(())
-        }
-
-        let schema_str = include_str!(concat!(env!("OUT_DIR"), "/schema.json"));
-        let schema_json: Value =
-            serde_json::from_str(schema_str).expect("Failed to parse schema.json");
-        let rules = schema_json
-            .get("rules")
-            .expect("No rules in schema")
-            .as_object()
-            .expect("rules is not an object");
-
-        for (_category, rule_group) in rules {
-            if let Some(rule_obj) = rule_group.as_object() {
-                for (rule_name, rule_def) in rule_obj {
-                    if let Some(selectors) = rule_def.get("selectors").and_then(|s| s.as_array()) {
-                        for selector in selectors {
-                            if let Some(s) = selector.as_str() {
-                                let res = parse_only(s);
-                                assert!(
-                                    res.is_ok(),
-                                    "Failed to parse selector in {}: {}\nError: {:?}",
-                                    rule_name,
-                                    s,
-                                    res.err()
-                                );
-                            }
-                        }
-                    }
-                    if let Some(checks) = rule_def.get("checks").and_then(|c| c.as_array()) {
-                        for check in checks {
-                            if let Some(c) = check.as_str() {
-                                let res = parse_only(c);
-                                assert!(
-                                    res.is_ok(),
-                                    "Failed to parse check in {}: {}\nError: {:?}",
-                                    rule_name,
-                                    c,
-                                    res.err()
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // `test_bundled_schema_expressions` lived here, walking `rules` two levels deep and running
+    // the oxc parser over what it found. Two levels is not deep enough: it reached 37 of the
+    // schema's 1043 selectors and none of its 158 checks. `every_schema_expression_evaluates`
+    // in tests/expression_conformance.rs recurses the whole tree, and calls the crate's own
+    // `evaluate` — so it parses the same expressions through the same parser, in the
+    // backslash-doubled form production actually compiles, and then evaluates them too.
 }

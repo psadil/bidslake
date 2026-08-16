@@ -98,9 +98,20 @@ async fn test_additional_undefined_column_warned() {
 
 /// Missing *recommended* TSV columns must NOT be warned (TS only reports missing *required*
 /// columns). `strain` is a recommended participants column absent from ds001.
+///
+/// Paired with a positive control, since a validator that stopped checking TSV columns
+/// altogether would satisfy the negative for free.
 #[tokio::test]
 async fn test_recommended_column_not_warned() {
     let issues = validate_example("ds001").await;
+
+    assert!(
+        issues
+            .warnings()
+            .iter()
+            .any(|w| w.code == "TSV_ADDITIONAL_COLUMNS_UNDEFINED"),
+        "expected the TSV column checks to report something on ds001"
+    );
     assert!(
         !issues
             .warnings()
@@ -112,9 +123,22 @@ async fn test_recommended_column_not_warned() {
 
 /// `DatasetType` is auto-defaulted (like TS) so it is never reported as a missing recommended
 /// field.
+///
+/// Paired with a positive control: ds001 *is* missing four other recommended
+/// dataset_description fields, so the absence of `DatasetType` among them says something only
+/// if the check that would have reported it ran.
 #[tokio::test]
 async fn test_dataset_type_not_warned() {
     let issues = validate_example("ds001").await;
+
+    assert!(
+        issues.warnings().iter().any(|w| {
+            w.code == "JSON_KEY_RECOMMENDED"
+                && w.location == "/dataset_description.json"
+                && w.sub_code.as_deref() == Some("License")
+        }),
+        "expected JSON_KEY_RECOMMENDED for ds001's missing License"
+    );
     assert!(
         !issues
             .all()

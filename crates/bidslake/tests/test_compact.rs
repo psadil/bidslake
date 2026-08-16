@@ -8,7 +8,7 @@
 mod common;
 
 use bidslake::db::BidsDb;
-use common::{bids_example, count, ingest};
+use common::{bids_example, count};
 use rstest::rstest;
 use std::path::Path;
 
@@ -29,14 +29,12 @@ fn row_counts(db: &BidsDb) -> anyhow::Result<Vec<(String, i64)>> {
         .collect()
 }
 
-/// Ingest `ds001` into a catalog *file* and churn it.
+/// Ingest `ds001` into a catalog *file*.
 ///
 /// `ingest` builds in memory, so this re-does it against a file: compaction is about the
-/// on-disk block allocator, which `:memory:` does not exercise. The churn — delete a
-/// dataset's event rows, which is what a re-index does — is what leaves free blocks behind.
-/// Deleted by file, the same shape the re-index `DELETE` uses (and `events` has no `row_idx`
-/// to slice by; it is declared order-insensitive).
-async fn build_churned_catalog(src: &Path) -> anyhow::Result<()> {
+/// on-disk block allocator, which `:memory:` does not exercise at all — it reports zero
+/// blocks, free and total alike.
+async fn build_catalog(src: &Path) -> anyhow::Result<BidsDb> {
     use bidslake::{bids::BidsParser, fs::LocalFileSystem, schema::Schema};
     let db = BidsDb::new(src.to_str().unwrap())?;
     let schema = Schema::load(None).unwrap();
@@ -46,7 +44,16 @@ async fn build_churned_catalog(src: &Path) -> anyhow::Result<()> {
     let txn = db.conn.unchecked_transaction()?;
     parser.parse(&db).await?;
     txn.commit()?;
+    db.conn.execute("CHECKPOINT", [])?;
+    Ok(db)
+}
 
+/// The same catalog, churned. The churn — delete a dataset's event rows, which is what a
+/// re-index does — is what leaves free blocks behind. Deleted by file, the same shape the
+/// re-index `DELETE` uses (and `events` has no `row_idx` to slice by; it is declared
+/// order-insensitive).
+async fn build_churned_catalog(src: &Path) -> anyhow::Result<()> {
+    let db = build_catalog(src).await?;
     db.conn
         .execute("DELETE FROM events WHERE hash(file_id) % 2 = 0", [])?;
     db.conn.execute("CHECKPOINT", [])?;
@@ -231,10 +238,19 @@ fn compact_refuses_an_existing_destination() {
 
 /// The ingest-time advisory reads `pragma_database_size`; make sure the accessor
 /// works on a real catalog and reports no free blocks on a fresh one.
+///
+/// It must be a *file* catalog. `pragma_database_size` on `:memory:` reports zero blocks
+/// total and zero free, which satisfies any non-negativity check without the block allocator
+/// having run at all — so `total > 0` is the assertion that keeps this test honest.
 #[tokio::test]
 async fn free_block_ratio_reads_a_catalog() -> anyhow::Result<()> {
-    let db = ingest(bids_example("ds210")).await?;
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("fresh.duckdb");
+    let db = build_catalog(&path).await?;
+
     let (total, free) = bidslake::compact::free_block_ratio(&db.conn)?;
-    assert!(total >= 0 && free >= 0);
+
+    assert!(total > 0, "a file catalog must report blocks, got {total}");
+    assert_eq!(free, 0, "a freshly built catalog has no free blocks");
     Ok(())
 }

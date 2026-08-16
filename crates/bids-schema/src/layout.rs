@@ -433,11 +433,15 @@ mod tests {
         assert!(err.to_string().contains("does not recognize"), "{err}");
     }
 
+    /// The rejection must come from `check_template`, not from the round-trip that runs after
+    /// it: the feat term map recognizes none of these renders either, so `is_err()` alone stays
+    /// true with the whole path-traversal guard deleted. Naming the variant and the reason is
+    /// what ties the test to the guard.
     #[rstest]
-    #[case::absolute("/etc/passwd")]
-    #[case::parent_escape("../escape.txt")]
-    #[case::empty("")]
-    fn unsafe_templates_are_rejected(#[case] template: &str) {
+    #[case::absolute("/etc/passwd", "is absolute")]
+    #[case::parent_escape("../escape.txt", "escapes the output root via `..`")]
+    #[case::empty("", "is empty")]
+    fn unsafe_templates_are_rejected(#[case] template: &str, #[case] reason: &str) {
         let raw = format!(
             r#"{{"LayoutVersion":"0.1.0","TermMap":"feat",
                 "Roles":{{"r":{{"Template":{}}}}},
@@ -445,9 +449,13 @@ mod tests {
             serde_json::to_string(template).unwrap()
         );
 
-        let err = load_layout_str(&raw, "<test>");
+        let err = load_layout_str(&raw, "<test>").expect_err("should reject");
 
-        assert!(err.is_err(), "should reject template {template:?}");
+        assert!(
+            matches!(&err, LayoutError::UnsafeTemplate { template: t, reason: r, .. }
+                     if t == template && *r == reason),
+            "expected UnsafeTemplate({reason:?}) for {template:?}, got {err:?}"
+        );
     }
 
     #[test]

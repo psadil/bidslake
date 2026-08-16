@@ -80,17 +80,26 @@ async fn a_missing_metadata_field_raises_its_sub_code(
 }
 
 /// No `dataset_description.json` at all — the one case with no description to parameterize.
+///
+/// The image sits beside its sidecar so the dataset errors for exactly one reason: an orphan
+/// `.json` raises `SIDECAR_WITHOUT_DATAFILE`, which is itself an error, and would have kept a
+/// `has_errors()` assertion green with the missing-description check deleted outright.
 #[tokio::test]
 async fn test_missing_dataset_description() {
     let tmp = tempdir();
     let sub_dir = tmp.join("sub-01").join("anat");
     fs::create_dir_all(&sub_dir).unwrap();
     fs::write(sub_dir.join("sub-01_T1w.json"), "{}").unwrap();
+    fs::write(sub_dir.join("sub-01_T1w.nii"), "").unwrap();
 
     let issues = validate_dataset(&tmp).await;
 
     assert!(
-        issues.has_errors(),
-        "Should report error for missing dataset_description.json"
+        issues
+            .issues
+            .iter()
+            .any(|i| i.code == "MISSING_DATASET_DESCRIPTION"),
+        "expected MISSING_DATASET_DESCRIPTION, got {:?}",
+        issues.issues.iter().map(|i| &i.code).collect::<Vec<_>>()
     );
 }

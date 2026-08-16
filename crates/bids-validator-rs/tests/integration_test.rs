@@ -67,6 +67,10 @@ fn test_expression_evaluation_with_context() {
     assert!(evaluate_bool("sidecar.RepetitionTime > 0", &ctx).unwrap());
 }
 
+/// The bundled schema loads, and carries the rule families the validator dispatches through.
+///
+/// The `rules` half is the load-bearing one: `rules()` answers `&Value::Null` for a schema with
+/// no `rules` key at all, so without asking, this test's name was a claim it did not make.
 #[test]
 fn test_schema_loads_and_has_rules() {
     let schema = BidsSchema::bundled().unwrap();
@@ -79,6 +83,27 @@ fn test_schema_loads_and_has_rules() {
 
     // Verify key sections exist
     assert!(schema.objects().is_object());
+
+    let rules = schema
+        .rules()
+        .as_object()
+        .expect("schema.rules must be an object");
+    for family in [
+        "checks",
+        "errors",
+        "files",
+        "entities",
+        "dataset_metadata",
+        "sidecars",
+        "tabular_data",
+    ] {
+        assert!(rules.contains_key(family), "rules.{family} is missing");
+    }
+    // The lookup every ErrorValidator::key() goes through.
+    assert_eq!(
+        schema.get_issue("BFile").expect("rules.errors.BFile").code,
+        "B_FILE"
+    );
 }
 
 // ---------------------------------------------------------------------------

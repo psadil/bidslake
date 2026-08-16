@@ -1,21 +1,42 @@
-//! File-association table presence, root_uri reconstruction, and sidecar
-//! deduplication — exercised against a real bids-examples dataset (ds001).
+//! Event associations, root_uri reconstruction, and sidecar deduplication —
+//! exercised against a real bids-examples dataset (ds001).
 
 mod common;
 
 use anyhow::Result;
 use common::{bids_example, ingest};
 
+/// Every ds001 bold resolves the `_events.tsv` sitting beside it.
+///
+/// `file_associations` is unconditional static DDL created before the parser opens a file, so
+/// asking `information_schema` whether the table exists was decided before ds001 was read and
+/// would have held for an empty directory. What the table is for is the resolved edge.
 #[tokio::test]
-async fn test_file_associations_table_exists() -> Result<()> {
+async fn every_ds001_bold_resolves_its_events_sibling() -> Result<()> {
     let db = ingest(bids_example("ds001")).await?;
 
-    let table_exists: bool = db.conn.query_row(
-        "SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_name = 'file_associations'",
+    let (bolds, resolved, mismatched): (i64, i64, i64) = db.conn.query_row(
+        "SELECT (SELECT COUNT(*) FROM all_files WHERE kind='data' AND suffix='bold'), \
+                (SELECT COUNT(*) FROM file_associations a \
+                   JOIN all_files f ON f.file_id = a.source_file_id \
+                  WHERE f.suffix='bold' AND a.association_type='events' \
+                    AND a.target_file_id IS NOT NULL), \
+                (SELECT COUNT(*) FROM file_associations a \
+                   JOIN all_files f ON f.file_id = a.source_file_id \
+                  WHERE f.suffix='bold' AND a.association_type='events' \
+                    AND a.target_file_path <> replace(f.file_path, '_bold.nii.gz', '_events.tsv'))",
         [],
-        |r| r.get(0),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
-    assert!(table_exists, "file_associations table should exist");
+    assert_eq!(bolds, 48, "ds001 ships 16 subjects x 3 runs of bold");
+    assert_eq!(
+        resolved, bolds,
+        "every bold resolves its sibling events.tsv"
+    );
+    assert_eq!(
+        mismatched, 0,
+        "and resolves it to the sibling, not some other tsv"
+    );
     Ok(())
 }
 

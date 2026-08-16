@@ -85,15 +85,39 @@ fn a_conflict_with_an_existing_row_replaces_it() -> anyhow::Result<()> {
 }
 
 /// An empty batch must not create, and then fail to drop, a staging table.
+///
+/// So the staging tables are what gets queried. Counting rows in `file_associations` was
+/// counting a table `db()` had just created and nothing had written to — zero before the three
+/// calls and zero whatever they did — while the stage that a leaked table would collide with
+/// went unexamined.
 #[test]
-fn an_empty_batch_writes_nothing() -> anyhow::Result<()> {
+fn an_empty_batch_leaves_no_staging_table_behind() -> anyhow::Result<()> {
     let db = db()?;
     db.upsert_file_associations(&[])?;
     db.upsert_bvals(&[])?;
     db.upsert_bvecs(&[])?;
-    let rows: i64 = db
-        .conn
-        .query_row("SELECT COUNT(*) FROM file_associations", [], |r| r.get(0))?;
-    assert_eq!(rows, 0);
+
+    // `_` is a LIKE wildcard, hence the escape.
+    let stages: i64 = db.conn.query_row(
+        r"SELECT COUNT(*) FROM duckdb_tables() WHERE table_name LIKE '%\_upsert\_stage' ESCAPE '\'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(
+        stages, 0,
+        "an empty batch must not leave a stage to collide with"
+    );
+
+    // And the next real batch is unobstructed by whatever the empty one did.
+    db.upsert_file_associations(&[assoc(100)])?;
+    let (rows, stages_after): (i64, i64) = db.conn.query_row(
+        r"SELECT (SELECT COUNT(*) FROM file_associations),
+                 (SELECT COUNT(*) FROM duckdb_tables()
+                   WHERE table_name LIKE '%\_upsert\_stage' ESCAPE '\')",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    assert_eq!(rows, 1);
+    assert_eq!(stages_after, 0, "and the real batch drops its own stage");
     Ok(())
 }

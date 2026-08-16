@@ -10,6 +10,8 @@ use std::fs;
 /// firing cost one failing test out of twelve and said nothing about the other eleven. As cases
 /// they report independently. `test_malformed_bval_bvec` wrote both b-files and asserted both
 /// codes at once; each file now stands alone, which is what the two codes claim to be about.
+/// `B_FILE` gets one case per disjunct of its `has_double_spaces || has_non_numeric` for the
+/// same reason: written together, either half could stop firing unnoticed.
 #[rstest]
 #[case::empty_file("sub-01/anat/sub-01_T2w.json", b"", "EMPTY_FILE")]
 #[case::nifti_too_small("sub-01/anat/sub-01_T2w.nii", &[0u8; 100], "NIFTI_TOO_SMALL")]
@@ -39,6 +41,9 @@ use std::fs;
     b"1 0 0\n0 1\n0 0 1\n",
     "BVEC_ROW_LENGTH"
 )]
+// The two independent halves of `B_FILE`'s `has_double_spaces || has_non_numeric`.
+#[case::bfile_double_space("sub-01/dwi/sub-01_dwi.bval", b"1000  0\n", "B_FILE")]
+#[case::bfile_non_numeric("sub-01/dwi/sub-01_dwi.bvec", b"1 a 0\n0 1 0\n0 0 1\n", "B_FILE")]
 // sub-02's data sits under a session; the fixture's sub-01 has none.
 #[case::missing_session("sub-02/ses-01/anat/sub-02_ses-01_T1w.nii", &[0u8; 348], "MISSING_SESSION")]
 #[case::invalid_json_encoding(
@@ -95,33 +100,6 @@ async fn an_empty_subject_directory_raises_no_valid_data_found() {
     assert!(
         no_data,
         "Expected NO_VALID_DATA_FOUND_FOR_SUBJECT for empty subject directory"
-    );
-}
-
-/// Two b-files that are each individually parseable but malformed, so `B_FILE` can come from
-/// either — kept separate from the table above, which pins one file to one code.
-#[tokio::test]
-async fn test_bfile_invalid() {
-    let tmp = tempdir();
-    create_minimal_dataset(&tmp);
-    let dwi_dir = tmp.join("sub-01").join("dwi");
-    fs::create_dir_all(&dwi_dir).unwrap();
-
-    // Double space in bval
-    fs::write(dwi_dir.join("sub-01_dwi.bval"), "1000  0\n").unwrap();
-    // Non-numeric in bvec
-    fs::write(dwi_dir.join("sub-01_dwi.bvec"), "1 a 0\n0 1 0\n0 0 1\n").unwrap();
-
-    let issues = validate_dataset(&tmp).await;
-    let bfile_issues: Vec<_> = issues
-        .issues
-        .iter()
-        .filter(|i| i.code == "B_FILE")
-        .collect();
-
-    assert!(
-        !bfile_issues.is_empty(),
-        "Expected B_FILE for double spaces or non-numeric"
     );
 }
 
