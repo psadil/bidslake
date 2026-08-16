@@ -1,3 +1,18 @@
 /target
 *duckdb
 ingest_log.txt
+
+# proptest writes a shrunk failing seed here, one directory per crate, sibling to that
+# crate's `src/`. No leading slash: the path is `crates/<crate>/proptest-regressions/`.
+# It is a cache, not a test — a seed stops reproducing the moment the strategy changes, so
+# the regression itself lands in source as a `#[case::…]` row. See CONTRIBUTING.md.
+proptest-regressions/
+# The name proptest falls back to when it cannot find a `lib.rs`/`main.rs` above the source,
+# which is what happens to a property test placed in `crates/*/tests/` rather than inline.
+# Ignored so the fallback is invisible rather than committed by accident; the fix is to move
+# the test into `src/`.
+*.proptest-regressions
+
+# hypothesis's example database, same story. Written to the pytest rootdir, i.e.
+# `crates/bidslake-py/.hypothesis/`.
+.hypothesis/
