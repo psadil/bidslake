@@ -57,10 +57,11 @@ impl SchemaIndex {
     pub fn new(schema: &Value) -> Self {
         let datatypes: HashSet<String> = crate::datatypes::datatypes(schema).into_iter().collect();
 
-        // A datatype listed under more than one modality resolves to the first modality in
-        // iteration order, which is what `find_modality`'s scan returns. `serde_json::Map` is a
-        // `BTreeMap` here (the workspace does not enable `preserve_order`), so that order is
-        // alphabetical by modality name and `or_insert` reproduces it exactly.
+        // `rules.modalities` is modality → datatypes, so this inverts it; nothing in the schema
+        // forbids a datatype appearing under two modalities, and the inversion has to answer
+        // deterministically if one ever does. `or_insert` keeps the first in iteration order,
+        // and `serde_json::Map` is a `BTreeMap` here (the workspace does not enable
+        // `preserve_order`), so that means the alphabetically-first modality name.
         let mut datatype_to_modality = HashMap::new();
         if let Some(mods) = schema
             .get("rules")
@@ -97,14 +98,13 @@ impl SchemaIndex {
     }
 
     /// The datatype `path` sits in, if its immediate parent directory names one. Borrowed from
-    /// `path`; the equivalent of [`crate::datatypes::find_datatype`] without the per-call
-    /// schema walk.
+    /// `path`, so a per-file loop pays no allocation; the rule itself is
+    /// [`bids_core::datatype::parent_datatype`].
     pub fn datatype<'a>(&self, path: &'a str) -> Option<&'a str> {
         bids_core::datatype::parent_datatype(path, &self.datatypes)
     }
 
-    /// The modality owning `datatype`. The equivalent of [`crate::datatypes::find_modality`]
-    /// without the scan.
+    /// The modality owning `datatype` — the reverse of `rules.modalities`, as one hash lookup.
     pub fn modality(&self, datatype: &str) -> Option<&str> {
         self.datatype_to_modality.get(datatype).map(String::as_str)
     }
@@ -172,7 +172,6 @@ impl FileContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::datatypes::{find_datatype, find_modality};
     use std::path::PathBuf;
 
     fn schema() -> Value {
@@ -238,37 +237,54 @@ mod tests {
         );
     }
 
-    /// The index is a faster spelling of the schema-reading lookups, not a different answer.
+    /// What the index answers, against the real schema. Stated as expected values rather than
+    /// differentially against a second implementation — there is only one now.
     #[test]
-    fn index_agrees_with_the_schema_reading_lookups() {
-        let s = schema();
-        let index = SchemaIndex::new(&s);
+    fn the_index_resolves_datatype_and_modality() {
+        let index = SchemaIndex::new(&schema());
 
-        assert_eq!(index.entity_name_to_key(), &entity_name_to_key(&s));
-
-        for dt in crate::datatypes::datatypes(&s) {
-            assert_eq!(
-                index.modality(&dt),
-                find_modality(&dt, &s).as_deref(),
-                "modality disagreement on {dt}"
-            );
-        }
-
-        for path in [
-            "/sub-01/anat/sub-01_T1w.nii.gz",
-            "/sub-01/ses-1/eeg/sub-01_ses-1_task-x_eeg.vhdr",
-            "/derivatives/fmriprep/sub-01/anat/sub-01_desc-preproc_T1w.nii.gz",
-            "/anat/loose.nii.gz",
-            "/sub-01/anat/extra/nested.nii.gz",
-            "/sub-01/sub-01_scans.tsv",
-            "/dataset_description.json",
-            "/README",
+        for (path, expected) in [
+            ("/sub-01/anat/sub-01_T1w.nii.gz", Some("anat")),
+            (
+                "/sub-01/ses-1/eeg/sub-01_ses-1_task-x_eeg.vhdr",
+                Some("eeg"),
+            ),
+            (
+                "/derivatives/fmriprep/sub-01/anat/sub-01_desc-preproc_T1w.nii.gz",
+                Some("anat"),
+            ),
+            // Position is the whole rule: a datatype directory at the root counts, and a
+            // datatype that is not the *immediate* parent does not.
+            ("/anat/loose.nii.gz", Some("anat")),
+            ("/sub-01/anat/extra/nested.nii.gz", None),
+            ("/sub-01/sub-01_scans.tsv", None),
+            ("/dataset_description.json", None),
+            ("/README", None),
         ] {
-            assert_eq!(
-                index.datatype(path),
-                find_datatype(path, &s).as_deref(),
-                "datatype disagreement on {path}"
-            );
+            assert_eq!(index.datatype(path), expected, "datatype of {path}");
         }
+
+        for (datatype, expected) in [
+            ("anat", Some("mri")),
+            ("func", Some("mri")),
+            ("dwi", Some("mri")),
+            ("fmap", Some("mri")),
+            ("eeg", Some("eeg")),
+            ("meg", Some("meg")),
+            ("not-a-datatype", None),
+        ] {
+            assert_eq!(index.modality(datatype), expected, "modality of {datatype}");
+        }
+
+        // `objects.datatypes` and `rules.modalities` do not cover the same set: `phenotype` is
+        // a datatype that belongs to no modality, so `modality()` answers `None` for a file
+        // that has a perfectly good datatype. Pinned because it is easy to assume otherwise,
+        // and because a *second* uncovered datatype appearing should be a decision, not a
+        // silent `None` reaching `dataset.modalities` and the rules gated on it.
+        let uncovered: Vec<String> = crate::datatypes::datatypes(&schema())
+            .into_iter()
+            .filter(|dt| index.modality(dt).is_none())
+            .collect();
+        assert_eq!(uncovered, ["phenotype"]);
     }
 }

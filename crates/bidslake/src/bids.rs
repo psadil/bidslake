@@ -2481,7 +2481,7 @@ impl BidsParser {
     }
 
     /// The BIDS datatype for a file, taken from *any* datatype directory in its
-    /// path. This deliberately differs from [`bids_schema::datatypes::find_datatype`]
+    /// path. This deliberately differs from [`bids_core::datatype::parent_datatype`]
     /// (which matches only the immediate parent dir): the any-component match here
     /// mirrors the `datatype` DuckDB virtual column's `/({alt})/` regex (see
     /// `schema::dynamic`), so both classify nested/derivative layouts the same way.
@@ -2776,9 +2776,9 @@ impl BidsParser {
             // Association type = the source file's BIDS datatype (fmap → "fieldmap"), derived from
             // the schema rather than guessed from path substrings.
             let assoc_type =
-                match bids_schema::datatypes::find_datatype(source_file, self.schema.raw()) {
-                    Some(dt) if dt == "fmap" => "fieldmap".to_string(),
-                    Some(dt) => dt,
+                match bids_core::datatype::parent_datatype(source_file, &self.datatypes) {
+                    Some("fmap") => "fieldmap".to_string(),
+                    Some(dt) => dt.to_string(),
                     None => "intended_for".to_string(),
                 };
 
@@ -3738,8 +3738,8 @@ mod tests {
     }
 
     // `is_datafile_agrees_with_find_datatype` lived here, pinning this crate's own copy of the
-    // datatype-directory rule against `find_datatype`'s. Both now call the one implementation
-    // in `bids_core::datatype`, and its cases went with it.
+    // datatype-directory rule against bids-schema's. There is one implementation now
+    // (`bids_core::datatype`), and its cases went with it.
 
     /// `kind_of` replaced `is_datafile` plus the two hardcoded JSON arms of `process_file`.
     /// `is_datafile` is kept as its executable specification: `Kind::Data` must hold exactly

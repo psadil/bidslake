@@ -31,16 +31,6 @@ as issues. Roughly ordered by value.
   already carries `sub_dirs` and `participants.tsv`'s `participant_id`, so half the inputs are
   already collected.
 
-- [ ] **Two raw-schema datatype lookups that per-file loops no longer need.** `find_datatype`
-  now has a table-driven twin — `bids_core::datatype::parent_datatype`, reached via
-  `bids_schema::context::SchemaIndex` — and every per-file path uses it. Two callers still read
-  the schema JSON per call, both deliberately: `DatasetContext::new` walks the whole tree to
-  collect the dataset's datatype *set*, and `BidsParser::process_intended_for` holds only
-  `self.schema.raw()`. Neither is worth an index today — the dataset walk is fused into a loop
-  that already clones every path, so `find_datatype` is not its cost, and it covers a wider file
-  set than the per-file pass (it runs before `opaque_dirs` filtering). Revisit if `BidsParser`
-  grows a `SchemaIndex` for some other reason, or if a profile ever puts either on a hot path.
-
 - [ ] **Enforced referential integrity for the concept columns?** `all_files.sub`/`ses` cannot be
   foreign keys as built: they are select items of a *view* now (ADR 0006 §3) rather than the
   generated columns of a table, and DuckDB refuses a foreign key on either. Making them keys

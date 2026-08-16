@@ -2,9 +2,9 @@
 //!
 //! The rule is schema-agnostic and lives here; the caller supplies the datatype set, the same
 //! way [`crate::entities::resolve_entities`] takes the entity map rather than reading a schema.
-//! The schema-reading forms that look that set up for you — `find_datatype`, `find_modality` —
-//! live in `bids-schema`, the crate that owns the schema JSON, and defer to [`parent_dir`] for
-//! the path half so there is one spelling of the rule.
+//! `bids-schema`, the crate that owns the schema JSON, reads that set out of it once
+//! (`SchemaIndex`) and then answers here — so the rule has one spelling and the schema is
+//! walked once per schema rather than once per file.
 
 use std::collections::HashSet;
 
@@ -75,9 +75,8 @@ mod tests {
         assert_eq!(parent_dir(""), None);
     }
 
-    /// The path set this rule is judged on, carried over from bidslake's
-    /// `is_datafile_agrees_with_find_datatype`, which existed to pin a second implementation
-    /// of this rule against the schema-reading one. There is only one implementation now.
+    /// The path set this rule is judged on, carried over from bidslake, which had its own copy
+    /// of the rule and a test pinning it against bids-schema's. Both now call this.
     #[test]
     fn parent_datatype_over_the_corpus_shapes() {
         let dts = datatypes();

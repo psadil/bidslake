@@ -17,7 +17,6 @@ use crate::inheritance::read_sidecars;
 use crate::issues::DatasetIssues;
 use crate::schema::BidsSchema;
 use bids_schema::context::FileContext;
-use bids_schema::datatypes::{find_datatype, find_modality};
 use hed_validator_rs::schema::{SchemaCollection, load_schema_version};
 use serde::Serialize;
 use serde_json::Value;
@@ -196,10 +195,10 @@ impl DatasetContext {
         let mut tree_paths = Vec::new();
         for file in tree.walk_files() {
             tree_paths.push(file.path.clone());
-            if let Some(dt) = find_datatype(&file.path, &schema.raw)
-                && !datatypes.contains(&dt)
+            if let Some(dt) = schema.index.datatype(&file.path)
+                && !datatypes.iter().any(|d| d == dt)
             {
-                datatypes.push(dt);
+                datatypes.push(dt.to_string());
             }
         }
         for dir in tree.walk_directories() {
@@ -209,10 +208,10 @@ impl DatasetContext {
         // Determine modalities from datatypes
         let mut modalities = Vec::new();
         for dt in &datatypes {
-            if let Some(m) = find_modality(dt, &schema.raw)
-                && !modalities.contains(&m)
+            if let Some(m) = schema.index.modality(dt)
+                && !modalities.iter().any(|x| x == m)
             {
-                modalities.push(m);
+                modalities.push(m.to_string());
             }
         }
 

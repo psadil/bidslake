@@ -277,7 +277,7 @@ impl Schema {
     }
 
     /// The raw parsed BIDS schema JSON — for the shared `bids_schema` helpers
-    /// (`SchemaIndex`, `FileContext`, `find_datatype`, association resolution).
+    /// (`SchemaIndex`, `FileContext`, association resolution).
     pub fn raw(&self) -> &Value {
         &self.schema
     }
