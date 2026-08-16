@@ -1188,6 +1188,7 @@ fn parse_star_string(s: &str) -> HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     fn no_base(_v: &str) -> Result<Schema, SchemaLoadError> {
         Err(SchemaLoadError::single(
@@ -1266,48 +1267,51 @@ The end.
         ));
     }
 
-    #[test]
-    fn missing_section_is_fatal() {
-        let text = MINIMAL.replace("'''Unit modifiers'''\n", "");
-        let err = load_wiki_string(&text, None, &no_base).unwrap_err();
-        assert_eq!(err.code, codes::SCHEMA_SECTION_MISSING);
-    }
+    /// One edit to the minimal schema per case, and the fatal code that edit should raise.
+    ///
+    /// These were five functions of three lines each: substitute one string into `MINIMAL`,
+    /// load, and compare the code — so the substitution and the code it provokes are the whole
+    /// content of the test, and a parser change that stopped raising one of them hid the other
+    /// four behind it.
+    #[rstest]
+    // The Unit modifiers header is gone; every other section is still where it belongs.
+    #[case::missing_section("'''Unit modifiers'''\n", "", codes::SCHEMA_SECTION_MISSING)]
+    // Two adjacent headers swapped, so Value classes arrives before Unit modifiers. The old
+    // fixture put an '''Epilogue''' where '''Unit classes''' had been, which both removed a
+    // required section and duplicated one already present, so it could only assert a
+    // disjunction of two codes -- and would still have passed had the out-of-order check gone
+    // away entirely. This swap is out of order and nothing else.
+    #[case::out_of_order_section(
+        "'''Unit modifiers'''\n\n'''Value classes'''",
+        "'''Value classes'''\n\n'''Unit modifiers'''",
+        codes::SCHEMA_SECTION_MISSING
+    )]
+    #[case::bad_header_attribute(
+        r#"HED version="1.0.0""#,
+        r#"HED version="1.0.0" unknownAttribute=other"#,
+        codes::SCHEMA_HEADER_INVALID
+    )]
+    // withStandard names a base schema, and this parser is handed a loader that has none.
+    #[case::with_standard_requires_library(
+        r#"HED version="1.0.0""#,
+        r#"HED version="1.0.0" withStandard="8.4.0""#,
+        codes::SCHEMA_LIBRARY_INVALID
+    )]
+    #[case::empty_conversion_factor(
+        "{conversionFactor=1.0}",
+        "{conversionFactor=}",
+        codes::WIKI_DELIMITERS_INVALID
+    )]
+    fn a_malformed_wiki_schema_fails_with_its_code(
+        #[case] from: &str,
+        #[case] to: &str,
+        #[case] expected: &str,
+    ) {
+        let text = MINIMAL.replace(from, to);
 
-    #[test]
-    fn out_of_order_section_is_fatal() {
-        let text = MINIMAL.replace("'''Unit classes'''", "'''Epilogue'''");
         let err = load_wiki_string(&text, None, &no_base).unwrap_err();
-        // Epilogue appears before UnitClasses AND later again; either out-of-order or twice.
-        assert!(
-            err.code == codes::SCHEMA_SECTION_MISSING || err.code == codes::WIKI_SEPARATOR_INVALID
-        );
-    }
 
-    #[test]
-    fn bad_header_attribute_is_fatal() {
-        let text = MINIMAL.replace(
-            r#"HED version="1.0.0""#,
-            r#"HED version="1.0.0" unknownAttribute=other"#,
-        );
-        let err = load_wiki_string(&text, None, &no_base).unwrap_err();
-        assert_eq!(err.code, codes::SCHEMA_HEADER_INVALID);
-    }
-
-    #[test]
-    fn with_standard_requires_library() {
-        let text = MINIMAL.replace(
-            r#"HED version="1.0.0""#,
-            r#"HED version="1.0.0" withStandard="8.4.0""#,
-        );
-        let err = load_wiki_string(&text, None, &no_base).unwrap_err();
-        assert_eq!(err.code, codes::SCHEMA_LIBRARY_INVALID);
-    }
-
-    #[test]
-    fn empty_conversion_factor_is_delimiter_error() {
-        let text = MINIMAL.replace("{conversionFactor=1.0}", "{conversionFactor=}");
-        let err = load_wiki_string(&text, None, &no_base).unwrap_err();
-        assert_eq!(err.code, codes::WIKI_DELIMITERS_INVALID);
+        assert_eq!(err.code, expected, "{}", err.message);
     }
 
     #[test]
