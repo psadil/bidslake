@@ -13,15 +13,13 @@
 //! content readers. A term-map document is validated against a hand-written JSON-Schema
 //! metaschema ([`TERM_MAPPING_METASCHEMA_JSON`]).
 //!
-//! PCRE is one of the two `Template` syntaxes BEP-043 floats; we pin it (versioned by the
-//! document's `BIDSMapVersion`) and support the subset the `regex` crate provides (named
-//! groups, optional groups, character classes — no look-around/back-references), which is
-//! sufficient to collapse, e.g., FreeSurfer's `sub-01_ses-1` / `sub-01` / `01` subject-dir
-//! forms into one rule. That collapsing is also why a term map only *reads*: there is no
-//! single filename to render an optional group back into, so this module has no `render`.
-//! Naming a file a pipeline is about to write is [`layout`](crate::layout)'s job — a
-//! separate document whose mandatory `Examples` are rendered and fed back through the term
-//! map it names, so the two directions are checked against each other (ADR 0002 §12).
+//! PCRE is one of the two `Template` syntaxes BEP-043 floats; bidslake pins it (versioned by
+//! the document's `BIDSMapVersion`) and supports the subset the `regex` crate provides —
+//! named groups, optional groups, character classes, no look-around or back-references —
+//! which is enough to collapse FreeSurfer's `sub-01_ses-1` / `sub-01` / `01` subject-dir
+//! forms into one rule. That collapsing is why this module has no `render`: a term map only
+//! reads. Naming a file a pipeline is about to write is [`layout`](crate::layout)'s job, on
+//! the argument ADR 0002 makes.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -47,23 +45,62 @@ fn alias_entity(name: &str) -> &str {
 /// boundary; still composes into `anyhow` via `?`.
 #[derive(Debug, thiserror::Error)]
 pub enum TermMapError {
+    /// The file could not be read at all — absent, unreadable, or not UTF-8. Raised only by
+    /// [`load_term_map`], before anything about the document is known, so `path` is the only
+    /// record of which map failed.
     #[error("reading term map {path}")]
     Read {
+        /// The path as passed to [`load_term_map`], rendered through `Path::display`, hence
+        /// lossy for a path that is not valid UTF-8.
         path: String,
+        /// The `read_to_string` failure: `NotFound`, a permission error, or `InvalidData` for
+        /// a file whose bytes are not UTF-8.
         #[source]
         source: std::io::Error,
     },
+    /// The bytes are not a term-map document. Raised for a JSON syntax error, and again after
+    /// metaschema validation if the value still will not deserialize into [`TermMapFile`] —
+    /// the second is close to unreachable, because the metaschema already pins the type of
+    /// every key this crate deserializes.
     #[error("parsing term map {path} as JSON")]
     Parse {
+        /// The path as passed to [`load_term_map`], rendered through `Path::display`.
         path: String,
+        /// The `serde_json` diagnostic, whose usefulness depends on which of the two raise
+        /// sites produced it. The syntax-error raise reads the document text, so `line()` and
+        /// `column()` point at the offending byte. The post-validation raise goes through
+        /// `serde_json::from_value`, which has no text to point into: those errors carry a bare
+        /// message — `invalid type: integer 3, expected a string`, or the bare name of a
+        /// missing field — with `line() == 0` and `column() == 0`, so no position, and no field
+        /// path either, since paths are `serde_path_to_error`'s job and never serde_json's. One
+        /// more reason that raise is close to unreachable: were it ever to fire it would also
+        /// be near-undebuggable.
         #[source]
         source: serde_json::Error,
     },
+    /// The document is JSON but not a BEP-043 term map: a mapping with no `Template`, a
+    /// missing `BIDSVersion`/`BIDSMapVersion`/`Mappings`, or an unrecognized key that is not
+    /// `x_`-prefixed. Only [`load_term_map`] raises it — [`TermMap::from_file`] never
+    /// validates, so a document deserialized by hand skips the metaschema entirely.
     #[error("term map does not conform to the term-mapping metaschema:\n{}", .violations.join("\n"))]
-    Invalid { violations: Vec<String> },
+    Invalid {
+        /// Every violation [`validate_term_map`] found, not merely the first, sorted and
+        /// deduplicated. Each line names the JSON Pointer of the offending instance location
+        /// before the message, so the reader can find the mapping by index.
+        violations: Vec<String>,
+    },
+    /// A `Template` the `regex` crate refused. Not only malformed syntax: PCRE constructs the
+    /// crate does not implement — look-around, back-references — land here too, and that is
+    /// the practical limit on what a bundled or user term map may write.
     #[error("term-map template `{template}` is not a valid regular expression: {source}")]
     BadTemplate {
+        /// The template exactly as the document wrote it, without the `^(?:…)$` anchoring
+        /// [`TermMap::from_file`] wraps around it, so the string can be grepped in the source
+        /// document. The sentinel `<set>` means every template compiled individually but the
+        /// combined `RegexSet` did not (a compiled-size limit); no one template is at fault.
         template: String,
+        /// The `regex` crate's diagnostic. Its span offsets refer to the *anchored* pattern,
+        /// so they sit four characters ahead of the template as written.
         #[source]
         source: regex::Error,
     },
@@ -76,10 +113,30 @@ pub enum TermMapError {
 /// A parsed term-map document.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TermMapFile {
+    /// The BIDS release whose entity, datatype and suffix vocabulary the mappings are written
+    /// against (`"1.11.1"` in both bundled maps). The metaschema *requires* the key; the
+    /// `Option` reflects only that [`TermMap::from_file`] will compile a document that never
+    /// passed through [`load_term_map`]'s validation. Nothing branches on the value — it is
+    /// provenance, not a compatibility gate.
     #[serde(rename = "BIDSVersion", default)]
     pub bids_version: Option<String>,
+    /// The version of the BEP-043 *mapping format* (`"0.1.0"` in both bundled maps), distinct
+    /// from [`bids_version`](Self::bids_version): that one versions the BIDS vocabulary the
+    /// mappings name, this one the grammar they are written in — the key that would select the
+    /// `Template` dialect (see the [module docs](crate::term_map) for the dialect this crate
+    /// pins). Nothing in the workspace reads either key, so a document declaring any value at
+    /// all is still compiled as PCRE. Required by the metaschema, `Option` for the same reason
+    /// as above.
     #[serde(rename = "BIDSMapVersion", default)]
     pub bids_map_version: Option<String>,
+    /// The rules, in document order — which is load-bearing, not cosmetic. [`TermMap`] matches
+    /// with a `RegexSet` and takes the lowest matching index, so a narrow mapping must be
+    /// written before any catch-all that would also match it; reordering a bundled map changes
+    /// what a path classifies as. An empty `[]` validates and yields a term map that classifies
+    /// nothing rather than an error (`RegexSet::new([])` compiles and matches nothing). An
+    /// *absent* `Mappings` is a different case: the metaschema requires the key, so the `default`
+    /// is reachable only through [`TermMap::from_file`] on a hand-built document, never through
+    /// [`load_term_map`].
     #[serde(rename = "Mappings", default)]
     pub mappings: Vec<Mapping>,
 }
@@ -93,8 +150,21 @@ pub struct Mapping {
     /// Literal BIDS entity -> value pairs (constants not captured by the template).
     #[serde(rename = "Entities", default)]
     pub entities: BTreeMap<String, String>,
+    /// What BIDS thing the matched file *is*. Optional, and an absent `Concepts` — or one that
+    /// sets neither key — is the deliberate shape of a mapping that only **recognizes** a path:
+    /// FreeSurfer's `scripts/`, `touch/` and shipped-template rules match, which is what
+    /// suppresses the validator's `NotIncluded` issue (ADR 0002), while asserting no
+    /// *concept* — no `datatype`, no `suffix` — for an ingestion rule to select on. Recognition
+    /// is not silence, though: `scripts/` and `touch/` still capture `subject`, and a captured
+    /// entity is projected onto the file's registry row and mints a participant. Only the
+    /// shipped-template rule asserts literally nothing, which is its whole point — `fsaverage`
+    /// must not become a subject.
     #[serde(rename = "Concepts", default)]
     pub concepts: Concepts,
+    /// BEP-043 `Metadata`: free-form JSON the rule asserts about every file it matches, the way
+    /// a sidecar would. The metaschema constrains it no further than `type: object`, so any
+    /// key/value shape validates. Copied verbatim into [`FileFacts::metadata`]; neither bundled
+    /// map sets it and no consumer reads it yet, so today it is carried, not applied.
     #[serde(rename = "Metadata", default)]
     pub metadata: Map<String, Value>,
 }
@@ -102,8 +172,23 @@ pub struct Mapping {
 /// BEP-043 `Concepts`: the BIDS `datatype`/`suffix` a mapped file represents.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Concepts {
+    /// The BIDS datatype the matched file belongs to (`"anat"`, `"func"`). Lowercase and
+    /// unrenamed because it is a BIDS *concept* name, not one of BEP-043's PascalCase document
+    /// keys. Optional; `None` leaves the datatype unknown, and the concept is then absent from
+    /// [`TermMap::projectable_concepts`] unless some other mapping supplies it. Not checked
+    /// against the schema's datatype list here — an unknown datatype compiles, classifies, and
+    /// only surfaces downstream.
     #[serde(default)]
     pub datatype: Option<String>,
+    /// The BIDS suffix the matched file represents (`"segstats"`, `"parcstats"`, `"dseg"`).
+    /// Optional, and leaving it out is a decision rather than an omission: bidslake's ingestion
+    /// fragments dispatch a content *reader* on `suffix`, so a catch-all that claimed
+    /// `"segstats"` for every `stats/*.stats` would push files like `sclimbic.stats` through
+    /// the `fs_stats` reader with nothing to tell them apart. The bundled *data* catch-alls —
+    /// `stats/[^/]+`, `mri/[^/]+\.mgz`, `surf/[^/]+`, `label/[^/]+` — therefore set only
+    /// [`datatype`](Self::datatype). The bookkeeping ones — `scripts/`, `touch/`, `tmp|trash`,
+    /// `README`, the `xhemi/` tail and the shipped-template rule — go further and set no
+    /// concepts at all, per [`Mapping::concepts`].
     #[serde(default)]
     pub suffix: Option<String>,
 }
@@ -116,10 +201,38 @@ pub struct Concepts {
 /// the ingestion selectors; `entities` populate materialized concept columns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileFacts {
+    /// BIDS entity short key to bare label, e.g. `{"sub": "01", "hemi": "lh"}`. Built from the
+    /// winning template's named capture groups and then overwritten by that mapping's literal
+    /// `Entities`, both aliased from BEP-043's long spellings (`subject`, `session`) to the
+    /// short BIDS keys the rest of the system uses. Values carry no `key-` prefix. A capture
+    /// group that did not participate in the match contributes no key at all, so an optional
+    /// `(?:_ses-…)?` group leaves `ses` absent rather than present-and-empty.
     pub entities: BTreeMap<String, String>,
+    /// [`Concepts::datatype`] of the winning mapping, verbatim. `None` is an answer, not a
+    /// failure: it says the producer's own tooling owns this file but it is not data — a log,
+    /// a `touch` marker, a shipped template subject. What it buys is narrow, and worth stating
+    /// exactly: it keeps the bundled `datatype == "anat"` catalog rule from claiming the file,
+    /// so the file earns a plain `file_registry` row rather than a `scans` row (ADR 0006), and
+    /// the validator still counts the path as recognized. It does not mean the file leaves no
+    /// trace — that registry row still carries the projection, so any `sub` the template
+    /// captured registers a participant. Suppressing the row itself takes an `ignore` rule,
+    /// which is the ingestion schema's business, not this field's.
     pub datatype: Option<String>,
+    /// [`Concepts::suffix`] of the winning mapping, verbatim. `None` is what keeps a content
+    /// reader from being dispatched, so a catch-all match yields a file that is cataloged with
+    /// its body never opened.
     pub suffix: Option<String>,
+    /// The final path component from its **first** `.` onward. Computed from the path, never
+    /// declared by a mapping — the filename is authoritative even for a projected path, which
+    /// is also why `extension` is never a member of [`TermMap::projectable_concepts`]. These
+    /// are BIDS filename semantics applied to names BIDS never had to parse, so a producer name
+    /// with dots in its stem gives a wide answer: `lh.aparc.a2009s.stats` yields
+    /// `.aparc.a2009s.stats`, not `.stats`. `None` when the last component has no `.` at all.
     pub extension: Option<String>,
+    /// The winning mapping's [`Mapping::metadata`], cloned. Populated straight from the
+    /// document with no merging across mappings (only one mapping ever wins) and no
+    /// interaction with BIDS sidecar inheritance. Empty for both bundled maps, and no consumer
+    /// reads it today.
     pub metadata: Map<String, Value>,
 }
 
@@ -215,9 +328,15 @@ impl TermMap {
                 entities.insert(alias_entity(name).to_string(), m.as_str().to_string());
             }
         }
-        // Literal Entities override/augment.
+        // Literal Entities override/augment — aliased on the same terms as the capture groups
+        // above. BEP-043 spells these long (`subject`, `session`) while BIDS keys are short, so
+        // an unaliased literal produced a fact keyed `subject` while `projectable_concepts`
+        // advertised `sub`. `bidslake::schema::dynamic` reads that set to decide which
+        // generated columns consult the stored projection, so the column never looked and the
+        // value read NULL. Both bundled maps happen to use short keys, which is why no test
+        // over them could see it.
         for (k, v) in &mapping.spec.entities {
-            entities.insert(k.clone(), v.clone());
+            entities.insert(alias_entity(k).to_string(), v.clone());
         }
 
         Some(FileFacts {
@@ -301,10 +420,55 @@ pub fn load_term_map(path: &Path) -> Result<TermMap, TermMapError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use rstest::rstest;
 
     fn fs() -> TermMap {
         bundled_term_map("freesurfer").expect("bundled")
+    }
+
+    proptest! {
+        /// Every concept a path actually projects is one the map said it could project.
+        ///
+        /// `projectable_concepts` is the *static* upper bound `bidslake::schema::dynamic` uses
+        /// to decide which generated columns consult the stored projection. If `classify`
+        /// produces a key outside it, the column that key belongs to is never told to look, and
+        /// the value reads NULL — a wrong answer with nothing logged.
+        ///
+        /// The entity key is generated across both spellings BEP-043 allows. Both bundled maps
+        /// happen to use the short forms, so no test over them can reach this: the long forms
+        /// are exactly what a BEP-043 author writes, which is why `alias_entity` exists.
+        #[test]
+        fn every_concept_a_path_projects_was_declared_projectable(
+            declared in prop::sample::select(&["subject", "session", "sub", "ses", "desc"][..]),
+            captured in prop::sample::select(&["subject", "session", "desc"][..]),
+            label in "[0-9A-Za-z]{1,6}",
+        ) {
+            let doc = serde_json::json!({
+                "BIDSVersion": "1.11.1",
+                "BIDSMapVersion": "0.1.0",
+                "Mappings": [{
+                    "Template": format!("(?P<{captured}>[0-9A-Za-z]+)/stats/aseg.stats"),
+                    "Entities": { declared: "fixed" },
+                    "Concepts": { "datatype": "anat", "suffix": "segstats" }
+                }]
+            });
+            let file: TermMapFile = serde_json::from_value(doc).expect("built well-formed");
+            let map = TermMap::from_file(file).expect("template is a valid regex");
+            let declarable = map.projectable_concepts();
+
+            let facts = map.classify(&format!("{label}/stats/aseg.stats"));
+
+            let projected: std::collections::BTreeSet<String> = facts
+                .expect("the template matches this path by construction")
+                .entities
+                .into_keys()
+                .collect();
+            prop_assert!(
+                projected.is_subset(&declarable),
+                "projected {projected:?} but declared {declarable:?}"
+            );
+        }
     }
 
     /// Every bundled term map, not just one — a new map that violates the metaschema or
@@ -531,7 +695,7 @@ mod tests {
 
     /// The subtree catch-alls must not claim concepts they cannot know. A log or a touch file
     /// is not anatomical data, so it is recognized with nothing projected — the distinction
-    /// `docs/adr/0002` §12 draws for catch-alls.
+    /// ADR 0002 draws for catch-alls.
     #[rstest]
     #[case("bert/scripts/recon-all.log")]
     #[case("bert/touch/wmsegment.touch")]

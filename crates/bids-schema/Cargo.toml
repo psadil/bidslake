@@ -14,10 +14,22 @@ oxc_allocator = "0.139.0"
 oxc_parser = "0.139.0"
 oxc_ast = "0.139.0"
 oxc_span = "0.139.0"
+# Optional, gated by the `proptest` feature below. See the note in `bids-core/Cargo.toml`:
+# `strategy` must be linkable from crates above, which a dev-dependency is not.
+proptest = { workspace = true, optional = true }
 
 [dev-dependencies]
 rstest = { workspace = true }
 tempfile = { workspace = true }
+proptest = { workspace = true }
+bids-core = { path = "../bids-core", features = ["proptest"] }
+
+[features]
+# Exposes `bids_schema::strategy` (bounded arbitrary JSON, overlay fragments).
+proptest = ["dep:proptest", "bids-core/proptest"]
 
 [build-dependencies]
 serde_json = { workspace = true }
+
+[lints]
+workspace = true

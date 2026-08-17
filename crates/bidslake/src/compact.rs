@@ -3,7 +3,7 @@
 //! Re-indexing a dataset `DELETE`s its rows and re-inserts them (see the batch path
 //! in [`crate::bids`]). DuckDB reuses the vacated blocks for later writes but never
 //! returns them to the OS, and `CHECKPOINT` does not shrink the file — only writing a
-//! new one does. A profiled catalog was 28% free blocks: 478 MB of a 1.74 GB file.
+//! new one does. How much that costs a re-indexed catalog is in `docs/roadmap.md`.
 //!
 //! `COPY FROM DATABASE src TO dst` alone does not work here, for two reasons this
 //! module works around:
@@ -23,11 +23,25 @@ use std::collections::{HashMap, HashSet};
 
 use crate::schema::dynamic::quote_ident;
 
-/// What a compaction did, for reporting.
+/// What a compaction did, for reporting. `bidslake compact` prints all four, turning the
+/// block pair into a percentage; `docs/roadmap.md` ("Reclaiming space after a re-index") says
+/// when running it is worth the transient doubling of disk.
 pub struct CompactStats {
+    /// How many tables the rewrite covered — every table in the source catalog, including
+    /// the empty ones, which are counted here and then skipped by the copy loop. Views are
+    /// not counted: they come across with the schema copy, having no rows to move.
     pub tables: usize,
+    /// Total rows copied, summed over those tables. Also the destination's row count: each
+    /// table's two counts are compared before this is returned, so a shortfall is an error
+    /// rather than a smaller number here.
     pub rows: i64,
+    /// `total_blocks` of the source *before* the rewrite — the holes included, since they are
+    /// what is being reclaimed. Blocks are DuckDB's storage blocks, 256 KiB by default, so
+    /// this is a file size only up to that factor.
     pub blocks_before: i64,
+    /// `total_blocks` of the destination after its `CHECKPOINT`. The checkpoint is what makes
+    /// the comparison honest: without it the freshly written file is still partly in the WAL
+    /// and would read as smaller than it is.
     pub blocks_after: i64,
 }
 

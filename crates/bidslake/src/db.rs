@@ -5,8 +5,7 @@
 //! in [`crate::schema`]; this module just routes calls to it and shapes the rows of
 //! the **static** tables itself ([`BidsDb::upsert_file_associations`],
 //! [`BidsDb::upsert_bvals`], [`BidsDb::upsert_bvecs`]), whose DDL is hand-written and
-//! so unknown to the schema. All four bulk paths stage through
-//! [`BidsDb::upsert_staged`].
+//! so unknown to the schema. All four bulk paths stage through `upsert_staged`.
 //!
 //! Note that the tabular ingest in [`crate::bids`] (and the driver in `main`) also
 //! execute their own hand-built SQL directly against the public [`BidsDb::conn`] —
@@ -78,17 +77,48 @@ impl TabularStatus {
 /// `IntendedFor`). Written to the `file_associations` table.
 #[derive(Debug, Clone)]
 pub struct FileAssociation {
+    /// The `bids::file_id` of the file the edge starts from — the *data* file whose
+    /// `meta.associations` were resolved, or the file whose sidecar named an `IntendedFor`
+    /// target. Never optional: only files the walk saw can be sources, so the id always
+    /// resolves.
     pub source_file_id: u64,
     /// `None` when the target names a file this dataset does not ship — a dangling
     /// `IntendedFor`. Kept rather than dropped (see the table's DDL), which is why the
     /// path below travels alongside the id.
     pub target_file_id: Option<u64>,
+    /// The target's dataset-relative path, already normalized — an `IntendedFor` written as a
+    /// BIDS URI or as a subject-relative path arrives here resolved against the declaring
+    /// file, and one naming *another* dataset never arrives at all.
+    ///
+    /// Stored even when [`Self::target_file_id`] is `None`, where it is the only record of
+    /// what was pointed at, which is why it and not the target id is the third column of the
+    /// table's primary key.
     pub target_file_path: String,
+    /// Which relation this edge is, stored as `association_type`: a `meta.associations` key
+    /// from the BIDS schema (`events`, `bval`, `channels`, …) for a structural association,
+    /// or, for an `IntendedFor`, the declaring file's datatype — `fmap` becomes `fieldmap`,
+    /// any other datatype is used verbatim, and a file outside a datatype directory falls
+    /// back to `intended_for`.
+    ///
+    /// It is also what a `describes` view filters on to pick its edges (ADR 0003), so a table
+    /// policy naming an association this column never carries yields a view that is simply
+    /// empty.
     pub assoc_type: String,
 }
 
 /// Owns the DuckDB connection bidslake writes to and queries.
 pub struct BidsDb {
+    /// The open DuckDB connection, public deliberately.
+    ///
+    /// The ingest in [`crate::bids`] and the CLI both run SQL this type has no method for —
+    /// the batched `read_csv` inserts, the re-index `DELETE`s, the count-back `SELECT`s — and
+    /// this module does not try to gate every statement, so the connection is part of the
+    /// API. What a caller gets is a connection the constructors have already configured:
+    /// [`BidsDb::open_with_temp_dir`] has pointed its spill directory somewhere local.
+    ///
+    /// One connection, never a pool. `duckdb::Connection` is `Send` but not `Sync`, so a
+    /// `BidsDb` is used from one place at a time; the concurrency in an ingest is in reading
+    /// files, not in writing rows.
     pub conn: Connection,
 }
 
@@ -129,14 +159,14 @@ impl BidsDb {
     ///
     /// Tables first — all of them — because a view may select from a static table just as
     /// easily as from a generated one, and `diffusion` selects from two *generated* views
-    /// (docs/adr/0007), so it comes last of all.
+    /// (ADR 0003), so it comes last of all.
     ///
     /// Creates nothing and returns `Err` when an existing catalog's `file_registry` lacks a
     /// *physical* column this run would write — in practice the `projected` column a term map
     /// needs — because `IF NOT EXISTS` would otherwise drop the difference in silence. The
     /// concept columns are not covered: they are select items of the `all_files` view, which
     /// is emitted `CREATE OR REPLACE`, so a wider run simply redefines them. See
-    /// `check_registry_shape`, and the narrowing caveat recorded in `TODO.md`.
+    /// `check_registry_shape`, and the narrowing caveat ADR 0006 records as open.
     pub fn create_tables(&self, schema: &Schema) -> Result<()> {
         self.check_registry_shape(schema)?;
         // Tables first — all of them — then every view, because a view may select from a
@@ -155,7 +185,7 @@ impl BidsDb {
         // The ingest roots a dataset was built from (see docs/adr/0005).
         self.conn.execute(schema::CREATE_DATASET_ROOTS_TABLE, [])?;
         // `CREATE TABLE IF NOT EXISTS` leaves an already-existing table alone, so a catalog
-        // built before docs/adr/0009 keeps a two-column `dataset_roots` and every read of
+        // built before docs/adr/0007 keeps a two-column `dataset_roots` and every read of
         // `tenure` fails on it. Adding the column here is the same courtesy `link init`
         // extends — an old catalog gains the concept without a re-index — and the default
         // is the honest answer for a root indexed before tenure existed: `attached`.
@@ -172,7 +202,7 @@ impl BidsDb {
         }
         // The two query-time views over `dataset_links` — provenance and naming
         // respectively (docs/adr/0003) — and `diffusion`, which composes the two generated
-        // gradient views and so must follow them (docs/adr/0007).
+        // gradient views and so must follow them (docs/adr/0003).
         self.conn
             .execute(schema::CREATE_DATASET_RELATIONS_VIEW, [])?;
         self.conn
@@ -187,18 +217,16 @@ impl BidsDb {
     /// needs.
     ///
     /// Tables are created `IF NOT EXISTS`, so `file_registry` keeps the shape the *first*
-    /// run gave it — while datasets are meant to accumulate across runs (ADR 0002 §3). A
+    /// run gave it — while datasets are meant to accumulate across runs (ADR 0002). A
     /// second run needing a physical column the registry lacks would drop it silently.
     ///
-    /// **Most of that problem is gone** (docs/adr/0006). The BIDS-concept columns used to be
-    /// generated columns of `scans`, which is why a wider run had to be refused; they are now
-    /// select items of the `all_files` view, and a view is emitted `CREATE OR REPLACE`, so a
-    /// later run simply redefines it — retroactively, for rows already stored. What remains
-    /// frozen is the registry's *physical* shape, which in practice is one column:
-    /// `projected`, present only when a term map is configured.
+    /// Only the *physical* shape is frozen, which in practice is one column: `projected`,
+    /// present only when a term map is configured. The BIDS-concept columns are select items
+    /// of the `all_files` view, emitted `CREATE OR REPLACE`, so a wider run redefines them
+    /// retroactively for rows already stored and needs no refusal (ADR 0006).
     ///
-    /// The remedy is unchanged and now needed far less often: the adapter set describes the
-    /// **catalog**, not the dataset being added.
+    /// The remedy is that the adapter set describes the **catalog**, not the dataset being
+    /// added: name every adapter the catalog uses on every run, or index into a fresh one.
     fn check_registry_shape(&self, schema: &Schema) -> Result<()> {
         let exists: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM duckdb_tables() WHERE table_name = 'file_registry'",
@@ -412,7 +440,7 @@ impl BidsDb {
     /// absence on a later run is not a retraction. So asserting `Managed` upserts, while the
     /// default leaves an existing row's tenure alone — otherwise every routine re-index would
     /// silently demote a managed root and quietly withdraw the authority its rows carry
-    /// (docs/adr/0009).
+    /// (docs/adr/0007).
     pub fn register_dataset_root(
         &self,
         dataset_id: &str,
@@ -634,10 +662,10 @@ impl BidsDb {
     /// for a table a re-index rewrites, where a row already present must be replaced rather
     /// than collided with.
     ///
-    /// Staged through a temporary table (see [`Self::upsert_staged`]), because the two halves
-    /// of that cannot be had directly. The Appender has no conflict handling at all, so it
-    /// cannot upsert; and a row-at-a-time `INSERT OR REPLACE` is far more expensive than the
-    /// bulk path — measured on `sidecars` over ds000117 (1,492 imaging files, 2026-08), the
+    /// Staged through a temporary table (see `upsert_staged`), because the two halves of that
+    /// cannot be had directly. The Appender has no conflict handling at all, so it cannot
+    /// upsert; and a row-at-a-time `INSERT OR REPLACE` is far more expensive than the bulk
+    /// path — measured on `sidecars` over ds000117 (1,492 imaging files, 2026-08), the
     /// append went 21 ms → 759 ms and the whole run 1.8 s → 2.6 s.
     ///
     /// Upsert rather than clear-then-append so the write is self-contained: nothing has to keep
@@ -647,8 +675,8 @@ impl BidsDb {
     /// the write path.
     ///
     /// `sidecars` and `file_registry` qualify for the staging requirements in
-    /// [`Self::upsert_staged`]; `scans` has generated columns and uses [`Self::append_rows`]
-    /// behind its own read-back guard.
+    /// `upsert_staged`; `scans` has generated columns and uses [`Self::append_rows`] behind
+    /// its own read-back guard.
     pub fn upsert_rows(&self, schema: &Schema, table_name: &str, rows: &[Value]) -> Result<()> {
         if rows.is_empty() {
             return Ok(());
@@ -754,7 +782,7 @@ impl BidsDb {
     /// which is the normal case for a dataset spanning several roots (docs/adr/0005), where
     /// an `IntendedFor` routinely names a file another root supplies.
     ///
-    /// Both halves are had at once through [`Self::upsert_staged`]. The row-at-a-time
+    /// Both halves are had at once through `upsert_staged`. The row-at-a-time
     /// `INSERT OR REPLACE` this replaced was the dominant cost of the whole run: the schema
     /// resolves roughly two associations per data file, and at ~0.5 ms of planning per
     /// statement that was most of the ingest. Measured over ds000117 (2,209 files, 909
@@ -763,8 +791,8 @@ impl BidsDb {
     /// catalog, where every row conflicts, 1,744 ms → 4 ms.
     ///
     /// The caller owns primary-key dedup, and owns it alone: staging cannot check it, and a
-    /// duplicate within one batch is dropped rather than refused (see [`Self::upsert_staged`],
-    /// and `tests/test_staged_upsert_duplicates.rs` for the pinned behaviour).
+    /// duplicate within one batch is dropped rather than refused (see `upsert_staged`, and
+    /// `tests/test_staged_upsert_duplicates.rs` for the pinned behaviour).
     pub fn upsert_file_associations(&self, assocs: &[FileAssociation]) -> Result<()> {
         if assocs.is_empty() {
             return Ok(());

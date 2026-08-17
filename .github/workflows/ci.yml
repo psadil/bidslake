@@ -12,11 +12,18 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # A failing property shrinks until it cannot simplify further. `max_shrink_iters` already
+  # caps that at 4x the case count, but shrinking a case that itself runs the oxc parser is
+  # slow in a debug build — bound it by wall clock too, so a red CI reports its counterexample
+  # instead of hitting the job timeout with nothing to show.
+  PROPTEST_MAX_SHRINK_TIME: "60000"
 
 jobs:
   rust:
     name: rust (fmt · clippy · test)
     runs-on: ubuntu-latest
+    # Generated input makes a hang a real failure mode rather than a theoretical one.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
@@ -37,6 +44,8 @@ jobs:
   python:
     name: python (pytest · ty)
     runs-on: ubuntu-latest
+    # Generated input makes a hang a real failure mode rather than a theoretical one.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
@@ -50,7 +59,10 @@ jobs:
         run: uv venv --python 3.14
       - name: Install build + test tooling
         working-directory: crates/bidslake-py
-        run: uv pip install maturin pytest ty
+        # Installed by name rather than from `[dependency-groups] dev`, so this list and that
+        # one have to be kept in step; hypothesis is imported unconditionally by conftest.py,
+        # so omitting it here is a collection error, not a silent loss of the properties.
+        run: uv pip install maturin pytest hypothesis ty
       - name: Build the extension (editable)
         working-directory: crates/bidslake-py
         run: .venv/bin/maturin develop
@@ -63,9 +75,43 @@ jobs:
         working-directory: crates/bidslake-py
         run: .venv/bin/ty check python/bidslake
 
+  docs:
+    name: docs (rustdoc · mdbook · links)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: cargo doc
+        # `-D warnings` is what makes this a check rather than a build: the workspace enables
+        # rustdoc::broken_intra_doc_links, and two crate READMEs send readers to
+        # `cargo doc --open` as the primary documentation, so a broken link is a real defect.
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
+      - name: cargo test --doc
+        # Explicit rather than relying on plain `cargo test` picking up lib doctests. The
+        # bidslake crate page's examples ingest from `third_party/bids-examples`, so they
+        # depend on the recursive checkout above.
+        run: cargo test --doc
+      - name: mdbook build
+        run: |
+          cargo install mdbook --locked --version ^0.5
+          mdbook build
+      - name: Link check (including external)
+        # The pre-commit hook runs `lychee --offline`, which only resolves relative links.
+        # This is the same check with the network on. A dead upstream URL should fail here
+        # rather than block a local commit.
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: --no-progress docs/ README.md CONTRIBUTING.md 'crates/*/README.md'
+          fail: true
+
   codegen-drift:
     name: codegen drift (emit-types == committed)
     runs-on: ubuntu-latest
+    # No property tests here, but no job should be able to hang the queue either.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:

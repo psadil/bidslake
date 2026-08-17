@@ -5,16 +5,18 @@
 //! [term map](bids_schema::term_map)), what bidslake does with it:
 //!
 //! - **read** — parse its contents into a data table via a named reader;
-//! - **catalog** — record it in the file registry (`scans`), contents unread, left on disk;
-//! - **ignore** — skip it (the declarative `.bidsignore`-override).
+//! - **catalog** — record it in `file_registry`, contents unread, left on disk;
+//! - **ignore** — skip it entirely, registry row included (the declarative
+//!   `.bidsignore`-override, and the one disposition that records nothing).
 //!
 //! Rules select with the BIDS selector-expression language over projected concepts, reusing
 //! the same evaluator as [`Tabular::route`](super::tabular::Tabular::route). Per-table policy
-//! (`concepts` to materialize, row `ordered`ing, and whether columns the schema does not
-//! declare are stored — see [`Undeclared`]) is declared for the data tables readers populate.
-//! Documents are validated against `bids_schema::INGESTION_METASCHEMA_JSON`. This model subsumes
-//! bidslake's previously-hardcoded `.tsv` gate, `.bval`/`.bvec` handling, and
-//! recording/ordering rules.
+//! (`concepts` to materialize, row `ordered`ing, `describes`, and whether columns the schema
+//! does not declare are stored — see [`Undeclared`]) is declared for the data tables readers
+//! populate. Documents are validated against `bids_schema::INGESTION_METASCHEMA_JSON`.
+//!
+//! Why this is a document rather than a predicate chain, and how an adapter's fragment merges
+//! onto `base.json`, is ADR 0002; the storage half of the per-table policy is ADR 0004.
 
 use std::collections::BTreeMap;
 
@@ -38,8 +40,28 @@ pub enum Disposition {
 /// One ordered file-disposition rule.
 #[derive(Debug, Clone, Deserialize)]
 pub struct IngestionRule {
+    /// BIDS selector expressions over the file's projected concepts; **all** must pass for
+    /// the rule to claim the file.
+    ///
+    /// Required by the metaschema, but defaulted here, and
+    /// [`do_selectors_select`](bids_schema::expression::do_selectors_select) treats an empty
+    /// list as vacuously true — so an empty list is a catch-all. A selector that fails to
+    /// *evaluate* counts as not selecting, which means a malformed expression makes the rule
+    /// permanently inert rather than an error at load.
+    ///
+    /// Regex escapes inside `match(x, "…")` take **one** backslash: the expression compiler
+    /// doubles backslashes before parsing, so a JSON string's own unescaping hands the regex
+    /// what was written. Pre-doubling yields a pattern matching a literal backslash — still a
+    /// valid regex, so the rule loads and then never fires. A term map's `Template` is
+    /// compiled as a regex directly and is *not* doubled; the two conventions differ.
     #[serde(default)]
     pub selectors: Vec<String>,
+    /// What happens to a file this rule claims. Required.
+    ///
+    /// Only the first matching rule decides — [`Ingestion::classify`] stops there — so rules
+    /// are written narrowest-first and a later rule never reconsiders a file an earlier one
+    /// took. A file no rule claims is neither read nor ignored: it still earns a registry
+    /// row, which is what distinguishes "unclaimed" from [`Disposition::Ignore`].
     pub disposition: Disposition,
     /// Reader name (present when `disposition == Read`).
     #[serde(default)]
@@ -64,7 +86,7 @@ pub enum Undeclared {
 }
 
 /// A declaration that a table's rows are facts about *other* files — the data files its
-/// source file is associated with — resolved through `file_associations` (docs/adr/0007).
+/// source file is associated with — resolved through `file_associations` (docs/adr/0003).
 ///
 /// The relation itself comes from the BIDS schema's `meta.associations`; what this adds is
 /// the two things that document cannot carry, because the metaschema pins its entries to
@@ -107,6 +129,14 @@ pub struct ScopedUndeclared {
     /// BIDS selector expressions over the file's projected concepts; all must pass.
     #[serde(default)]
     pub selectors: Vec<String>,
+    /// The policy for the files those selectors match. Required — unlike
+    /// [`TablePolicy::undeclared`] a scoped entry has nothing to fall back *to*, so an entry
+    /// that declared no policy would match a file and then say nothing about it.
+    ///
+    /// Scoping never changes the table's shape: the DDL reads the static
+    /// [`TablePolicy::undeclared`], so a table with `undeclaredWhen` entries still gets its
+    /// `other_data` column, and `catalog` here means the column is left NULL for the matched
+    /// files rather than absent for all of them.
     pub undeclared: Undeclared,
 }
 
@@ -147,7 +177,7 @@ pub struct TablePolicy {
     /// column.
     #[serde(default, rename = "ignoreKeys")]
     pub ignore_keys: Vec<String>,
-    /// That this table's rows describe *other* files, and how to reach them (docs/adr/0007).
+    /// That this table's rows describe *other* files, and how to reach them (docs/adr/0003).
     #[serde(default)]
     pub describes: Option<Describes>,
 }
@@ -344,9 +374,8 @@ impl Ingestion {
             .unwrap_or_default()
     }
 
-    /// The source keys `table` never stores (see [`TablePolicy::ignore_keys`]). Empty
-    /// for every table by default, so the check is one `is_empty` on the hot path.
-    /// Source keys `table` never stores.
+    /// The source keys `table` never stores (see [`TablePolicy::ignore_keys`]). Empty for
+    /// every table by default, so the check is one `is_empty` on the hot path.
     ///
     /// Consulted on the JSON parse path only, which means `sidecars` in practice — the
     /// metaschema description says so, `ignore_keys_is_honoured_on_sidecars_only` below pins the
@@ -358,11 +387,6 @@ impl Ingestion {
             .unwrap_or_default()
     }
 
-    /// A table's undeclared-column policy for one specific file: the first matching
-    /// `undeclaredWhen` entry, else the static [`Self::undeclared`].
-    ///
-    /// Returns early for a table with no policy at all — the overwhelmingly common
-    /// case — so a plain BIDS ingest evaluates no selectors.
     /// Whether [`Self::undeclared_for`] will actually consult its `FileContext` for `table`.
     ///
     /// It only does so when the table declares `undeclaredWhen`, which no bundled fragment but
@@ -375,6 +399,16 @@ impl Ingestion {
             .is_some_and(|p| !p.undeclared_when.is_empty())
     }
 
+    /// A table's undeclared-column policy for one specific file: the first matching
+    /// `undeclaredWhen` entry, else the static [`Self::undeclared`].
+    ///
+    /// Returns early for a table with no policy at all — the overwhelmingly common case — so
+    /// a plain BIDS ingest evaluates no selectors, and an unrecognized table name answers
+    /// [`Undeclared::Store`] rather than erroring.
+    ///
+    /// This is the *per-row* question, and it can disagree with the DDL: the table's shape
+    /// was fixed by [`Self::undeclared`], so `Catalog` here means the row leaves `other_data`
+    /// NULL, not that the column is missing.
     pub fn undeclared_for(&self, table: &str, ctx: &FileContext) -> Undeclared {
         let Some(policy) = self.tables.get(table) else {
             return Undeclared::Store;

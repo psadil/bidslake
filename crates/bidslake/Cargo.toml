@@ -26,6 +26,7 @@ bids-schema = { path = "../bids-schema" }
 tempfile = { workspace = true }
 criterion = { workspace = true }
 rstest = { workspace = true }
+proptest = { workspace = true }
 
 [[bench]]
 name = "ingest"
@@ -46,3 +47,6 @@ default = ["s3"]
 # which is what actually reads `s3://` tabular files, is part of the bundled
 # engine either way.
 s3 = ["dep:aws-sdk-s3", "dep:aws-config"]
+
+[lints]
+workspace = true

@@ -21,7 +21,7 @@ dependencies = [
 s3 = ["s3fs"]
 
 [dependency-groups]
-dev = ["pytest>=8", "ty", "ruff", "prek"]
+dev = ["pytest>=8", "hypothesis>=6.100", "ty", "ruff", "prek"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -50,4 +50,16 @@ extend-exclude = [
 ]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "C4", "RUF"]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4", "RUF", "D"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+# A test's docstring carries the *why* — the relationship between two calls, the failure
+# mode an assertion rules out (CONTRIBUTING.md). Requiring one on every test would instead
+# produce 141 restatements of the test's own name, which the convention calls worse than
+# none. Only the "you must have one" rule is dropped, and only here: D100 still requires a
+# module docstring saying what the file covers, and every D2xx/D4xx rule still applies, so
+# the docstrings that do exist stay well-formed.
+"tests/**" = ["D103"]

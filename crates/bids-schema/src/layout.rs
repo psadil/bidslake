@@ -6,35 +6,19 @@
 //! consumer hardcodes the convention, which is how a script ends up with two dozen
 //! properties that are nothing but string joins.
 //!
-//! ## Why this is a separate document from the term map
+//! A separate document from the term map, not a term map run backwards: a term map is
+//! non-invertible, because the PCRE collapsing that lets one mapping cover a whole class of
+//! paths leaves no single filename to render back. ADR 0002 measures that on a `recon-all`
+//! tree and settles it. So a term map keeps PCRE and stays read-only, while a layout declares
+//! the roles that *can* be written, in a syntax that can write them.
 //!
-//! Not tidiness — the two directions genuinely cannot share one template.
+//! ## What stops the two drifting
 //!
-//! Term-map templates are PCRE, pinned by ADR 0002 §2 because optional groups collapse
-//! FreeSurfer's `sub-01_ses-1` / `sub-01` / bare `bert` subject-directory forms into one
-//! mapping. That collapsing is exactly what makes them non-invertible: there is no single
-//! filename to render `(?:sub-)?(?P<subject>[0-9A-Za-z]+)` back into.
-//!
-//! Replacing PCRE with `{var}` interpolation does not fix it, because invertibility is a
-//! property of the *mapping*, not of the syntax. Measured against a real `recon-all` tree
-//! (657 files): the 8 PCRE mappings recognize all of them, while a pure-`{var}` rewrite
-//! needs 12 mappings, recognizes 430, and loses 227 — the catch-alls (`label/*.annot`,
-//! `mri/*.mgz`) that match a whole *class* of filenames. Those cannot be enumerated, and
-//! cannot be rendered either: there is no concept to render *from*. It also over-matches
-//! where alternation was doing work, labelling `mri/T1.mgz` as `seg=T1`.
-//!
-//! So a term map keeps PCRE and stays read-only; a layout declares the roles that *can* be
-//! written, in a syntax that can write them.
-//!
-//! ## What stops them drifting
-//!
-//! Two documents describing one tree is a drift risk, and co-locating them would only
-//! prevent *textual* drift. Instead every layout must carry `Examples`, and
-//! `Layout::validate_round_trip` renders **every role under every example** and feeds the
-//! result back through the named term map. If `classify(render(role))` does not reproduce
-//! the role's declared concepts, the layout **fails to load**. The two directions are
-//! therefore verifiably in agreement rather than merely adjacent, and a rename on either
-//! side is an error at load time rather than a tree nothing can read back.
+//! Every layout must carry `Examples`, and `Layout::validate_round_trip` renders **every role
+//! under every example** and feeds the result back through the named term map. If
+//! `classify(render(role))` does not reproduce the role's declared concepts, the layout
+//! **fails to load**, so a rename on either side is an error at load time rather than a tree
+//! nothing can read back.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -50,26 +34,68 @@ pub const LAYOUT_METASCHEMA_JSON: &str = include_str!("../data/layout-metaschema
 /// An error loading, validating, or rendering a layout.
 #[derive(Debug, thiserror::Error)]
 pub enum LayoutError {
+    /// [`load_layout`] could not read the file. Only the on-disk entry point raises this; a
+    /// bundled layout is `include_str!`d and never touches the filesystem.
     #[error("reading layout {path}")]
     Read {
+        /// The path as displayed, carried separately because an [`std::io::Error`] does not
+        /// name the file it failed on.
         path: String,
+        /// The underlying read failure — no such file, no permission, not UTF-8.
         #[source]
         source: std::io::Error,
     },
+    /// The text is not JSON, or — having already passed the metaschema — does not deserialize
+    /// into [`LayoutFile`]. The second case is a disagreement between
+    /// [`LAYOUT_METASCHEMA_JSON`] and these structs rather than anything the author did, since
+    /// the metaschema types every key it names, and the untyped `x_` extensions it also admits
+    /// (against the empty schema `{}`, so they may hold any JSON at all) are ones serde drops.
     #[error("parsing layout {path} as JSON")]
     Parse {
+        /// The file path, or whatever label [`load_layout_str`] was handed when the document
+        /// did not come from disk: a bundled layout's name, `"<test>"`.
         path: String,
+        /// The serde failure, whose own message carries the line and column or the offending
+        /// key.
         #[source]
         source: serde_json::Error,
     },
+    /// The document is JSON but violates [`LAYOUT_METASCHEMA_JSON`] — a role with no
+    /// `Template`, an absent or empty `Examples`, a role name outside `^[a-zA-Z0-9_]+$`, a
+    /// stray key that is not `x_`-prefixed.
     #[error("layout does not conform to the layout metaschema:\n{}", .violations.join("\n"))]
-    Invalid { violations: Vec<String> },
+    Invalid {
+        /// Every violation [`validate_layout`] found, each rendered ``  at `<instance path>`:
+        /// <message>`` — the pointer is itself backticked, which is what a grep or a snapshot
+        /// review sees. Sorted lexicographically on the whole formatted string, then
+        /// deduplicated, so the list is stable across runs and is not in document order.
+        /// Lexicographic is pointer-major but not numeric: `` at `/Examples/10` `` lands before
+        /// `` at `/Examples/2` ``. Never empty when this variant is constructed.
+        violations: Vec<String>,
+    },
+    /// A role's template — or, at render time, the interpolated path — is one `check_template`
+    /// refuses: empty, absolute, or carrying a `..` segment. Raised while loading.
+    /// [`Layout::render`] applies the same check to the interpolated path but drops the error
+    /// for a `None`, so a caller only ever receives this variant from a load.
     #[error("layout role {role:?} has an unsafe template {template:?}: {reason}")]
     UnsafeTemplate {
+        /// The offending role's name — the only part of this variant that is a key in the
+        /// document, since `template` may be an interpolated string that appears nowhere in it.
         role: String,
+        /// The rejected string — the document's `Template` at load time, but the *interpolated*
+        /// result when the check runs inside [`Layout::render`], where a binding rather than
+        /// the document supplied the `..`.
         template: String,
+        /// Which rule was broken, drawn from a closed set of three phrases (`is empty`, `is
+        /// absolute`, and the `..` traversal one), which is why it is a `&'static str` and not
+        /// a `String`. The tests assert on it exactly: the bundled term map recognizes none of
+        /// the unsafe renders either, so `is_err()` alone stays true with the traversal guard
+        /// deleted, and naming the reason is what ties the test to the guard.
         reason: &'static str,
     },
+    /// The document's `TermMap` is not in [`crate::term_map::BUNDLED_TERM_MAP_NAMES`]. A term
+    /// map is resolved by name from the bundled set only — there is no way to point a layout
+    /// at a term-map file on disk, even when the layout itself was loaded from one.
     #[error("layout names term map {0:?}, which is not bundled")]
     UnknownTermMap(String),
     /// The two directions disagree — the whole point of `Examples`.
@@ -79,9 +105,23 @@ pub enum LayoutError {
          is wrong."
     )]
     RoundTrip {
+        /// The role whose declaration the projection contradicts. Whichever of the two
+        /// documents is wrong, this is the name to search for in both.
         role: String,
+        /// The full path that was classified — an [`Example::root`] with the role's rendered
+        /// [`Role::template`] joined under it, not the template itself, since the template
+        /// alone is not something the term map could be asked about.
         path: String,
+        /// [`LayoutFile::term_map`] verbatim — the name the document declared, already resolved
+        /// to a bundled term map by the time the round trip can fail, so it is the same in every
+        /// `RoundTrip` error one load produces. It is here so the message names both documents
+        /// that have to agree, not to distinguish this failure from its siblings.
         term_map: String,
+        /// How the projection differed, phrased as a fragment completing the message's
+        /// "…which term map `feat` __": `does not recognize at all` when nothing matched, or
+        /// `reads back with suffix Some("mask"), not "bold"` / `reads back with desc=None, not
+        /// "clean"` naming the first declaration that disagreed. Only that first one appears —
+        /// `datatype`, then `suffix`, then entities in key order, and the load stops there.
         detail: String,
     },
 }
@@ -90,16 +130,45 @@ pub enum LayoutError {
 // On-disk format.
 // ---------------------------------------------------------------------------
 
-/// A parsed layout document.
+/// A parsed layout document: the `data/layouts/<name>.json` artifact an author writes, one
+/// key per struct field.
+///
+/// [`LAYOUT_METASCHEMA_JSON`] is the authority on the format and this is only its Rust
+/// shadow — [`load_layout_str`] validates against the metaschema *before* deserializing, so
+/// every field below has already been type-checked and every required key is present by the
+/// time serde runs. All four keys are required. A key not listed here is a validation error
+/// unless it is `x_`-prefixed, which the metaschema admits on the document, on a role and on an
+/// example — but not inside `Concepts` or `Entities`, whose key rules leave no room for it
+/// (`additionalProperties: false` with no `^x_` pattern, and `^[a-zA-Z0-9]+$` respectively) —
+/// and which this struct discards wherever it is legal.
 #[derive(Debug, Clone, Deserialize)]
 pub struct LayoutFile {
+    /// Version of the *layout document format*, not of the tool whose tree it describes
+    /// (`feat.json` says `0.1.0`; FSL's own version appears nowhere in it). Required, but
+    /// nothing in this crate reads it: a document declaring a version this build has never
+    /// heard of loads exactly like one that does not, and there is no migration path.
     #[serde(rename = "LayoutVersion")]
     pub layout_version: String,
-    /// The bundled term map that reads back what this layout writes.
+    /// The bundled term map that reads back what this layout writes. Resolved by name through
+    /// [`crate::term_map::bundled_term_map`] alone, so a producer with no term map cannot have
+    /// a layout — the correct order, since a tree nothing can read back is a tree bidslake
+    /// cannot index (ADR 0002).
     #[serde(rename = "TermMap")]
     pub term_map: String,
+    /// Role name -> where that artifact sits, relative to a unit's output root. A *role* is
+    /// the stable name for a slot in the tree ("the highres-to-standard affine"), independent
+    /// of the filename convention that expresses it; role names are the consumer API
+    /// (`out["highres2standard_mat"]`), so renaming one breaks callers while changing its
+    /// [`Role::template`] does not (ADR 0002). At least one is required, and names are
+    /// confined to `^[a-zA-Z0-9_]+$` — a hyphen or a dot in a role name fails validation.
+    /// `BTreeMap`, so [`Layout::roles`] and the round trip walk them in lexicographic order,
+    /// never the document's.
     #[serde(rename = "Roles")]
     pub roles: BTreeMap<String, Role>,
+    /// Unit output roots to check every role against, required and non-empty. This is the only
+    /// thing binding the write direction to the read one, so a layout cannot opt out of the
+    /// check by declaring none (ADR 0002). Each is rendered under in turn and the first
+    /// disagreement aborts the load, so a document with two broken roles reports one.
     #[serde(rename = "Examples")]
     pub examples: Vec<Example>,
 }
@@ -107,12 +176,40 @@ pub struct LayoutFile {
 /// Where one named artifact sits, relative to a unit's output root.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Role {
+    /// A POSIX path relative to the unit's output root, with `{name}` placeholders filled from
+    /// the bindings supplied at render time. The only required key of a role. Most FEAT-style
+    /// slots are wholly literal (`reg/highres.nii.gz`) — placeholders are for what genuinely
+    /// varies, such as FIX's training set and threshold in
+    /// `fix4melview_{training}_thr{threshold}.txt`. Must be relative and free of any `..`
+    /// segment, checked at load time and again on the interpolated result, because bindings
+    /// are substituted verbatim (`check_template`).
     #[serde(rename = "Template")]
     pub template: String,
+    /// The `datatype`/`suffix` the named term map must project onto this role's rendered path.
+    /// Optional, and each half is optional in turn: whatever is unset is simply not compared,
+    /// so a role that declares no `Concepts` at all must still be *recognized* by the term map
+    /// but need agree about nothing. Declaring them is what turns a rename on either side into
+    /// a load-time error instead of files a pipeline writes and the index silently drops.
     #[serde(rename = "Concepts", default)]
     pub concepts: RoleConcepts,
+    /// BIDS entities the term map must project onto this role on top of [`Role::concepts`] —
+    /// `from`/`to`/`mode` on a registration transform, `desc` on a derivative. Empty by
+    /// default, which compares nothing. Keys are looked up through
+    /// [`crate::term_map::FileFacts::get`], which sees entities under BIDS *short* names, so
+    /// write `sub`/`ses` and not BEP-043's `subject`/`session`; the metaschema further confines
+    /// them to `^[a-zA-Z0-9]+$`, with no underscore — unlike role and binding names.
+    ///
+    /// The comparison is one-directional: entities the term map projects but this role omits
+    /// pass, while an entity declared here that the projection does not reproduce fails the
+    /// load. That asymmetry is deliberate, and it is what stops the block being repurposed as
+    /// a query for the file that will *fill* the role — a role names a destination, not a
+    /// source (ADR 0002).
     #[serde(rename = "Entities", default)]
     pub entities: BTreeMap<String, String>,
+    /// What this slot is, for a human reading the layout rather than the tree; `None` when the
+    /// author wrote none. Nothing validates or renders it — it reaches Python through
+    /// `PyLayout::description` and is surfaced verbatim as `bidslake.Layout.describe(role)`,
+    /// which is the only reason it is carried past the parse.
     #[serde(rename = "Description", default)]
     pub description: Option<String>,
 }
@@ -120,8 +217,14 @@ pub struct Role {
 /// The datatype/suffix a role's rendered path must project onto.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct RoleConcepts {
+    /// The BIDS datatype the round trip must reproduce — `func` for FEAT's
+    /// `filtered_func_data.nii.gz`, `anat` for `reg/highres.nii.gz`. `None` leaves the rendered
+    /// path's datatype unconstrained; it does not assert the term map projects none.
     #[serde(default)]
     pub datatype: Option<String>,
+    /// The BIDS suffix the round trip must reproduce — `bold`, `mask`, `xfm`, `components`.
+    /// `None` leaves it unconstrained on the same terms as [`RoleConcepts::datatype`]: there is
+    /// no way to declare that a role's path must project *no* suffix.
     #[serde(default)]
     pub suffix: Option<String>,
 }
@@ -129,8 +232,25 @@ pub struct RoleConcepts {
 /// A unit output root to validate every role against.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Example {
+    /// A unit output-root directory name, relative to the dataset root — for FEAT, the BIDS
+    /// stem of the run the tree was built from
+    /// (`sub-01_ses-V1_task-rest_run-01_desc-preproc_bold`). Required. Every rendered role is
+    /// joined under it, one `/` with trailing slashes trimmed, and the join handed to the term
+    /// map, so this has to be a string that term map can parse: it carries the entities — `sub`,
+    /// `task`, `run` — that the roles' own filenames do not. A plausible-looking but
+    /// unparseable root such as `out/` makes every role fail to classify and the whole layout
+    /// fail to load.
     #[serde(rename = "Root")]
     pub root: String,
+    /// Values for the `{name}` placeholders this layout's roles use, for validation only — the
+    /// caller supplies their own at [`Layout::render`], and nothing here reaches a rendered
+    /// path at run time.
+    ///
+    /// A role whose placeholders are not all bound here is **skipped by this example**, and
+    /// skipped silently: a placeholder role is checked only if some example binds it, and
+    /// nothing — not the metaschema, not the load — detects a role that no example covers.
+    /// `feat.json` binds `training`, `threshold` and `rater` in both of its examples for
+    /// precisely that reason.
     #[serde(rename = "Bindings", default)]
     pub bindings: BTreeMap<String, String>,
 }
@@ -178,9 +298,18 @@ impl Layout {
     /// `None` if the role is unknown or a placeholder is unbound — an unbound placeholder
     /// must not silently render as empty, since that produces a plausible-looking path
     /// pointing at the wrong file.
+    /// `None` also when the bindings would render a path that leaves the root — see
+    /// `check_template`, which runs here against the interpolated result as well as at load
+    /// time against the template.
     pub fn render(&self, role: &str, bindings: &BTreeMap<String, String>) -> Option<String> {
         let spec = self.file.roles.get(role)?;
-        interpolate(&spec.template, bindings)
+        let rendered = interpolate(&spec.template, bindings)?;
+        // `check_template` ran at load time against the *template*, which is the half of the
+        // guarantee the document controls. Binding values are substituted verbatim, so a
+        // caller's `training = "../.."` reconstitutes exactly what the template was checked
+        // for. Re-checking the rendered path is what makes the guarantee whole.
+        check_template(role, &rendered).ok()?;
+        Some(rendered)
     }
 
     /// Render every role under every example and check the named term map reads each back
@@ -245,8 +374,19 @@ fn interpolate(template: &str, bindings: &BTreeMap<String, String>) -> Option<St
     Some(out)
 }
 
-/// A template must stay inside the unit's output root: it is joined to a caller-supplied
-/// directory, so an absolute path or a `..` would silently write outside the tree.
+/// A path must stay findable from the root it is joined to: it is appended to a
+/// caller-supplied directory, so an absolute path or a `..` would silently address something
+/// outside the tree.
+///
+/// "Findable from the root" rather than "textually inside it", because the two come apart. A
+/// rendered `sub-01.feat/x_../../../etc/cron.d/y` still *starts with* the root and normalizes
+/// outside it, so a `starts_with` check reports a safety that is not there. And the root may be
+/// an `s3://` URI, where joining is pure concatenation and `..` is a literal key component — so
+/// a traversal segment does not escape, it addresses a different object that will never be
+/// found again. One rule avoids both: no traversal segment at all.
+///
+/// Applied at load time to the template, which is the half the document controls, and again in
+/// [`Layout::render`] to the interpolated result, which is the half the caller controls.
 fn check_template(role: &str, template: &str) -> Result<(), LayoutError> {
     let bad = |reason| LayoutError::UnsafeTemplate {
         role: role.to_string(),
@@ -335,6 +475,7 @@ pub fn load_layout(path: &Path) -> Result<Layout, LayoutError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use rstest::rstest;
 
     fn feat() -> Layout {
@@ -456,6 +597,46 @@ mod tests {
                      if t == template && *r == reason),
             "expected UnsafeTemplate({reason:?}) for {template:?}, got {err:?}"
         );
+    }
+
+    proptest! {
+        /// A rendered path never carries a traversal segment, whatever the bindings say.
+        ///
+        /// `unsafe_templates_are_rejected` above covers the half of this the *document*
+        /// controls. This is the half the *caller* controls, and it was open: `interpolate`
+        /// substitutes binding values verbatim, so `training = "../.."` rebuilds exactly the
+        /// shape `check_template` exists to refuse. On the bundled `feat` layout that rendered
+        /// `<root>/fix4melview_../../../../../etc/cron.d/x_thr20.txt`, which normalizes to
+        /// `/etc/cron.d/x_thr20.txt` — and `LayoutAt.mkdir` calls `mkdir(parents=True)` on
+        /// whatever comes back.
+        ///
+        /// A `starts_with(root)` check does not catch it: that string *does* start with the
+        /// root. Asserting on the segments is also what makes this true for an `s3://` root,
+        /// where `..` is a literal key component rather than a parent.
+        #[test]
+        fn a_rendered_path_never_carries_a_traversal_segment(
+            training in prop_oneof![
+                "[0-9A-Za-z]{1,6}",
+                Just("..".to_string()),
+                Just("/etc/passwd".to_string()),
+                "[0-9A-Za-z]{0,3}(/\\.\\.){1,3}/[0-9A-Za-z]{0,3}",
+            ],
+            threshold in "[0-9]{1,3}",
+        ) {
+            let bindings = BTreeMap::from([
+                ("training".to_string(), training),
+                ("threshold".to_string(), threshold),
+            ]);
+
+            let rendered = feat().render("classification", &bindings);
+
+            prop_assert!(
+                rendered.as_deref().is_none_or(|p| {
+                    !p.starts_with('/') && !p.split('/').any(|segment| segment == "..")
+                }),
+                "rendered {rendered:?}"
+            );
+        }
     }
 
     #[test]

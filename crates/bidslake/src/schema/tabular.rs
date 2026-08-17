@@ -67,7 +67,23 @@ pub enum Selector {
     /// `datatype == "eeg"` (or single-quoted `'phenotype'`).
     Datatype(String),
     /// `sidecar.PhysioType == "eyetrack"`, `sidecar.PlasmaAvail == true`.
-    Sidecar { key: String, value: Value },
+    Sidecar {
+        /// The metadata field, with the selector's `sidecar.` prefix stripped — `PhysioType`,
+        /// `PlasmaAvail`. Looked up in the *merged* sidecar ([`FileContext::sidecar`]), so a
+        /// value inherited from a dataset-level JSON satisfies the condition exactly as a
+        /// local one does.
+        key: String,
+        /// The literal the field must equal, parsed by the same rules as any other selector's
+        /// right-hand side: in BIDS 1.11 that is `true` for the four `pet.Blood*` overlays and
+        /// the string `"eyetrack"` for `physio.PhysioEyeTracking`.
+        ///
+        /// Nothing that routes a file ever compares against it. Matching runs on the raw
+        /// selector string through the shared evaluator ([`TabularRule::matches_with`]), and
+        /// grouping discards the whole variant as a non-identity selector before any value is
+        /// examined — so this copy is read only by `Debug` and by the tests that pin the
+        /// parser.
+        value: Value,
+    },
     /// `dataset.dataset_description.DatasetType == "derivative"`.
     DatasetType(String),
     /// Any selector string this module does not understand.
@@ -226,8 +242,28 @@ pub enum RowIdentity {
 /// A materialized DuckDB table derived from one or more rules.
 #[derive(Clone, Debug)]
 pub struct TableSpec {
+    /// The DuckDB table name: the base rule's leaf name, snake-cased, with a trailing
+    /// `_columns` dropped (`PhysioColumns` → `physio`). Unique across [`Tabular::tables`], and
+    /// it has to be — it is the key the generated definition is filed under in
+    /// [`crate::schema::Schema`], where a second spec of the same name replaces the first in
+    /// silence rather than colliding.
     pub table: String,
+    /// The union of the group's columns (see the module docs), deduped by resolved TSV header
+    /// rather than by schema key, with a header two rules claim at different types widened to
+    /// `TEXT`.
+    ///
+    /// Not the same list as the emitted DDL. The generator drops entries a structural column
+    /// already carries — `filename` on a [`RowIdentity::PerFile`] table *is* the registry's
+    /// path, `participant_id`/`session_id` on an entity table are primary-key columns — and
+    /// prepends the structural columns themselves. Nor is it the columns a *file* has: a
+    /// header no rule declares is the ingestion policy's business, landing in `other_data` or
+    /// in `tabular_undeclared_columns`.
     pub columns: Vec<ColumnSpec>,
+    /// How rows are keyed, and so which primary key and structural columns the DDL gets.
+    /// Decided by a fixed policy on the table *name*, not by anything in `rules.tabular_data`,
+    /// which does not express it: `participants`/`sessions` are entity-keyed, `scans` is
+    /// file-keyed, and everything else — including any table a future rule adds — is
+    /// [`RowIdentity::PerRow`].
     pub identity: RowIdentity,
     /// Whether the table has a `file_path` column (and thus gets the generated
     /// virtual BIDS-concept columns). True for everything except entity tables.
@@ -267,6 +303,15 @@ impl Tabular {
         }
     }
 
+    /// Every table `rules.tabular_data` implies — one per group of rules sharing an identity,
+    /// so the 28 rules of BIDS 1.11 yield 23 specs. Deterministically ordered (rules are
+    /// sorted by dotted id before grouping), which is what keeps the emitted DDL byte-stable
+    /// across runs.
+    ///
+    /// The *declared* set only, and the caller is usually the one that has to notice the gap:
+    /// a headerless recording the schema gives no column rule (`stim`, `motion`) is absent
+    /// here and is generated as a bare row table elsewhere, and the hand-written tables of
+    /// [`super::STATIC_TABLES`] were never rules at all.
     pub fn tables(&self) -> &[TableSpec] {
         &self.tables
     }
@@ -325,12 +370,39 @@ impl Tabular {
 /// sidecar. `path` is dataset-relative **with a leading slash** (to match
 /// `path == "/participants.tsv"` selectors).
 pub struct FileContext<'a> {
+    /// The path the walk produced — relative to the root it was walked from, prefixed with
+    /// the slash described above. A `path ==` selector compares it whole, never by basename,
+    /// so only a `participants.tsv` sitting at the top of a root routes to `participants`; one
+    /// under `phenotype/` or inside a derivative subdirectory matches no path rule.
     pub path: &'a str,
+    /// The BIDS datatype directory the file belongs to (`eeg`, `func`), or `None` when the
+    /// path names none. This is the field that separates `eeg_channels` from `meg_channels`,
+    /// so a `_channels.tsv` arriving with `None` matches no modality rule and routes nowhere.
+    /// That is why the ingest pipeline infers one for a table sitting *above* a datatype
+    /// directory (a session-level `channels.tsv`) from the datatype directories beneath it,
+    /// and deliberately leaves this `None` when more than one candidate would route.
     pub datatype: Option<&'a str>,
+    /// The BIDS suffix, without the leading underscore and without the extension — `events`,
+    /// `channels`, and `participants` for a bare `participants.tsv`. Every rule but
+    /// `Participants`, `Samples` and `Phenotype` selects on it, so `None` means almost nothing
+    /// can match; the ingest path always supplies it, and it is `None` only in a
+    /// [`FileContext::default`] built for a caller that is not routing a file.
     pub suffix: Option<&'a str>,
+    /// The extension **with** its leading dot, and kept whole for compound forms: `.tsv.gz`,
+    /// never `.gz`. Selectors test it for equality, which is what lets a `*_physio.tsv.gz`
+    /// still reach `PhysioColumns` — that rule selects on suffix alone — while every rule
+    /// demanding `extension == ".tsv"` declines it.
     pub extension: Option<&'a str>,
     /// The merged sidecar (inheritance already applied), or `Value::Null`.
     pub sidecar: &'a Value,
+    /// `dataset_description.json`'s `DatasetType` (`raw`/`derivative`), taken from the
+    /// **root** description only — a nested one under `derivatives/` describes a different
+    /// dataset and never sets it.
+    ///
+    /// One rule in BIDS 1.11 reads it, `SegmentationLookup`, and it demands `"derivative"`.
+    /// So a `*_dseg.tsv` in a dataset that does not declare that — including one with no
+    /// description at all, where this is `None` — does not reach `segmentation_lookup`, and
+    /// nothing else in the model notices the difference.
     pub dataset_type: Option<&'a str>,
 }
 

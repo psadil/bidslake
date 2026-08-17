@@ -1,0 +1,26 @@
+# The bidslake book: narrative documentation (guides and architecture decisions).
+# The API reference is rustdoc, not this book — `cargo doc --open`.
+#
+#   cargo install mdbook
+#   mdbook serve          # live-reloading preview on http://localhost:3000
+#   mdbook build          # render to target/book
+#
+# `src = "docs"` so the sources stay browsable on GitHub as ordinary markdown
+# rather than being hidden under a `src/` directory that only mdbook understands.
+
+[book]
+title = "bidslake"
+authors = ["Patrick Sadil"]
+language = "en"
+src = "docs"
+
+[build]
+# Under `target/` so it inherits the existing gitignore rather than needing a new one.
+build-dir = "target/book"
+# Fail rather than inventing an empty page for a SUMMARY entry whose file is missing.
+# An advertised chapter that turns out to be blank is worse than no chapter.
+create-missing = false
+
+[output.html]
+git-repository-url = "https://github.com/psadil/bidslake"
+edit-url-template = "https://github.com/psadil/bidslake/edit/main/{path}"

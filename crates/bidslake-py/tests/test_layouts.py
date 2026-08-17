@@ -8,6 +8,7 @@ actual index of a tree built from those very paths.
 
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -95,12 +96,12 @@ def test_placeholders_come_from_keywords(
 def test_unbound_placeholder_raises_rather_than_guessing(feat: bidslake.Layout) -> None:
     """An empty substitution would produce a plausible path pointing at nothing.
 
-    The guarantee ADR 0008 states; binding at `under()` (below) moved only the *moment*
+    The guarantee ADR 0002 states; binding at `under()` (below) moved only the *moment*
     of binding, not this.
     """
     at = feat.under(Path("/work") / UNIT)
 
-    with pytest.raises(KeyError, match="unbound placeholders"):
+    with pytest.raises(KeyError, match="is unbound"):
         at["classification"]
 
 
@@ -192,7 +193,7 @@ def test_rendered_paths_index_back_as_declared(
 #
 # `feat`'s two `classification` roles render `fix4melview_{training}_thr{threshold}.txt`,
 # and those values are the pipeline's configuration rather than anything the layout knows.
-# Raising for an unbound one is right (docs/adr/0008) and is pinned above. What these add is
+# Raising for an unbound one is right (docs/adr/0002) and is pinned above. What these add is
 # that the values may be supplied *once*, where the root is, since they have the same
 # lifetime — before this, `for role in layout.roles: at[role]` was an error and every
 # consumer that walked the role list special-cased the same two names by hand.
@@ -343,8 +344,11 @@ def test_a_renderable_role_is_reported(partially_bound):
 
 
 def test_an_unrenderable_role_is_omitted_not_reported_absent(partially_bound):
-    """Conflating them would report a finished tree as incomplete because a caller forgot a
-    keyword — which is exactly the confusion the raise on `path()` exists to prevent."""
+    """Exactly the confusion the raise on `path()` exists to prevent.
+
+    Conflating them would report a finished tree as incomplete because a caller forgot a
+    keyword.
+    """
     assert "classification_by_rater" not in partially_bound.present()
 
 
@@ -408,3 +412,50 @@ def test_the_whole_tree_digest_still_moves(after_an_unrelated_write):
     at, _, whole = after_an_unrelated_write
 
     assert at.digest() != whole
+
+
+#: Binding values that put a real `..` *segment* into the rendered path, so it normalizes
+#: outside the root it was joined to. `feat`'s placeholder sits mid-segment
+#: (`fix4melview_{training}_thr{threshold}.txt`), so a value has to carry its own separators
+#: to produce one — which is exactly why the check is on the rendered path rather than on the
+#: binding.
+TRAVERSING_BINDINGS = ["a/../../../etc/cron.d/x", "x/../..", "../../y"]
+
+
+@pytest.mark.parametrize("training", TRAVERSING_BINDINGS, ids=lambda v: v)
+def test_a_binding_cannot_render_a_path_outside_the_root(tmp_path, training):
+    """A binding that would traverse out of the root is refused rather than rendered.
+
+    ``check_template`` guarded the *template*, which the layout document controls, while
+    binding values were substituted verbatim — so a caller reconstituted exactly the shape it
+    exists to refuse. ``training='a/../../../etc/cron.d/x'`` rendered a path whose
+    ``normpath`` is ``/etc/cron.d/x_thr20.txt``, and :meth:`mkdir` calls
+    ``mkdir(parents=True)`` on whatever comes back.
+
+    The naive check does not catch it: the rendered string *does* start with the root.
+    """
+    at = bidslake.layout("feat").under(tmp_path)
+
+    with pytest.raises(KeyError, match="could not be rendered"):
+        at.path("classification", training=training, threshold="20")
+
+
+#: Values that *look* dangerous and are not, because the placeholder is mid-segment: each
+#: renders one literal filename. Kept as a test because the tempting fix — rejecting any
+#: binding containing `..` or `/` — would break all three, and they are legal.
+INNOCENT_BINDINGS = ["..", "../..", "/etc/passwd"]
+
+
+@pytest.mark.parametrize("training", INNOCENT_BINDINGS, ids=lambda v: v)
+def test_a_binding_that_stays_inside_the_root_still_renders(tmp_path, training):
+    """`..` inside a filename is not a traversal, and is not refused for looking like one.
+
+    ``training='..'`` renders ``fix4melview_.._thr20.txt`` — one component, no parent
+    reference. The guard is on the rendered path's *segments*, so it declines exactly the
+    values that produce a `..` segment and no others.
+    """
+    at = bidslake.layout("feat").under(tmp_path)
+
+    rendered = at.path("classification", training=training, threshold="20")
+
+    assert Path(os.path.normpath(rendered)).is_relative_to(tmp_path)

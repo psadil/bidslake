@@ -39,9 +39,9 @@ def test_a_satellite_carries_no_concepts(lake, satellite):
 
 
 def test_a_satellite_is_queried_by_concept_anyway(lake):
-    """`get` joins a file-keyed table back to the registry, so a concept filter reaches a
-    table that stores no concepts at all (docs/adr/0006).
+    """A concept filter reaches a table that stores no concepts at all (docs/adr/0006).
 
+    `get` joins a file-keyed table back to the registry, which is what makes that possible.
     `sidecars` rather than `scans`: the fixtures ship no `scans.tsv`, and `scans` is that
     file's satellite. That it stores no concepts is pinned above.
     """
@@ -70,8 +70,11 @@ def test_roots_reports_location_and_tenure(roots):
 
 
 def test_an_ordinary_index_records_attached_tenure(roots):
-    """`tenure` is what stops a consumer treating a catalog row as a statement about the
-    present (docs/adr/0009); `attached` is what an ordinary `index` promises."""
+    """`attached` is what an ordinary `index` promises.
+
+    `tenure` is what stops a consumer treating a catalog row as a statement about the
+    present (docs/adr/0007).
+    """
     assert set(roots["tenure"].to_list()) == {"attached"}
 
 
@@ -128,12 +131,17 @@ def pre_tenure_roots(tmp_path_factory: pytest.TempPathFactory):
 
 
 def test_a_pre_tenure_catalog_still_opens(pre_tenure_roots):
-    """`index` is the only command that runs DDL and this package opens read-only, so a
-    reader that insisted on the column could not open such a catalog at all."""
+    """A reader that insisted on the column could not open such a catalog at all.
+
+    `index` is the only command that runs DDL, and this package opens read-only.
+    """
     assert set(pre_tenure_roots.columns) == {"dataset_id", "root_uri", "tenure"}
 
 
 def test_a_pre_tenure_root_reads_as_attached(pre_tenure_roots):
-    """`attached` because it is what that root actually promised — the same value the
-    write-side backfill (`ALTER TABLE … DEFAULT 'attached'`) would have given it."""
+    """`attached` because it is what that root actually promised.
+
+    The same value the write-side backfill (`ALTER TABLE … DEFAULT 'attached'`) would have
+    given it.
+    """
     assert pre_tenure_roots["tenure"].to_list() == ["attached"]

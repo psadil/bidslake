@@ -1,144 +1,130 @@
 # ADR 0004 — Storage is a policy, not an invariant
 
-Status: accepted (2026-07-30)
+```
+ADR: 0004
+Title: Storage is a policy, not an invariant
+Status: Provisional
+Type: Design
+Created: 30-Jul-2026
+Requires: 0001, 0002, 0006
+```
 
-Relates to: the ingestion schema (ADR 0002 §4/§6), the `other_data` overflow column
-(`schema.rs`), and the tabular ingest (`bids.rs`).
+## Abstract
 
-## Context
+A table stores what its schema declares, not what its files contain. `other_data`, the JSON overflow
+column, is conditional: a tabular table declaring `undeclared: catalog` has none and records the
+dropped names in `tabular_undeclared_columns`; a scoped policy keeps it and records nothing.
 
-`other_data` has been in bidslake since the initial commit, documented as an invariant:
-*"an overflow column on most tables. Any source field without a dedicated column is
-preserved here, so nothing is lost."* No ADR ever revisited it.
+## Motivation
 
-Profiling a real catalog — 12 fMRIPrep derivative datasets, 2 subjects, 48 confounds
-files — showed what that costs:
+`other_data` preserves every source field a table has no dedicated column for. An fMRIPrep
+`desc-confounds_timeseries.tsv` carries ~1,800 columns, of which the bundled fmriprep overlay
+declares 13 (six motion parameters, `framewise_displacement`, `dvars`, `csf`, …); the rest, mostly
+aCompCor components, become one JSON object per volume.
 
-| | size | share of used space |
-|---|---|---|
-| `fmriprep_confounds.other_data` | **1,160 MB** | **97.3%** |
-| `sidecars.other_data` (48 confounds sidecars, 366 KB each) | 16.8 MB | 1.4% |
-| everything else (40 tables) | ~19 MB | 1.3% |
+Profiled 2026-07 on 12 fMRIPrep derivative datasets, 2 subjects each, 48 confounds files — ~70,000
+rows in 1.74 GB. `fmriprep_confounds.other_data` was 1,160 MB of it: 97.3% of used space, ~56 KB per
+JSON object, ~24 MB per confounds file; `sidecars.other_data` another 16.8 MB. At participants ×
+sessions × runs, a multi-session study reaches terabytes from confounds alone.
 
-The whole catalog held ~70,000 rows and was 1.74 GB.
+The dial that exists is whole-file: [ADR 0002](0002-adapters-and-layouts.md)'s ingestion rules give
+a file `disposition: read | catalog | ignore`. A confounds file has to be `read` — motion
+parameters, FD and DVARS are the point of it — and nothing in that model, or elsewhere in the BIDS
+schema, says "read this file, but not those columns".
 
-fMRIPrep confounds TSVs carry ~1,800 columns; the fmriprep overlay declares 13. The
-other ~1,785 — mostly CompCor components — went into `other_data` as a per-row JSON
-object of ~56 KB, of which **53% was repeated key names**: the column list
-re-serialized once per volume, where the source TSV writes its header once. DuckDB
-stores the column `Uncompressed`, because at 56 KB every value is an overflow string
-and dictionary/FSST encoding never applies.
+## Rationale
 
-At ~24 MB of database per confounds file, the projection to a large study is the whole
-problem: it scales linearly in confounds files, which is participants × sessions × runs, so
-a real multi-session study reaches terabytes from confounds alone.
+Measured (release build) on a dataset rebuilt from that catalog (8 confounds files, 1,798 columns ×
+450 rows, real 2,151-key sidecars): 207.26 MB in 829 blocks with the fmriprep overlay alone, 8.76 MB
+in 35 blocks once `--adapter fmriprep` adds the ingestion fragment — **23.7× smaller**. At 16
+subjects (64 files, 28,800 rows) it is still 8.7 MB — DuckDB's 256 KB per-segment minimum and the
+schema blob, not data. No size/speed trade: the policy only shrinks the SELECT list.
 
-### Encoding is not the fix
+`sidecars` is one table for every file in the catalog, so a table-wide flag there would strip custom
+metadata from all raw BIDS to reach one derivative's sidecars. Scoped, it drops fMRIPrep's
+`desc-confounds_timeseries.json` — a ~366 KB dictionary of ~2,200 confound descriptions per BOLD
+run — while an ordinary `_bold.json` beside it keeps its custom fields, and costs a plain BIDS
+ingest nothing: only a table declaring `undeclaredWhen` has selectors evaluated.
 
-Four alternatives were measured on the real table (21,332 rows):
+The two forms are enforced at different points. On the tabular path, omitting the column rather than
+nulling it is load-bearing: `row_values` iterates `table_columns`, so with no `other_data` field
+there is no branch to populate. `sidecars` keeps its column either way, so `build_sidecar_row`
+filters keys as it flattens. Declaring `a_comp_cor_00` in the overlay stores it again, at 8 B/row.
 
-| | table size | vs today |
-|---|---|---|
-| today — JSON `other_data` | 1,160 MB | — |
-| `MAP(VARCHAR, DOUBLE)` | 267 MB | 4.3× |
-| long/EAV `(file, row, name, value)` | ~350 MB | 3.3× |
-| all ~1,800 as real `DOUBLE` columns | ~280 MB | 4.1× |
+The name dictionary is the compensation for dropping the values: it answers "what confound
+regressors does this catalog's data contain?" without opening a file.
 
-They cluster around what 38M float values cost to store — 7.0–7.4 bytes per value across
-the three alternatives, against 8 bytes raw, so DuckDB is compressing them a little but
-there is no encoding that makes the data small. **Encoding
-buys a constant factor; it does not change the asymptote.** Only declining to store the
-values does — and that is a policy question, not a representation question.
+## Specification
 
-### The mechanism already existed; the granularity did not
+### 1. A table stores what its schema declares
 
-ADR 0002 §6 made read-vs-catalog declarative: `disposition: read | catalog | ignore`,
-selector-addressed, metaschema-validated, with `*.tsv.gz` → `catalog` as the working
-precedent for not ingesting something. That machinery is sound.
+A tabular table's ingestion policy may declare `undeclared: catalog`: the table is created with no
+`other_data` column, and the columns its schema does not declare are not stored. The default `store`
+preserves them there. `sidecars` and `dataset_description` always get the column. `base.json`
+declares no `undeclared` policy, because `emit-types` renders the Python column tables from
+`Ingestion::base()`.
 
-What it could not express is a *per-column* disposition. A confounds file needs `read`
-(the motion parameters, FD, DVARS are the point) *and* needs its ~1,785 undeclared
-columns not stored. The existing model could only say "read all of it" or "read none of
-it".
+### 2. Two forms — table-wide and selector-scoped
 
-## Decision
+`undeclared` is table-wide and static, so it can drive DDL. `undeclaredWhen` is a list of
+`{selectors, undeclared}` entries resolved per file — first match wins, then the table-wide
+`undeclared`, then `store` — and does *not* change the table's shape. It is resolved where a row is
+built from one file's parsed JSON: `sidecars`. Entries append rather than replace across fragments,
+so several adapters can each scope a policy onto it.
 
-**1. `other_data` becomes conditional.** A table's ingestion policy may declare
-`undeclared: catalog`, and such a table has no `other_data` column at all. The
-invariant is restated: *a table stores what its schema declares it stores.* What a
-catalog holds is a decision its schema makes, not a property of the file it read.
+### 3. The names not stored are recorded globally, by name
 
-Omitting the column rather than nulling it is load-bearing: `Schema::row_values`
-iterates `table_columns`, so with no such field there is no branch to populate, and the
-Rust producer follows with no code of its own.
+`tabular_undeclared_columns (table_name, name)` holds one row per distinct name per table for the
+whole catalog, written `INSERT OR IGNORE` as files are read, and nothing per file. Only a tabular
+table whose *static* policy is `catalog` records; a scoped policy drops keys without recording them.
 
-**2. Losslessness by reference, not by value.** The file stays on disk and stays in the file
-registry, whose `file_path` is the authoritative record of its full column set — one line of
-I/O away. Declared-ness becomes the storage dial rather than a wall: a user who wants
-`a_comp_cor_00` declares it in the overlay and pays 8 B/row.
+### 4. Losslessness is by reference
 
-> **Amended 2026-08-12 (ADR 0006).** That registry was `tabular_files`, which is now deleted;
-> its rows and its `status` column are part of `file_registry`, surfaced as `all_files`. The
-> route is unchanged in substance — `lake.resolve(dataset_id, file_path, root_uri)` off a
-> registry row, then read the file — and `bidslake-py`'s `resolve` docstring carries the
-> worked recipe. See [ADR 0006](0006-file-registry.md) §1.
+The file is parsed, not consumed: it stays on disk and keeps its `file_registry` row, whose
+`file_path` is the authoritative record of its full column set ([ADR 0006](0006-file-registry.md));
+`BidsLake.resolve` turns that row into an openable handle. Under a scoped `catalog` policy,
+`BidsFile.metadata` carries the declared fields only.
 
-**3. Discovery via a global name dictionary, not a per-file manifest.** This is the part that
-had to be measured rather than assumed. Keying a manifest by header signature looked free —
-until the data showed that confounds headers are *not* shared between files: 48 files produced
-**38 distinct headers**, because the aCompCor component count varies per run. So a per-header
-manifest grows with the study, at roughly the size of one header per file. The *names*, by
-contrast, come from one shared space bounded by the pipeline's vocabulary rather than by
-dataset size — a few thousand distinct names, tens of kilobytes, however many files there are.
-So `tabular_undeclared_columns` records `(table_name, name)` and nothing per-file.
+## Backwards Compatibility
 
-**4. Two forms, because `sidecars` is one table for every file in the catalog.**
-`undeclared` is table-wide and static, so it can drive DDL. `undeclaredWhen` is
-selector-scoped and per-row, and does *not* change the table's shape. A table-wide flag
-on `sidecars` would strip custom metadata from all raw BIDS to reach one derivative's
-sidecars; the scoped form is what lets a 366 KB confounds sidecar be dropped while an
-ordinary BOLD sidecar in the same database keeps its custom fields.
+Nothing breaks. A catalog first built under `store` and re-indexed with a fragment flipping a
+tabular table to `catalog` keeps the column — tables are created `IF NOT EXISTS` — but stops
+writing it, and the pre-insert `DELETE` is per `file_id`, so refreshed rows go NULL while rows from
+roots not re-indexed keep what they held. Re-index every root of the dataset, or drop the column.
 
-**5. Default `store`, and `base.json` untouched.** Plain BIDS behavior is unchanged.
-This also keeps the generated Python column tables byte-identical, since
-`emit-types` builds from `Ingestion::base()` — a constraint worth stating explicitly,
-because moving this policy into `base.json` would break codegen.
+## Rejected Ideas
 
-**6. Rejected: `additional_columns: "not_allowed"`.** It is the BIDS-native field and
-the wrong lever — a *validation* assertion. Setting it would make
-`bids-validator-rs` declare every real fMRIPrep confounds file invalid.
+**`additional_columns: "not_allowed"` on the tabular rule.** The BIDS-native field, and the wrong
+lever — a *validation* assertion, not a storage one. Setting it makes `bids-validator-rs` emit
+`TSV_ADDITIONAL_COLUMNS_NOT_ALLOWED` for every real fMRIPrep confounds file; the fmriprep and
+qsiprep overlays declare `additional_columns: "allowed"`, which is the truth about those files.
 
-## Consequences
+**A denser encoding of the overflow.** DuckDB stores the JSON column `Uncompressed`: at ~56 KB every
+value is an overflow string, so dictionary and FSST encoding never apply, and 53% of each object is
+repeated key names. Against the profiled `fmriprep_confounds` table (21,332 rows):
+`MAP(VARCHAR, DOUBLE)` 267 MB, a long/EAV `(file, row, name, value)` table ~350 MB, all ~1,800
+columns as real `DOUBLE`s ~280 MB — 4.3×, 3.3× and 4.1× smaller than the same table's 1,160 MB as
+JSON, clustering at 7.0–7.4 bytes per value against 8 raw, near what 38M floats simply cost.
+Encoding buys a constant factor, not a change of asymptote; only declining to store the values does.
 
-Measured end to end with the release binary, on a dataset reconstructed from the
-profiled catalog (8 confounds files, 1,798 columns × 450 rows, real 2,151-key sidecars):
+**A per-file manifest of the undeclared columns.** Keying one by header signature looks free until
+the headers are counted: the 48 profiled confounds files carry 38 distinct headers, the aCompCor
+component count varying per run, so the manifest grows with the study at about one header per file.
+The *names* are bounded by the pipeline's vocabulary, not by file count — a few thousand, tens of
+kilobytes.
 
-    overlay only          207.26 MB   829 blocks
-    --adapter fmriprep      8.76 MB    35 blocks
+**A different storage substrate.** At tens of GB a single DuckDB file is unremarkable, and no
+substrate addresses what this one does: a terabyte of floats is a terabyte in Parquet too.
+DuckLake's argument here is operational, not about size.
 
-**23.7× smaller.** There is no size/speed trade to make either: the policy only shrinks the
-SELECT list, so it does no more work than storing the columns would. At 16 subjects (64 files,
-28,800 rows) the file is still 8.7 MB, i.e. dominated by DuckDB's 256 KB per-segment minimum
-and the embedded schema blob rather than by data.
+## Open Issues
 
-Batching is unaffected in shape — the header group key, the pre-`DELETE` and the single
-`INSERT … BY NAME` all still apply, so ADR 0002 §5's "Lever 1b" risk is not engaged. (The
-batch has since gained per-group windowing, a `__src` source column and a declared column
-list; none of that interacts with which columns the SELECT projects.)
+**The whole-file boundary is still crude.** `extension == ".tsv.gz"` → `catalog` is the only rule
+keeping high-rate recordings out of the row store, and it is a proxy — BIDS happens to compress them
+— not a principle: stored one row per sample, a `*_physio` recording runs to millions of rows.
 
-A consequence worth naming: `BidsFile.metadata` for a file under `undeclared: catalog`
-now carries only declared fields. Reading the rest means reading the file, which
-`BidsLake.resolve` exists to make easy.
-
-### What this does not settle
-
-The whole-file boundary is still crude. One rule — `extension == ".tsv.gz"` → `catalog`
-— is all that stands between a catalog and two million rows of physio, and it is a proxy
-(BIDS happens to compress those recordings) rather than a principle. This ADR adds a
-second, finer lever; it does not replace the first. See the crate README roadmap.
-
-Substrate was considered and deliberately not changed. At tens of GB a single DuckDB
-file is unremarkable, and without this policy no substrate would have helped — 2.3 TB of
-floats is 2.3 TB in Parquet too. DuckLake's real argument here is operational
-(concurrent writers, incremental publish, no rewrite needed to reclaim free blocks), and
-should be made on those grounds when it is made.
+**A scoped policy reaches `sidecars` only, and records nothing.** The tabular read paths consult the
+static `undeclared`, so an `undeclaredWhen` entry on a tabular table validates and does nothing; and
+`record_undeclared_columns` is called only from those paths, so the names a scoped policy drops go
+unrecorded. Either it should reach the tabular readers and the dictionary, or the metaschema should
+say the field is honoured on `sidecars` alone, as `ignoreKeys` already does.

@@ -1,8 +1,28 @@
 # bidslake (Python)
 
-Typed querying of [bidslake](../bidslake) datasets — the BIDSLayout / bids2table
-analog. Open the DuckDB catalog a `bidslake index` produced and query it by BIDS
+Typed querying of [bidslake](https://github.com/psadil/bidslake) datasets — the BIDSLayout /
+bids2table analog. Open the DuckDB catalog a `bidslake index` produced and query it by BIDS
 concept, getting back Polars or an iterable of file handles.
+
+This page is how to *use* the API. Why each piece is shaped the way it is — the storage policy
+behind a wide table, cross-dataset matching, the read and write directions of a layout — is in
+the architecture decision records at
+[github.com/psadil/bidslake/docs/adr](https://github.com/psadil/bidslake/tree/main/docs/adr),
+cited below as `ADR NNNN`.
+
+## Install
+
+Not on PyPI yet. The package is a compiled extension, so installing it builds it — which needs a
+Rust toolchain and Python 3.14 or newer:
+
+```bash
+pip install "bidslake @ git+https://github.com/psadil/bidslake#subdirectory=crates/bidslake-py"
+```
+
+You also need the `bidslake` CLI to produce a catalog in the first place; it is a separate binary
+from the same repository. See the [repository README](https://github.com/psadil/bidslake#install).
+For a development checkout, use `maturin develop` instead —
+[CONTRIBUTING.md](https://github.com/psadil/bidslake/blob/main/CONTRIBUTING.md) has the setup.
 
 ```python
 import bidslake
@@ -35,9 +55,9 @@ lake.sql(t"SELECT count(*) FROM all_files WHERE suffix = {suffix}")
 
 A catalog holds what its schema declares it holds. A table whose ingestion policy is
 `undeclared: catalog` keeps only its declared columns, and the file on disk stays the
-record of the rest — which is how fMRIPrep confounds stay tractable, since a single
-file has ~1,800 columns against the ~13 the schema names (see
-[ADR 0004](../../docs/adr/0004-undeclared-column-policy.md)).
+record of the rest — which is how a wide derivative table like fMRIPrep's confounds stays
+tractable ([ADR 0004](../../docs/adr/0004-undeclared-column-policy.md) weighs that against
+storing everything).
 
 Nothing is unreachable. `lake.all_files` is the registry — every file the ingest saw,
 whatever it did with it — and `lake.resolve()` opens any of them:
@@ -57,9 +77,9 @@ full = pl.read_csv(path.open("rb"), separator="\t", null_values="n/a")
 full.select("^a_comp_cor_.*$")
 ```
 
-Pass `root_uri` when a dataset spans several ingest roots — subject-sharded pipeline
-output is one dataset with one root per subject ([ADR 0005](../../docs/adr/0005-multi-root-datasets.md)),
-and the root a file came from is what says where to open it. Every registry row carries it.
+Pass `root_uri` when a dataset spans several ingest roots
+([ADR 0005](../../docs/adr/0005-multi-root-datasets.md)): the root a file came from is what
+says where to open it, and every registry row carries it.
 
 `resolve()` uses the same root resolution as `BidsFile.path` (so `base_dir` and
 `root_override` apply) and returns a `UPath`. Read through `.open()` rather than
@@ -193,10 +213,10 @@ bidslake link alias -d study.duckdb --dataset fmriprep --as freesurfer --target 
 bidslake link list  -d study.duckdb    # what every link name resolves to
 ```
 
-Dropping `via` and matching on entities catalog-wide would be unsound in a way the `__n`
-check cannot catch: two studies each naming their own recon-all tree `fs`, and a
-`sub-01` whose recon failed in one of them, leaves exactly one match — in the *other*
-study — and one match is never ambiguous.
+Use it. Dropping `via` and matching on entities catalog-wide is unsound in a way the `__n`
+check cannot catch: a file missing from one study can be silently answered by another
+study's, and one match never looks ambiguous
+([ADR 0003](../../docs/adr/0003-associations.md)).
 
 ### Rows, not files
 
@@ -225,7 +245,8 @@ Keyed through the association rather than by matching entities. A confounds file
 to share `sub`/`ses`/`task`/`run` with the images it describes, so an entity match gets
 the right answer — but only by luck of naming, and it is simply wrong for a describing
 file one directory level up, which has no `sub` to join on. The associations come from
-the BIDS schema's own `meta.associations` ([ADR 0007](../../docs/adr/0007-within-dataset-file-associations.md)).
+the BIDS schema's own `meta.associations`
+([ADR 0003](../../docs/adr/0003-associations.md)).
 
 ### Querying an augmented catalog
 
@@ -274,9 +295,8 @@ out.mkdir("melodic_mix")      # the same, with the parent directory created
 ```
 
 A few roles are not determined by the root alone — `feat`'s two `classification` roles render
-`fix4melview_{training}_thr{threshold}.txt`, and which FIX model and threshold ran is the
-pipeline's configuration, not something the layout can know. Bind those once, where the root is
-bound, and every role is then reachable by name:
+`fix4melview_{training}_thr{threshold}.txt`. Bind those placeholders where the root is bound, and
+every role is then reachable by name:
 
 ```python
 out = bidslake.layout("feat").under(dst / stem, training="UKBiobank", threshold="1")
@@ -294,22 +314,18 @@ out = bidslake.layout("feat").under(dst / stem, training="UKBiobank", threshold=
 [out[role] for role in out.layout.roles]             # all 23, no special-casing
 ```
 
-A layout is a separate artifact from the adapter's term map because a term map cannot be run
-backwards: on a real recon-all tree of 657 files its 8 PCRE mappings recognize all of them,
-while a pure-`{var}` rewrite needs 12, recognizes 430, and loses the 227 matched by
-catch-alls — which name a *class* of files and so have no concept to render from.
+A layout is a separate artifact from the adapter's term map rather than that term map run
+backwards, which [ADR 0002](../../docs/adr/0002-adapters-and-layouts.md) measures the cost of.
+The two are still kept honest by construction: loading a layout renders every role under every
+declared example and feeds the result back through the term map, and if `classify(render(role))`
+does not reproduce the declared concepts it raises rather than loading. A layout that loads is
+one whose roles agree with the term map that will later recognize their output.
 
-The two are kept honest by construction. Loading a layout renders every role under every
-declared example and feeds the result back through its term map; if `classify(render(role))`
-does not reproduce the declared concepts, it raises rather than loading
-([ADR 0008](../../docs/adr/0008-layouts.md)).
-
-That check has a consequence worth knowing before you reach for a role as a query: a role's
-`Concepts`/`Entities` describe the file **at its destination**, not the file that will be copied
-or computed into the slot. `filtered_func` declares `desc: filtered` — what FEAT writes — but is
-filled from fMRIPrep's `desc-preproc` BOLD, and `highres`/`example_func` declare no entities at
-all. Adding source-side entities to a role makes it fail the round trip, by design
-([ADR 0008](../../docs/adr/0008-layouts.md) §5).
+That check has a consequence worth knowing before you reach for a role as a query filter. A
+role's `Concepts`/`Entities` describe the file **at its destination**, not the file that will be
+copied or computed into the slot, and they are routinely narrower than a source-side query needs
+— several `feat` roles declare no entities at all. Adding source-side entities to a role makes it
+fail the round trip, by design.
 
 ## Design
 
@@ -327,36 +343,6 @@ all. Adding source-side entities to a role makes it fail the round trip, by desi
 
 ## Develop
 
-Requires the Rust toolchain and [`uv`](https://docs.astral.sh/uv/).
-
-```bash
-uv venv --python 3.14           # Python 3.14 floor (t-strings, Unpack, `type`)
-uv pip install maturin
-.venv/bin/maturin develop       # build + install the extension (editable)
-.venv/bin/python -m pytest      # run tests (ingests bids-examples via `cargo index`)
-.venv/bin/ty check python/bidslake
-```
-
-Set `BIDSLAKE_TEST_DB=/path/to.duckdb` to reuse a prebuilt database and skip the
-(slow) per-session ingest.
-
-### Regenerating the typed schema module
-
-`schema/_generated.py` is committed and produced by a Rust bin that reuses the
-exact `bidslake` schema/DDL model (no logic is re-implemented in Python):
-
-```bash
-# PYO3_PYTHON points cargo's link step at the venv interpreter.
-PYO3_PYTHON=$PWD/.venv/bin/python cargo run -p bidslake-py --bin emit-types
-```
-
-CI (`.github/workflows/ci.yml`, also runnable locally):
-
-- `pytest` — includes `test_codegen.py` (generated `COLUMNS` == the real
-  database) and `test_typing.py` (asserts `ty` *rejects* a fixture of bad
-  queries — the one typing check the `ty` hook can't make).
-- `codegen-drift` job — re-runs `emit-types` and `git diff --exit-code` on
-  `_generated.py`; fails if the committed types drifted from the schema. This is
-  the only check that covers the value-set `Literal`s (Datatype/Suffix/Modality/…),
-  which `test_codegen.py` (DB-introspected `COLUMNS` only) does not.
-- `ty check python/bidslake`.
+Building the extension, running the suites, regenerating the typed schema module and what CI
+checks are all in
+[CONTRIBUTING.md](https://github.com/psadil/bidslake/blob/main/CONTRIBUTING.md).

@@ -157,7 +157,7 @@ async fn overlay_makes_confounds_a_typed_ordered_table() -> anyhow::Result<()> {
 
     // The confounds file is *linked* to the images it describes, not just stored beside
     // them. Two edges, both to the one TSV: the native-space and MNI variants of one run.
-    // (docs/adr/0007 — before this, consumers matched `sub`/`task`/`run` by hand.)
+    // (docs/adr/0003 — before this, consumers matched `sub`/`task`/`run` by hand.)
     let (edges, targets): (i64, i64) = db.conn.query_row(
         "SELECT COUNT(*), COUNT(DISTINCT target_file_path) FROM file_associations \
          WHERE association_type = 'fmriprep_confounds'",
@@ -435,7 +435,7 @@ async fn bundled_fmriprep_adapter_catalogs_undeclared_columns() -> anyhow::Resul
 
 /// The full adapter — overlay (edges) plus ingestion fragment (the `describes` view) — makes
 /// a confounds table readable *by volume of a given image*, which is the whole point of
-/// docs/adr/0007. Row N of the TSV is volume N of every BOLD variant the run produced.
+/// docs/adr/0003. Row N of the TSV is volume N of every BOLD variant the run produced.
 ///
 /// This has to be a synthetic fixture: the vendored `ds000001-fmriprep` confounds files are
 /// zero bytes, so the corpus can prove the edges exist but never that the rows line up.

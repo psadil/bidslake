@@ -139,7 +139,7 @@ async fn s3_full_ingest_ds000001() -> anyhow::Result<()> {
         "events row count must match raw for {sample}"
     );
 
-    // Structural associations resolve over S3 too (docs/adr/0007 §6). They used to be
+    // Structural associations resolve over S3 too (docs/adr/0003). They used to be
     // local-only, because `resolve_structural_associations` needed the walked `FileTree` and
     // the S3 backend has none; it now builds one from the registry path set, which both
     // backends populate. Without this the `describes` views — `diffusion` above all — would

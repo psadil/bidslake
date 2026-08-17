@@ -193,9 +193,10 @@ def bad_query_output(typed_workspace: Path) -> tuple[int, str]:
 
 
 def test_overlay_vocabulary_type_checks(good_query_result) -> None:
-    """The bundled `GetFilters` and models are pinned to the BIDS schema this build ships,
-    so `from`/`to`/`trans_x` are type errors there; the point of re-emitting them from a
-    catalog is that they stop being errors — including `AllFiles.from_`, the keyword column.
+    """Re-emitting from a catalog is what stops `from`/`to`/`trans_x` being type errors.
+
+    The bundled `GetFilters` and models are pinned to the BIDS schema this build ships, so
+    those names are errors there — including `AllFiles.from_`, the keyword column.
     """
     assert good_query_result.returncode == 0, good_query_result.stdout + good_query_result.stderr
 

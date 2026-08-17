@@ -34,9 +34,11 @@ def test_metadata_keeps_the_value_numeric(bold_metadata):
 
 
 def test_metadata_excludes_the_join_key(bold_metadata):
-    """`sidecars` keys on `file_id` now (docs/adr/0006). The key is plumbing, not a BIDS
-    metadata field, and it leaked into every `metadata` dict as a `Decimal` when this
-    skipped the `(dataset_id, file_path)` pair it replaced."""
+    """`sidecars` keys on `file_id` now (docs/adr/0006).
+
+    The key is plumbing, not a BIDS metadata field, and it leaks into every `metadata` dict
+    as a `Decimal` if this skips only the `(dataset_id, file_path)` pair it replaced.
+    """
     assert not {"file_id", "dataset_id", "file_path", "other_data"} & set(bold_metadata)
 
 
@@ -108,7 +110,7 @@ def test_get_described_by_reads_the_same_rows_as_get_events(ds001_bold, ds001_ev
     """`get_events()` is one instance of a general relation, not a special case.
 
     Both go through `file_associations`: the rows live once against the file that
-    *describes* the run, and the edge says which runs it describes (docs/adr/0007). The
+    *describes* the run, and the edge says which runs it describes (docs/adr/0003). The
     generic accessor takes the association name, which is also the table name. That the two
     agree is the claim, so the pair of calls is one Act.
     """
@@ -116,9 +118,10 @@ def test_get_described_by_reads_the_same_rows_as_get_events(ds001_bold, ds001_ev
 
 
 def test_get_described_by_is_empty_for_an_absent_table(ds001_bold):
-    """An adapter's table is missing from a catalog built without that adapter. That is an
-    answer — "this catalog holds no such rows" — not an error, and the same shape a run with
-    no describing file gives back.
+    """An adapter's table is missing from a catalog built without that adapter.
+
+    That is an answer — "this catalog holds no such rows" — not an error, and the same shape
+    a run with no describing file gives back.
     """
     assert ds001_bold.get_described_by("fmriprep_confounds").is_empty()
 
@@ -164,6 +167,9 @@ def test_joined_columns_are_namespaced(files_view_columns):
 
 
 def test_no_bare_metadata_column_leaks(files_view_columns):
-    """Namespaced on purpose: an unprefixed `RepetitionTime` would collide with a
-    same-named column from any other joined source."""
+    """Namespaced on purpose.
+
+    An unprefixed `RepetitionTime` would collide with a same-named column from any other
+    joined source.
+    """
     assert "RepetitionTime" not in files_view_columns

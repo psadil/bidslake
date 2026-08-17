@@ -6,13 +6,14 @@ and a **predicate**; we push the projection into the DuckDB `SELECT` (fetch only
 those columns — the big win for wide tables like `sidecars`) and apply the
 predicate ourselves.
 
-Correctness note: Polars does **not** re-apply a predicate the source was given
-(verified) — the source owns it. We apply it via Polars on the fetched frame
-(`df.filter(predicate)`), which is always correct. That means the predicate is
-*not* pushed into DuckDB (DuckDB returns all rows for the projected columns);
-pushing predicates into SQL is a future optimization, but must never be the only
-place filtering happens. When a predicate is present we fetch all columns (so it
-can reference any of them), filter, then project.
+Note:
+    Polars does **not** re-apply a predicate the source was given (verified) — the
+    source owns it. We apply it via Polars on the fetched frame
+    (`df.filter(predicate)`), which is always correct. That means the predicate is
+    *not* pushed into DuckDB (DuckDB returns all rows for the projected columns);
+    pushing predicates into SQL is a future optimization, but must never be the only
+    place filtering happens. When a predicate is present we fetch all columns (so it
+    can reference any of them), filter, then project.
 """
 
 from __future__ import annotations
@@ -30,7 +31,13 @@ if TYPE_CHECKING:
 
 
 def build_lazy(lake: BidsLake, base_sql: str) -> pl.LazyFrame:
-    """A `LazyFrame` over `base_sql` (a table or the wide-view query)."""
+    """A `LazyFrame` over `base_sql`, backed by the IO source this module registers.
+
+    Args:
+        lake: The catalog whose connection runs the query.
+        base_sql: A whole table, or the wide-view query — wrapped as a subquery, so the
+            projection is applied on top of it rather than rewritten into it.
+    """
     # Full schema up front (Polars needs it to plan); zero-row fetch is cheap.
     schema = lake._query(f"SELECT * FROM ({base_sql}) AS _t LIMIT 0", []).schema
 

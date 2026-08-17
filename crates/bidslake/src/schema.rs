@@ -3,32 +3,27 @@
 //! `bidslake index` consolidates a BIDS dataset's metadata into a small set of
 //! DuckDB tables. Most are **generated dynamically** from the vendored BIDS
 //! schema — see [`dynamic`] (and [`Schema`]) for that machinery, which is the
-//! heart of how bidslake maps BIDS onto SQL. A few tables are **static** (defined
-//! in this module): `diffusion` (one row per parsed bval/bvec volume),
-//! `file_associations` (derived `IntendedFor`-style cross-references), and the
-//! cross-dataset `dataset_links`/`dataset_identity` (see `docs/adr/0003`).
+//! heart of how bidslake maps BIDS onto SQL. The rest are **static**, their DDL
+//! written out in this module: `bvals`/`bvecs` and the `diffusion` view,
+//! `file_associations`, `tabular_undeclared_columns`, `dataset_roots`, and the
+//! cross-dataset `dataset_links`/`dataset_identity`.
 //!
-//! Every table is scoped to one `dataset_id`, so multiple datasets can coexist in one
+//! Every table is scoped to one `dataset_id`, so multiple datasets coexist in one
 //! database and stay isolated while being queried together. The one place datasets
-//! are *related* to each other is the `dataset_relations` **view**, which resolves
-//! cross-dataset provenance at query time without any table crossing that boundary.
-//! A dataset may be built from several ingest **roots** (`dataset_roots`, docs/adr/0005);
-//! a file-keyed table reaches its dataset through `file_registry` rather than storing one.
+//! are *related* to each other is the `dataset_relations` **view**, resolved at query
+//! time (ADR 0003). A dataset may be built from several ingest **roots**
+//! (`dataset_roots`, ADR 0005); a file-keyed table reaches its dataset through
+//! `file_registry` rather than storing one.
 //!
-//! # The tabular-data invariant
-//!
-//! Every tabular file (`.tsv`/`.tsv.gz`) a dataset contains is accounted for —
-//! event tables, channel/electrode/optode descriptions, motion recordings, blood
-//! curves, participants, sessions, diffusion. Which table a file routes to, and
-//! that table's columns and types, are **derived from the BIDS schema**
-//! (`rules.tabular_data` + `objects.columns`; for the headerless recordings,
-//! `rules.sidecars`, `meta.associations` and `rules.files` — see [`recording`]),
-//! never hardcoded. Large compressed
-//! recordings (`*.tsv.gz`) are left on disk for now as a size policy, but are still
-//! recorded; a file the schema does not describe is skipped with a warning. The
-//! `file_registry` records every file it saw with a `status`
-//! (`ingested`/`on_disk`/`skipped`/`failed`) so nothing is dropped unnoticed. See
-//! [`tabular`] for the routing model.
+//! Every tabular file (`.tsv`/`.tsv.gz`) a dataset contains is accounted for — event
+//! tables, channel/electrode/optode descriptions, motion recordings, blood curves,
+//! participants, sessions, diffusion. Which table a file routes to, and that table's
+//! columns and types, are **derived from the BIDS schema** (`rules.tabular_data` +
+//! `objects.columns`; for the headerless recordings, `rules.sidecars`,
+//! `meta.associations` and `rules.files` — see [`recording`]), never hardcoded;
+//! [`tabular`] is the routing model. What bidslake then *does* with a file — read it,
+//! catalog it unread, ignore it — is the ingestion schema's call (ADR 0002), and
+//! `file_registry.status` records the outcome for every file it tried to read.
 //!
 //! # Conventions
 //!
@@ -37,32 +32,24 @@
 //! - **`file_path`** — a **root**-relative path (`sub-01/func/sub-01_task-x_bold.nii.gz`).
 //!   It identifies a file only together with the root it was walked from, which is why
 //!   `file_registry` holds `(dataset_id, root_uri, file_path)` and everything else refers
-//!   to a file by `file_id` (docs/adr/0006).
-//! - **`file_id`** — the surrogate key for a file: the first 128 bits of
-//!   `SHA-256(dataset_id ␟ root_uri ␟ file_path)`, as a `UBIGINT`. Content-derived, so it
-//!   is stable across runs and machines and a re-index upserts onto the same rows. Every
-//!   file-keyed table keys on it. Four of them — `scans`, `sidecars`, `bvals`, `bvecs` —
-//!   declare an actual `FOREIGN KEY`; the per-row tables and `file_associations` do not (see
-//!   the diagram below), so the reference is by convention there rather than enforced.
+//!   to a file by `file_id`.
+//! - **`file_id`** — the surrogate key for a file: the first 64 bits of
+//!   `SHA-256(dataset_id ␟ root_uri ␟ file_path)`, as a `UBIGINT` (`bids::file_id`).
+//!   Content-derived, so it is stable across runs and machines and a re-index upserts onto
+//!   the same rows. Every file-keyed table keys on it; `scans`, `sidecars`, `bvals` and
+//!   `bvecs` declare a real `FOREIGN KEY`, and the per-row tables and `file_associations`
+//!   reference the registry by convention only. ADR 0006 argues the width and the partial
+//!   enforcement.
 //!
-//!   **Which file** a table keys on is one rule (docs/adr/0007): the file whose rows it
-//!   holds. A `*_events.tsv`'s rows key on the events file, a `.bval`'s on the `.bval`. The
-//!   data files those rows are *about* are reached through `file_associations`, because one
-//!   describing file can serve many — which is what BIDS inheritance means for a tabular
-//!   companion. `scans` and `sidecars` key on the described file instead, and neither is an
-//!   exception: a `scans.tsv` row names its target outright in a `filename` column (a 1:1
-//!   lookup, no inheritance), and a `sidecars` row is the *merge* of several JSON documents,
-//!   so it has no single source file to key on.
-//! - **`other_data JSON`** — an overflow column on most tables. Any source field
-//!   without a dedicated column is preserved here; fields that *do* have a column are
-//!   not duplicated into it.
-//!
-//!   Conditional, not universal: a table whose ingestion policy declares
-//!   `undeclared: catalog` has no `other_data` column at all, and the columns it does
-//!   not declare stay in the file on disk — still recorded in `file_registry`, with
-//!   their names in `tabular_undeclared_columns`. A table stores what its schema
-//!   declares it stores; see docs/adr/0004. fMRIPrep confounds are why: ~1,800 columns
-//!   against ~13 declared, which cost 24 MB of database per file as per-row JSON.
+//!   **Which file** a table keys on is one rule (ADR 0003): the file whose rows it holds.
+//!   A `*_events.tsv`'s rows key on the events file, a `.bval`'s on the `.bval`; the data
+//!   files those rows are *about* are one join away, through `file_associations`. `scans`
+//!   and `sidecars` key on the described file instead.
+//! - **`other_data JSON`** — the overflow column: any source field without a dedicated
+//!   column is preserved here, and a field that *does* have a column is not duplicated
+//!   into it. Conditional, not universal — a table whose ingestion policy declares
+//!   `undeclared: catalog` has no `other_data` column at all, its undeclared columns stay
+//!   in the file on disk, and their names go to `tabular_undeclared_columns` (ADR 0004).
 //! - **Missing values** — BIDS `n/a`, and any non-numeric value in a numeric
 //!   column (a censored age `89+`, a range `35-40`, an array), are stored as `NULL`.
 //!
@@ -73,10 +60,9 @@
 //!   (`Name`, `BIDSVersion`, `License`, …), plus `other_data`. A dataset with no
 //!   description of its own still gets a row, holding only its id.
 //! - **`dataset_roots`** — the ingest roots a dataset was built from, PK
-//!   `(dataset_id, root_uri)`. One row for an ordinary dataset, N for subject-sharded
-//!   pipeline output, which is one logical dataset with one root per subject
-//!   (docs/adr/0005). `root_uri` + a root-relative `file_path` is what turns a stored row
-//!   back into an openable URI.
+//!   `(dataset_id, root_uri)`, plus the [`Tenure`] asserted over each. One row for an
+//!   ordinary dataset, N for subject-sharded pipeline output (ADR 0005). `root_uri` +
+//!   a root-relative `file_path` is what turns a stored row back into an openable URI.
 //! - **`file_registry`** — **the manifest**: one row per file the walk saw, whatever
 //!   bidslake did with it. PK `file_id`, plus `(dataset_id, root_uri, file_path)` — the
 //!   triple that id hashes — and:
@@ -87,11 +73,11 @@
 //!     `ingested`/`on_disk`/`skipped`/`failed`, or NULL for a file there was never any
 //!     reading to report on.
 //!   - **`projected JSON`** — what a term map computed, present only when one is
-//!     configured (ADR 0002 §7).
+//!     configured (ADR 0002).
 //!
 //!   Only the files the walk never reached are absent: `.bidsignore`d ones, and ones an
 //!   `ingest` rule dropped. It is the foreign-key target for every file-keyed table, which
-//!   is only sound because it holds *all* the files (docs/adr/0006).
+//!   is only sound because it holds *all* the files (ADR 0006).
 //!
 //!   Opaque *directory* datafiles (`.ds`/`.mefd`/`.ome.zarr`) get a **single** row and are
 //!   never descended into, so their internal components are not indexed; the `pseudofile`
@@ -108,7 +94,7 @@
 //! - **`scans`** — the `scans.tsv` satellite, and *not* a file registry despite the name
 //!   BIDS gives it: acquisition metadata (`acq_time`, `HED`, `other_data`) for the data
 //!   files a `scans.tsv` describes, PK `file_id`. Built the way `sessions` is — from the
-//!   file's contents — so a dataset with no `scans.tsv` has no rows here.
+//!   file's contents — so a dataset shipping no `scans.tsv` has no rows here.
 //! - **`sidecars`** — the JSON-sidecar metadata for each imaging file after BIDS
 //!   inheritance (dataset-/subject-level sidecars merged, more-specific wins).
 //!   PK `file_id` referencing `file_registry` — the *data* file's id, not the sidecar's
@@ -118,7 +104,8 @@
 //! - **`events`** — task-event rows from `*_events.tsv` (`onset`, `duration`,
 //!   `trial_type`, …, `other_data`); one row per line keyed by the `file_id` of the
 //!   `*_events.tsv` itself, no primary key, and — alone among the per-row tables —
-//!   **no `row_idx`**: order events by `onset` (see below).
+//!   **no `row_idx`**, because it is the one BIDS table declared unordered. Order
+//!   events by `onset`; events sharing one have no tiebreak.
 //! - **Per-modality tabular tables** — one per `rules.tabular_data` rule, named
 //!   for it: `eeg_channels`/`meg_channels`/…, `eeg_electrodes`/…, `nirs_optodes`,
 //!   `blood`, `asl_context`, `behavioral`, `samples`, `phenotype`, `descriptions`,
@@ -126,42 +113,32 @@
 //!   the rows came from — plus the rule's typed columns and `other_data`. They carry no
 //!   concept columns of their own; join `all_files` on `file_id` for those.
 //!
-//!   **`row_idx` exists because a SQL table is unordered and a TSV is not**, and it is
-//!   present exactly on the tables where that matters. Several BIDS tables carry meaning
-//!   in their line order and nowhere else: a `*_channels.tsv`'s order maps onto the
-//!   columns of the binary recording beside it, a recording's rows *are* its time axis,
-//!   and a derivative `*timeseries.tsv` aligns row N with volume N of its 4D image.
-//!   `row_idx` preserves that through ingestion, so a consumer need not re-read the file
-//!   to recover it. It is a plain ordinal, not a key — these tables have no primary key.
+//!   **`row_idx` is a plain ordinal reproducing the source file's line order** — not a
+//!   key, these tables having no primary key. It is present exactly on the tables the
+//!   ingestion schema declares `ordered` (the default; ADR 0002), because a SQL table is
+//!   unordered and several BIDS tables carry meaning in their line order and nowhere
+//!   else: a `*_channels.tsv`'s order maps onto the columns of the binary recording
+//!   beside it, a recording's rows *are* its time axis, a derivative `*timeseries.tsv`
+//!   aligns row N with volume N of its 4D image. A table declared *un*ordered has **no
+//!   `row_idx` column at all**, its files being read concurrently.
 //!
-//!   Which tables have it is declared by the ingestion schema (`Ingestion::ordered`,
-//!   default true): those tables are read sequentially and their `row_idx` reproduces
-//!   line order. A table declared *un*ordered has **no `row_idx` column at all** —
-//!   its files are read concurrently, so no row order exists to record, and a column of
-//!   arbitrary labels would only invite `ORDER BY row_idx`. `events` is the one BIDS
-//!   table in that group: its rows are addressed by `onset`, and it has the highest row
-//!   count, so reading its files concurrently is worth having. Order events by `onset`
-//!   (events sharing an `onset` have no tiebreak — that information is not in the file
-//!   either, beyond its line order).
-//!
-//!   `row_idx` records line order; what that order *means* is the `describes.axis` a table
-//!   may declare (docs/adr/0007), and the generated view then exposes the same column as
-//!   `<axis>_idx` — `volume_idx` on `timeseries`, `bval_volumes`, `asl_volumes`.
+//!   What that order *means* is the `describes.axis` a table may declare, and the
+//!   generated view then exposes the same column as `<axis>_idx` — `volume_idx` on
+//!   `timeseries`, `bval_volumes`, `asl_volumes` (ADR 0003).
 //! - **Continuous recordings** — `physio`, `stim`, `physio_events`, `motion`: one
 //!   row per sample, column names from the sidecar `Columns` or the associated
 //!   `_channels.tsv`. Only *uncompressed* recordings (chiefly `motion`) are
-//!   populated; the compressed `*.tsv.gz` physio/stim files are left on disk (see
-//!   the invariant above), so those tables may be empty.
+//!   populated; the compressed `*.tsv.gz` physio/stim files are cataloged rather than
+//!   read, a size policy the ingestion schema states, so those tables may be empty.
 //! - **`bvals` / `bvecs`** — the gradient payloads, one row per value in a `.bval` and per
 //!   column of a `.bvec`, PK `(file_id, row_idx)` where `file_id` is **the gradient file's
-//!   own**. One table each rather than one with nullable columns, so every row is fully
-//!   populated and a table's columns are exactly what its source file supplies.
+//!   own**. One table each, so every row is fully populated and a table's columns are
+//!   exactly what its source file supplies.
 //! - **`diffusion`** (VIEW) — the image-facing gradient table: one row per (image,
 //!   `volume_idx`) with `bval`, `bvec_x/_y/_z`, plus `bval_file_id`/`bvec_file_id` naming
 //!   where each half came from. Composed from `bval_volumes` and `bvec_volumes`, the views
-//!   the `describes` declarations generate, so a gradient set inherited from a higher
-//!   directory level reaches every image below it from one stored copy — `ds114` ships one
-//!   `dwi.bval` covering 20 images (docs/adr/0007). The b-values define the volume axis.
+//!   the `describes` declarations generate, so one stored copy of an inherited gradient set
+//!   reaches every image below it (ADR 0003). The b-values define the volume axis.
 //! - **`<describes>` views** — `timeseries` (fMRIPrep confounds), `asl_volumes`,
 //!   `bval_volumes`, `bvec_volumes`: a per-row table re-keyed onto the data files its rows
 //!   describe, resolved through `file_associations` at query time. Declared by the ingestion
@@ -170,11 +147,10 @@
 //! - **`file_associations`** — best-effort cross-references (chiefly an fmap's
 //!   `IntendedFor`): `source_file_id`, nullable `target_file_id`, `target_file_path`,
 //!   `association_type` (`fieldmap`/`sbref`/`mask`/`derivative`). PK
-//!   `(source_file_id, target_file_path, association_type)`. No foreign keys are declared:
-//!   `target_file_id` would need one that tolerates NULL, because an `IntendedFor` may name
-//!   a file the catalog does not hold — that target keeps its declared path with a NULL id
-//!   rather than being dropped. The source side needs none: it is always a file the walk
-//!   saw, since that is where the reference was read from.
+//!   `(source_file_id, target_file_path, association_type)`. No foreign keys, deliberately:
+//!   `target_file_id` is nullable, because an `IntendedFor` may name a file the catalog
+//!   does not hold, and such a target keeps its declared path with a NULL id rather than
+//!   being dropped (ADR 0003).
 //! - **`dataset_links`** — what a dataset declares it came from, one row per
 //!   `SourceDatasets` entry / `--source-dataset` flag / `DatasetLinks` mapping:
 //!   `link_type`, `link_name`, `declared_ref`, and the canonicalized
@@ -184,7 +160,7 @@
 //! - **`dataset_relations`** (VIEW) — the resolved dataset-to-dataset relation:
 //!   `(from_dataset_id, to_dataset_id, relation, via_identity)` where `relation` is
 //!   `shares_source` (co-derivatives of one source), `derived_from`, or `source_of`.
-//!   Resolved at query time, so ingest order is irrelevant (`docs/adr/0003`).
+//!   Resolved at query time, so ingest order is irrelevant (ADR 0003).
 //!
 //! ## Query `all_files` by BIDS concept
 //!
@@ -200,19 +176,17 @@
 //!   (boolean — an opaque directory datafile like `.ds`/`.ome.zarr`).
 //!
 //! They are generated from the BIDS schema itself (`objects.entities`,
-//! `objects.datatypes`, `rules.modalities`) and computed on read, costing nothing
-//! at ingest. They live on the **view**, once, rather than on each of the 25
-//! file-keyed tables — which is what lets a wider later run redefine them
-//! retroactively, with `CREATE OR REPLACE VIEW`, for rows already stored.
+//! `objects.datatypes`, `rules.modalities`) and computed on read, costing nothing at
+//! ingest. Defining them on the view — once, rather than on each file-keyed table — is
+//! what lets `CREATE OR REPLACE VIEW` redefine them for rows already stored (ADR 0006).
 //! See [`dynamic`] for how they're built.
 //!
-//! A path is not always the source. The registry holds every cataloged file,
-//! including ones a **term map** claimed (`sub-01/mri/wmparc.mgz`), whose names
-//! carry almost no BIDS concepts. Those files store what the term map projected in
-//! a `projected JSON` column, and the concepts it can supply are computed as
-//! `COALESCE(<the projection>, <the path regex>)` — so the same `WHERE seg =
-//! 'wmparc'` reaches a FreeSurfer volume and a BIDS-named one alike. The column
-//! exists only when a term map is configured (ADR 0002 §7).
+//! A path is not always the source. The registry also holds files a **term map** claimed
+//! (`sub-01/mri/wmparc.mgz`), whose names carry almost no BIDS concepts; those store the
+//! projection in a `projected JSON` column, and a concept it can supply is computed as
+//! `COALESCE(<the projection>, <the path regex>)`, so one `WHERE seg = 'wmparc'` reaches
+//! a FreeSurfer volume and a BIDS-named one alike. The column exists only when a term map
+//! is configured (ADR 0002).
 //!
 //! ```sql
 //! SELECT dataset_id, sub, ses, run, file_path
@@ -249,7 +223,7 @@
 //! ```
 //!
 //! A per-row table above keys on **the file its rows came from**; the data files those
-//! rows *describe* are one join away, through `file_associations` (docs/adr/0007):
+//! rows *describe* are one join away, through `file_associations` (ADR 0003):
 //!
 //! ```text
 //!   <per-row table> (file_id = the describing file)
@@ -293,20 +267,20 @@ pub const STATIC_TABLES: &[&str] = &[
     "dataset_identity",
 ];
 
-// The column names a table saw but does not declare — one row per distinct name,
-// per table, for the whole catalog.
-//
-// Only populated for tables whose ingestion policy is `undeclared: catalog`, where
-// the names are otherwise nowhere in the database. It answers "what confound
-// regressors does this catalog's data contain?" without opening a file; the
-// authoritative per-file column set remains the file's own header, reachable via
-// `file_registry.file_path`.
-//
-// Deliberately keyed by name rather than by file or by header signature. Real fMRIPrep
-// output does not share headers between files — the aCompCor component count varies per
-// run — so a per-header manifest grows with the study, at about one header per file. The
-// names themselves are drawn from one shared space, bounded by the pipeline's vocabulary
-// rather than by dataset size (see docs/adr/0004).
+/// DDL for `tabular_undeclared_columns`: the column names a table saw but does not
+/// declare — one row per distinct name, per table, for the **whole catalog**. It is the
+/// one table with no `dataset_id`, so it cannot say which dataset a name came from.
+///
+/// Populated only for tables whose ingestion policy is `undeclared: catalog`; every other
+/// table folds its extra columns into `other_data` and writes nothing here, so an empty
+/// table means "no cataloging policy is in use", not "no undeclared columns were seen".
+/// Written by [`crate::db::BidsDb::record_undeclared_columns`].
+///
+/// It answers "what confound regressors does this catalog's data contain?" without opening
+/// a file. It deliberately cannot answer *which* file had which — the authoritative per-file
+/// column set remains that file's own header, reachable through `file_registry.file_path`.
+/// ADR 0004 argues that trade, and why the key is a name rather than a file or a header
+/// signature.
 pub const CREATE_TABULAR_UNDECLARED_COLUMNS_TABLE: &str = "
 CREATE TABLE IF NOT EXISTS tabular_undeclared_columns (
     table_name TEXT,
@@ -315,25 +289,19 @@ CREATE TABLE IF NOT EXISTS tabular_undeclared_columns (
 );
 ";
 
-// The gradient payloads: one row per value in a `.bval`, one per column of a `.bvec`,
-// keyed by **the gradient file's own** `file_id` — not by the image, which is the whole
-// point (docs/adr/0007).
-//
-// A gradient set inherited from a higher directory level applies to every image below it,
-// so there is no single image to key on: `ds114` ships one root `dwi.bval` covering 20
-// images. Keying on the file the values were read from is what every other per-row table
-// already does, and it makes the foreign key satisfiable — a `.bval` is always a registry
-// row under its own path, whereas the image the old code synthesized by swapping the
-// extension on the stem often was not. The image-facing shape is the `diffusion` view.
-//
-// Two tables rather than one with nullable columns, because a `.bval` and a `.bvec` are
-// two files: one table each means every row is fully populated and a table's columns are
-// exactly what its source file supplies. It also gives each a single association to name,
-// which is what keeps the generated re-keying views a plain one-to-one join.
-//
-// `row_idx`, like every other per-row table: what is stored is the ordinal along the
-// file's own axis. That it *means* a volume of the image is a property of the association,
-// declared in the ingestion schema and surfaced by the view as `volume_idx`.
+/// DDL for `bvals`: one row per value in a `.bval`, PK `(file_id, row_idx)`, one `b DOUBLE`
+/// payload, and one of the four real `FOREIGN KEY`s in the catalog.
+///
+/// `file_id` is **the gradient file's own** — not the image's, which is the whole point: an
+/// inherited gradient set applies to every image below it, so there is no single image to
+/// key on, and a `.bval` is always a registry row under its own path, which is what makes
+/// the foreign key satisfiable (ADR 0003). The image-facing shape is
+/// [`CREATE_DIFFUSION_VIEW`]; querying `bvals` directly gets you the file's values, with no
+/// idea which images inherit them.
+///
+/// `row_idx` is the ordinal along the *file's own* axis, as on every per-row table. That it
+/// also *means* a volume of the image is a property of the association, declared in the
+/// ingestion schema and surfaced by the generated `bval_volumes` view as `volume_idx`.
 pub const CREATE_BVALS_TABLE: &str = "
 CREATE TABLE IF NOT EXISTS bvals (
     file_id UBIGINT,
@@ -344,6 +312,14 @@ CREATE TABLE IF NOT EXISTS bvals (
 );
 ";
 
+/// DDL for `bvecs`: one row per **column** of a `.bvec` — the file's three lines transposed
+/// into `x`/`y`/`z` — keyed and constrained exactly as [`CREATE_BVALS_TABLE`], whose doc
+/// carries the reasoning for keying on the gradient file rather than the image.
+///
+/// Two tables rather than one with nullable columns, because a `.bval` and a `.bvec` are two
+/// files: one table each means every row is fully populated, and each has exactly one
+/// association to name, which is what keeps the generated re-keying views (`bval_volumes`,
+/// `bvec_volumes`) a plain one-to-one join (ADR 0003).
 pub const CREATE_BVECS_TABLE: &str = "
 CREATE TABLE IF NOT EXISTS bvecs (
     file_id UBIGINT,
@@ -356,23 +332,24 @@ CREATE TABLE IF NOT EXISTS bvecs (
 );
 ";
 
-// The image-facing gradient table: one row per (diffusion image, volume), composed from
-// the two views the `describes` declarations generate (`bval_volumes`, `bvec_volumes`),
-// each of which re-keys its payload table onto the images that inherit it.
-//
-// Hand-written rather than generated because it joins *two* generated views, which is one
-// composition step beyond what a per-table `describes` block models — and a composition of
-// the general mechanism rather than an exception to it.
-//
-// The zip is decided by what the image inherits, not by filename surgery: a root-level
-// `dwi.bval` and a per-image `sub-01_dwi.bvec` reach the same `(file_id, volume_idx)`
-// through their own association edges, so a pair split across inheritance levels resolves
-// correctly instead of silently annihilating.
-//
-// `LEFT JOIN` from the b-values, so they define the volume axis — the same rule the old
-// row-per-volume writer applied when it NULL-filled a short `.bvec`. A `.bvec` with no
-// `.bval` therefore contributes no `diffusion` rows, but unlike before its values are not
-// lost: they are in `bvecs`, and keyed by image in `bvec_volumes`.
+/// DDL for the `diffusion` **view**: the image-facing gradient table, one row per (diffusion
+/// image, volume), composed from the two views the `describes` declarations generate
+/// (`bval_volumes`, `bvec_volumes`), each of which re-keys its payload table onto the images
+/// that inherit it. Because it reads generated views rather than tables, it must be executed
+/// after them — last of everything, in [`crate::db::BidsDb::create_tables`].
+///
+/// Hand-written rather than generated because it joins *two* generated views, one
+/// composition step beyond what a per-table `describes` block models (ADR 0003).
+///
+/// The zip is decided by what the image inherits, not by filename surgery: a root-level
+/// `dwi.bval` and a per-image `sub-01_dwi.bvec` reach the same `(file_id, volume_idx)`
+/// through their own association edges. `bval_file_id`/`bvec_file_id` report which file each
+/// half came from, which is the only way to see that they differ.
+///
+/// `LEFT JOIN` from the b-values, so they define the volume axis and a short `.bvec`
+/// NULL-fills. A `.bvec` with no `.bval` therefore contributes **no** `diffusion` rows at
+/// all; its values are not lost, though — they are in `bvecs`, and keyed by image in
+/// `bvec_volumes`.
 pub const CREATE_DIFFUSION_VIEW: &str = "
 CREATE OR REPLACE VIEW diffusion AS
 SELECT v.file_id,
@@ -387,20 +364,21 @@ FROM bval_volumes v
 LEFT JOIN bvec_volumes c USING (file_id, volume_idx);
 ";
 
-// file_associations is best-effort, import-time derived metadata (e.g. an
-// fmap's IntendedFor, or a coordsystem referencing an anatomical). Its source is
-// often a sidecar/JSON that is not itself a `scans` row, so we deliberately do
-// NOT enforce foreign keys here — doing so would drop otherwise-valid
-// associations during import. Targets are resolved to full dataset-relative
-// paths so they still join to `scans` when present.
-// `target_file_id` is deliberately **nullable**, and `target_file_path` is kept beside it:
-// an `IntendedFor` may name a file the dataset does not ship, and dropping those would trade
-// this table's keep-everything contract for referential tidiness. A dangling reference stays
-// recorded as its raw path with no id. `source_file_id` has no such problem — the source is
-// always a file the walk saw, since that is where the reference was read from.
-//
-// Still no foreign keys: `target_file_id` would need one that tolerates NULL, and the source
-// side is already guaranteed by construction.
+/// DDL for `file_associations`: best-effort, import-time-derived cross-references (an fmap's
+/// `IntendedFor`, a `coordsystem` naming an anatomical, a schema `meta.associations` edge),
+/// PK `(source_file_id, target_file_path, association_type)`. What each column holds is
+/// documented on the row type, [`crate::db::FileAssociation`].
+///
+/// **No foreign keys, deliberately** (ADR 0003). `target_file_id` is nullable and
+/// `target_file_path` travels beside it, because an `IntendedFor` may name a file the
+/// dataset does not ship; such a target stays recorded as its resolved path with a NULL id
+/// rather than being dropped, and any key would have to tolerate that NULL. The source side
+/// needs none either: it is always a file the walk saw, since that is where the reference
+/// was read from.
+///
+/// The target path is normalized at import, so a target the catalog *does* hold joins to
+/// `file_registry` (and through it to `all_files`) on the id, and is findable by path even
+/// when the id is NULL and the file arrives in a later run.
 pub const CREATE_FILE_ASSOCIATIONS_TABLE: &str = "
 CREATE TABLE IF NOT EXISTS file_associations (
     source_file_id UBIGINT,
@@ -411,30 +389,26 @@ CREATE TABLE IF NOT EXISTS file_associations (
 );
 ";
 
-// Every ingest root a dataset was built from (see docs/adr/0005). One row for the
-// ordinary single-root dataset; N for subject-sharded pipeline output, which is one
-// logical dataset with one root per subject.
-//
-// This is what `dataset_id` no longer has to do. A `file_path` is relative to the
-// `root_uri` it was walked from, so the two together address a file: two roots of one
-// dataset can hold the same relative path without colliding, and everything
-// dataset-scoped (`dataset_description`, `participants`, `dataset_links`,
-// `dataset_identity`) stays single.
-//
-// The root's URI is its own identifier — no separate short label. A label would need a
-// rule for deriving one, an escape hatch for when that rule collides (two roots whose
-// directories share a basename, `scratch/sub-01/fmriprep` and `scratch/sub-02/fmriprep`),
-// and a guarantee it never moves, since it is a stored key that `file_path` resolves
-// through. A URI is unique by construction and needs none of that. DuckDB
-// dictionary-encodes the column, so repeating it per row costs a code, not a path.
-//
-// The registry is explicit rather than `SELECT DISTINCT root_uri FROM file_registry`
-// because it is authoritative for a root that contributed no rows at all — an ingest that
-// found nothing, or whose every file an `ignore` rule claimed.
-//
-// `tenure` says what may be concluded from those rows (docs/adr/0009). It is per root
-// rather than per database because one catalog holds many datasets, and an `attached`
-// OpenNeuro dataset has to be able to sit beside a `managed` derivative.
+/// DDL for `dataset_roots`: every ingest root a dataset was built from, PK
+/// `(dataset_id, root_uri)`, plus the [`Tenure`] asserted over each (ADR 0005). One row for
+/// the ordinary single-root dataset; N for subject-sharded pipeline output, which is one
+/// logical dataset with one root per subject.
+///
+/// A `file_path` is relative to the `root_uri` it was walked from, so the two together
+/// address a file: two roots of one dataset can hold the same relative path without
+/// colliding, and everything dataset-scoped (`dataset_description`, `participants`,
+/// `dataset_links`, `dataset_identity`) stays single. The root's URI is its own identifier,
+/// with no separate short label to derive, disambiguate and keep stable (ADR 0005).
+///
+/// Explicit rather than `SELECT DISTINCT root_uri FROM file_registry` because it is
+/// authoritative for a root that contributed no rows at all — an ingest that found nothing,
+/// or whose every file an `ignore` rule claimed.
+///
+/// `tenure` says what may be concluded from those rows (ADR 0007), defaulting to `attached`
+/// so a row written without one means the weaker claim. Note that only this statement
+/// carries the two-value `CHECK`: a column added to an older catalog by
+/// [`ADD_DATASET_ROOTS_TENURE`] is unconstrained, which is why the read path tolerates an
+/// unexpected token.
 pub const CREATE_DATASET_ROOTS_TABLE: &str = "
 CREATE TABLE IF NOT EXISTS dataset_roots (
     dataset_id TEXT,
@@ -445,7 +419,7 @@ CREATE TABLE IF NOT EXISTS dataset_roots (
 );
 ";
 
-/// Bring a pre-tenure `dataset_roots` up to date (docs/adr/0009).
+/// Bring a pre-tenure `dataset_roots` up to date (docs/adr/0007).
 ///
 /// Idempotent, and applied on every `create_tables` so a catalog indexed before this column
 /// existed keeps working rather than failing on the first read of `tenure`. The `DEFAULT` is
@@ -455,11 +429,9 @@ pub const ADD_DATASET_ROOTS_TENURE: &str =
     "ALTER TABLE dataset_roots ADD COLUMN IF NOT EXISTS tenure TEXT DEFAULT 'attached'";
 
 /// What was promised about a root, and so what the catalog may conclude from its rows
-/// (docs/adr/0009).
+/// (ADR 0007).
 ///
-/// Both tiers are permanent. `Attached` is not a waypoint on the way to `Managed` — it is how
-/// bidslake stays useful to somebody who has data and no intention of handing control of it
-/// over, and most catalogs will hold nothing else.
+/// Both tiers are permanent: `Attached` is not a waypoint on the way to `Managed`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Tenure {
     /// Somebody else writes there. Indexing it promised only that the files will stay put, so
@@ -473,6 +445,14 @@ pub enum Tenure {
 }
 
 impl Tenure {
+    /// The token this tenure is stored as in `dataset_roots.tenure` — `"attached"` or
+    /// `"managed"`, the only two values [`CREATE_DATASET_ROOTS_TABLE`]'s `CHECK` admits.
+    ///
+    /// The write half of the round trip only, and lossless in that direction. The read half,
+    /// [`crate::db::BidsDb::dataset_root_tenure`], is asymmetric on purpose: it recognizes
+    /// `"managed"` and reads *anything else* — including a token from an older or a
+    /// hand-edited catalog, whose column the `CHECK` never covered — as [`Tenure::Attached`],
+    /// so an unrecognized value degrades to the weaker claim instead of failing the query.
     pub fn as_str(self) -> &'static str {
         match self {
             Tenure::Attached => "attached",
@@ -481,38 +461,44 @@ impl Tenure {
     }
 }
 
-// Cross-dataset association (see docs/adr/0003). The dataset-to-dataset relation is
-// deliberately NOT stored — it is resolved at query time by the `dataset_relations`
-// view over these two tables, so the catalog is correct regardless of ingest order
-// (a source dataset added later just makes the edge appear on the next query; nothing
-// to re-index). Each table stays keyed by a single `dataset_id`, so the crate
-// invariant "every table is keyed by dataset_id" holds and each ingest writes only
-// its own rows. Like `file_associations`: best-effort, no foreign keys — a declared
-// source that is not in the catalog (the usual case for a derivative) is kept, not dropped.
+// Cross-dataset association (ADR 0003). The dataset-to-dataset relation is deliberately
+// NOT stored — it is resolved at query time by the `dataset_relations` view over these two
+// tables. Each table stays keyed by a single `dataset_id`, so each ingest writes only its
+// own rows, and neither takes foreign keys: a declared source absent from the catalog, the
+// usual case for a derivative, is kept rather than dropped.
 
-// `dataset_links` holds two DIFFERENT kinds of statement, distinguished by `link_type`,
-// and it is worth naming them because only one of them is provenance:
-//
-//   PROVENANCE  "this dataset CAME FROM S"    -> feeds `dataset_relations`
-//   NAMING      "here, the name N REFERS TO L" -> feeds `dataset_link_targets`
-//
-// Crossed with where the statement came from, the table is a 2x2:
-//
-//              | derived from dataset_description.json | asserted by the user |
-//   provenance | 'source'   (SourceDatasets)           | 'declared'           |
-//   naming     | 'named'    (DatasetLinks)             | 'alias'              |
-//
-// `clear_derived_links` deletes exactly the left column on every re-index, so the
-// derived rows track the file while the user's survive. That is why 'alias' is grouped
-// with 'declared' rather than being given a rule of its own.
-//
-// A naming link must never produce a provenance edge: `derived_from`/`source_of` filter
-// both naming types out (see the relations view below). Conflating them is not
-// hypothetical — it was a live bug, since those arms originally filtered no `link_type`
-// at all and so read every `DatasetLinks` entry as a derivation.
-//
-// One row per `SourceDatasets` entry, per `--source-dataset` flag, per `DatasetLinks`
-// mapping, and per `bidslake link alias`.
+/// DDL for `dataset_links`: what a dataset declares about other datasets. One row per
+/// `SourceDatasets` entry, per `--source-dataset` flag, per `DatasetLinks` mapping, and per
+/// `bidslake link alias`; PK `(dataset_id, link_type, link_name, identity)`. `declared_ref`
+/// keeps the reference verbatim as it was written, for reporting; the canonicalized
+/// `identity`/`identity_kind`/`identity_base` beside it are [`crate::links::Identity`]'s three
+/// fields, and string equality on `identity` alone is the entire matching mechanism.
+///
+/// The table holds two **different kinds of statement**, distinguished by `link_type`, and
+/// they are worth naming because only one of them is provenance:
+///
+/// ```text
+///   PROVENANCE  "this dataset CAME FROM S"     -> feeds `dataset_relations`
+///   NAMING      "here, the name N REFERS TO L" -> feeds `dataset_link_targets`
+/// ```
+///
+/// Crossed with where the statement came from, the four `link_type` values are a 2x2:
+///
+/// ```text
+///              | derived from dataset_description.json | asserted by the user |
+///   provenance | 'source'   (SourceDatasets)           | 'declared'           |
+///   naming     | 'named'    (DatasetLinks)             | 'alias'              |
+/// ```
+///
+/// [`crate::db::BidsDb::clear_derived_links`] deletes exactly the left column on every
+/// re-index, so the derived rows track the file while the user's survive. That is why
+/// `alias` is grouped with `declared` rather than being given a rule of its own.
+///
+/// A naming link never produces a provenance edge: every arm of
+/// [`CREATE_DATASET_RELATIONS_VIEW`] filters both naming types out (ADR 0003).
+///
+/// `link_name` is empty for a provenance link, which has no name to carry; the naming view
+/// filters those rows out on exactly that.
 pub const CREATE_DATASET_LINKS_TABLE: &str = "
 CREATE TABLE IF NOT EXISTS dataset_links (
     dataset_id TEXT,
@@ -526,9 +512,22 @@ CREATE TABLE IF NOT EXISTS dataset_links (
 );
 ";
 
-// What identities a dataset *is* (its own `dataset:<id>`, its `DatasetDOI`, its
-// `root_uri`), so a source dataset that *is* present in the catalog can be matched
-// as the parent of the datasets that declare it.
+/// DDL for `dataset_identity`: the identities a dataset *is*, PK `(dataset_id, identity)`,
+/// so a source dataset that **is** present in the catalog can be matched as the parent of the
+/// datasets that declare it. The mirror of [`CREATE_DATASET_LINKS_TABLE`], which records what
+/// a dataset points *at*, in the same canonicalized [`crate::links::Identity`] vocabulary.
+///
+/// `source` says which fact produced the row, and takes exactly three values: `self` (the
+/// dataset's own `dataset:<id>`), `root_uri` (one row per registered root), and `DatasetDOI`.
+/// The first two are unconditional — even a dataset ingested through a layout adapter, with no
+/// `dataset_description.json` at all, is identifiable — while `DatasetDOI` appears only when
+/// the root description declares one. Every row is derived, and
+/// [`crate::db::BidsDb::clear_derived_links`] drops the lot on each re-index before they are
+/// rewritten, which is why the roots are read back from `dataset_roots` rather than from the
+/// run in progress.
+///
+/// A missing row is not an error: an absent source dataset simply has no identity here, so
+/// `derived_from`/`source_of` cannot fire for it while `shares_source` still can.
 pub const CREATE_DATASET_IDENTITY_TABLE: &str = "
 CREATE TABLE IF NOT EXISTS dataset_identity (
     dataset_id TEXT,
@@ -539,21 +538,26 @@ CREATE TABLE IF NOT EXISTS dataset_identity (
 );
 ";
 
-// The dataset-to-dataset relation, resolved at query time. Depth-1 only (no transitive
-// closure): `UNION` dedups, `from <> to` drops self-links, so cycles cannot arise.
-//   - `shares_source`: two datasets declare the SAME source identity. This needs no
-//     `dataset_identity` row, which is why it works when the shared source is absent
-//     from the catalog (the ds001761 fMRIPrep/MRIQC case).
-//   - `derived_from` / `source_of`: one dataset declares an identity that ANOTHER
-//     catalog dataset *is* (its DOI or its `dataset:<id>`).
-//
-// EVERY arm reads provenance links only. `named`/`alias` are naming statements — "here,
-// this word refers to that dataset" — and a reference is not a derivation: a study that
-// merely *points at* a template, an atlas, or a shared FreeSurfer tree did not come from
-// it, and two studies pointing at the same one are not co-derivatives. `shares_source`
-// always said so; `derived_from`/`source_of` did not, and filtered no `link_type` at all,
-// so every `DatasetLinks` entry read as a derivation. Naming is resolved separately, by
-// `dataset_link_targets` below.
+/// DDL for the `dataset_relations` **view**: the dataset-to-dataset relation, resolved at
+/// query time over [`CREATE_DATASET_LINKS_TABLE`] and [`CREATE_DATASET_IDENTITY_TABLE`] rather
+/// than stored, so ingest order is irrelevant and a source indexed later makes its edges
+/// appear on the next query with nothing to re-index (ADR 0003).
+///
+/// Depth-1 only — no transitive closure, so a grandparent is two queries away. `UNION` dedups
+/// and `from <> to` drops self-links, so cycles cannot arise. Three relations:
+///
+/// - `shares_source`: two datasets declare the **same** source identity. This arm reads no
+///   `dataset_identity` row, which is why it still works when the shared source is absent
+///   from the catalog — the ds001761 fMRIPrep/MRIQC case, where the two derivatives are held
+///   but their common parent is not.
+/// - `derived_from` / `source_of`: one dataset declares an identity that **another** catalog
+///   dataset *is* (its DOI or its `dataset:<id>`). Emitted as a symmetric pair, so a caller
+///   may filter on either direction without a second query.
+///
+/// Every arm reads provenance links only (`source`, `declared`). `named`/`alias` are naming
+/// statements — "here, this word refers to that dataset" — and a reference is not a
+/// derivation (ADR 0003). Naming is resolved separately, by
+/// [`CREATE_DATASET_LINK_TARGETS_VIEW`].
 pub const CREATE_DATASET_RELATIONS_VIEW: &str = "
 CREATE OR REPLACE VIEW dataset_relations AS
   SELECT a.dataset_id AS from_dataset_id, b.dataset_id AS to_dataset_id,
@@ -575,29 +579,23 @@ CREATE OR REPLACE VIEW dataset_relations AS
 ;
 ";
 
-// The other half of `dataset_links`: what a *name* refers to, resolved at query time.
-//
-// `dataset_relations` answers "where did this dataset come from"; this answers "in this
-// dataset, which catalog dataset does the name `freesurfer` mean". A consumer names the
-// link and the catalog supplies the id, so a query is portable across catalogs whose
-// dataset ids differ — which they routinely do, since a study processed one subject at a
-// time has one dataset per subject (`sub-001-freesurfer`, ...) rather than one `freesurfer`.
-//
-// A view, not a stored column, for the reason ADR 0003 §2 gives for `dataset_relations`: a
-// resolved target is a cache whose correctness depends on what else is in the catalog, and
-// the catalog grows. Naming a link before its target is indexed is not an error here — the
-// row simply resolves to nothing until the target arrives, and then resolves, with no
-// re-index and no bookkeeping.
-//
-// `target_dataset_id` is NULL when nothing in the catalog holds the identity, which is how
-// a caller tells "you never indexed that" from "you misspelled the name": the row exists,
-// the target does not.
-//
-// Self-references are kept, unlike in `dataset_relations`. A dataset deriving from itself is
-// nonsense, so the relation arms drop it; a dataset *naming* itself is not — \"here, `anat`
-// means this dataset\" is a useful thing to say, and it is the only way a query scoped by
-// name can mean \"my own dataset\". Since a link is resolved relative to the dataset that
-// declared it, dropping the self case would make that unsayable rather than safer.
+/// DDL for the `dataset_link_targets` **view**: the naming half of
+/// [`CREATE_DATASET_LINKS_TABLE`] — what a *name* refers to — resolved at query time.
+///
+/// [`CREATE_DATASET_RELATIONS_VIEW`] answers "where did this dataset come from"; this answers
+/// "in this dataset, which catalog dataset does the name `freesurfer` mean". A consumer names
+/// the link and the catalog supplies the id, so a query is portable across catalogs whose
+/// dataset ids differ (ADR 0003). A view rather than a stored column for the same reason the
+/// relations view is one: a resolved target is a cache, and the catalog grows.
+///
+/// `LEFT JOIN`, so `target_dataset_id` is NULL when nothing in the catalog holds the
+/// identity — which is how a caller tells "you never indexed that" from "you misspelled the
+/// name": the row is present either way, the target is not. A `DatasetLinks` value written as
+/// a path relative to the dataset root only resolves because the identity was canonicalized
+/// against that root at ingest (see [`crate::links::canonicalize_relative_to`]).
+///
+/// Self-references are kept, unlike in the relations view: a dataset *naming* itself is the
+/// only way a query scoped by name can mean "my own dataset".
 pub const CREATE_DATASET_LINK_TARGETS_VIEW: &str = "
 CREATE OR REPLACE VIEW dataset_link_targets AS
   SELECT l.dataset_id AS from_dataset_id,

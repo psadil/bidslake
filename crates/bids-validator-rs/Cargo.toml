@@ -37,3 +37,6 @@ rstest = { workspace = true }
 [[bench]]
 name = "validation_benchmark"
 harness = false
+
+[lints]
+workspace = true

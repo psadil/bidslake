@@ -1,3 +1,42 @@
+//! `bidslake` — the command line over a BIDS catalog.
+//!
+//! One binary, one DuckDB file. `index` builds that file from a BIDS dataset (a local
+//! directory or an `s3://` prefix), consolidating what is scattered across JSON sidecars,
+//! `.tsv` tables and filename entities into tables you query with SQL, while the imaging data
+//! stays where it is. Every other subcommand acts on a catalog that already exists.
+//!
+//! This crate is argument parsing plus the verbs that are not the ingest; the pipeline itself
+//! is the `bidslake` library ([`bidslake::bids::BidsParser`] driven by a
+//! [`bidslake::schema::Schema`]), which the binary consumes as a dependency rather than
+//! recompiling.
+//!
+//! - **`index`** walks a dataset and writes its metadata. `--overlay` and `--adapter` extend
+//!   the BIDS vocabulary so a producer that writes its own layout (fMRIPrep, FreeSurfer, FEAT)
+//!   is cataloged as well (ADR 0001, ADR 0002); `--dry-run` reports how each tabular file would
+//!   be routed and writes nothing. Re-indexing a dataset replaces that dataset's rows, and a
+//!   dataset that spans several roots is indexed once per root under one `--dataset-id`
+//!   (ADR 0005). `--managed` is the one flag that changes what the catalog *claims*: it takes
+//!   ownership of the root's storage instead of merely describing it (ADR 0007).
+//! - **`schema`** prints the tables and columns an index would build — or with `--diff`, only
+//!   what the overlays add. It opens no catalog and touches no dataset, so it is the cheap way
+//!   to check an overlay before running it.
+//! - **`verify`** re-stats the files a catalog names and reports what is missing or has
+//!   changed since it was indexed, exiting nonzero when anything has, so it drops into cron or
+//!   CI without parsing its output. An attached root is somebody else's tree, and this is what
+//!   makes its rows safe to act on (ADR 0007).
+//! - **`compact`** rewrites a catalog into a fresh file. Re-indexing deletes and re-inserts
+//!   rows, and DuckDB reuses the vacated blocks but never hands them back to the OS.
+//! - **`link`** manages cross-dataset statements on an existing catalog (ADR 0003): `add`
+//!   declares provenance ("came from"), `alias` declares naming ("here, `freesurfer` means
+//!   that dataset"), `init` backfills both from descriptions already stored, and `list` shows
+//!   what resolves, what dangles, and where two datasets differ only by version.
+//! - **`transcode`** is the managed-mode verb for rewriting stored files, and is not yet
+//!   implemented.
+//!
+//! `--version` reports the build's commit and not just the package version: a binary is
+//! usually copied to wherever it runs, so that is the only way to tell which source a given
+//! copy came from.
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::collections::{BTreeMap, HashSet};
@@ -33,7 +72,7 @@ enum Commands {
     ///
     /// The catalog records what the walk saw, and does not own the tree it saw it in.
     /// `--managed` is what changes that, handing bidslake ownership of the root's storage
-    /// (docs/adr/0009).
+    /// (docs/adr/0007).
     Index {
         /// Input BIDS dataset directory or S3 URI (e.g., s3://bucket/prefix)
         #[arg(short, long)]
@@ -108,7 +147,7 @@ enum Commands {
         #[arg(long)]
         no_stat: bool,
 
-        /// Take ownership of this root's storage: `tenure = 'managed'` (docs/adr/0009).
+        /// Take ownership of this root's storage: `tenure = 'managed'` (docs/adr/0007).
         ///
         /// The default, `attached`, is bidslake reading somebody else's tree — the right tier
         /// for a downloaded dataset or a colleague's derivatives, and a permanent one. Opting
@@ -158,7 +197,7 @@ enum Commands {
     ///
     /// An `attached` root is somebody else's tree, so its rows describe what was true at
     /// index time. This passing is what lets a caller act on them without re-checking the
-    /// files itself (docs/adr/0009).
+    /// files itself (docs/adr/0007).
     Verify {
         /// bidslake DuckDB database
         #[arg(short, long, default_value = "bidslake.duckdb")]
@@ -367,7 +406,7 @@ async fn main() -> Result<()> {
         Commands::Transcode { database, to } => {
             anyhow::bail!(
                 "`transcode` is not yet implemented (managed mode). \
-                 See the README on managed mode. (database: {database}, to: {to})"
+                 See docs/roadmap.md on managed mode. (database: {database}, to: {to})"
             )
         }
         Commands::Compact { database, output } => run_compact(&database, output.as_deref()),

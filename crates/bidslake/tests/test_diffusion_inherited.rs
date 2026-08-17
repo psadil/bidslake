@@ -1,6 +1,6 @@
 //! Diffusion gradients that are **not** a sibling pair beside their image.
 //!
-//! Every case here returned zero rows before docs/adr/0007, and none was covered by a test —
+//! Every case here returned zero rows before docs/adr/0003, and none was covered by a test —
 //! which is why the defect stayed silent through the ADR 0006 foreign-key work that first
 //! made it loud. The common cause was `process_diffusion_file` deriving the image by swapping
 //! the extension on the gradient file's stem, so anything but `<stem>.nii.gz` sitting beside

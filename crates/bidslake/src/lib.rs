@@ -15,8 +15,12 @@
 //! filename entities, and writes rows — the whole ingest wrapped in one
 //! transaction. The [`schema`] module is the table/column reference; for *how*
 //! that schema is generated from the BIDS schema read [`schema::dynamic`], and
-//! for the ingestion pipeline read [`bids`]. (The README covers the pitch and the
-//! managed-mode design.)
+//! for the ingestion pipeline read [`bids`].
+//!
+//! Every design decision behind those pieces is argued in the architecture decision
+//! records under `docs/adr/`, cited from here as "ADR NNNN"; the crate README is the
+//! pitch and the install/quickstart, and `docs/roadmap.md` holds what is not settled —
+//! managed mode among it.
 //!
 //! # Examples
 //!

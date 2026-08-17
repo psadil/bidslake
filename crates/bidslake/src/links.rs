@@ -55,8 +55,31 @@ impl IdentityKind {
 /// views match on `value`, never `base`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
+    /// The comparable form, stored in `dataset_links.identity` and `dataset_identity.identity`.
+    /// String equality on this column is the *entire* linking mechanism (ADR 0003): the
+    /// resolver views join on it, so two datasets are co-derivatives exactly when their
+    /// declarations reduce to the same `value` and are unrelated otherwise.
+    ///
+    /// Always carries the kind's marker — `doi:`, `dataset:`, `file://`, `s3://`, the URL
+    /// scheme, or `opaque:` — so a reference of one kind can never collide with the same text
+    /// read as another. Re-canonicalizing one is a fixed point for every kind but
+    /// [`IdentityKind::Opaque`], where the prefix is re-applied and the kind flips to
+    /// [`IdentityKind::Dataset`]; a stored `identity` is a result, not a reference to feed back
+    /// in, and no call site does.
     pub value: String,
+    /// Which branch of [`canonicalize`] recognized the reference, stored in
+    /// `dataset_links.identity_kind`. Its use is triage, not matching: an [`IdentityKind::Doi`]
+    /// link means the same thing on any machine, while an [`IdentityKind::File`] one is a path
+    /// on whichever host ran the ingest and stops resolving the moment the catalog moves.
     pub kind: IdentityKind,
+    /// `value` with a trailing OpenNeuro-style `.v<digits>(.<digits>)*` removed, stored in
+    /// `dataset_links.identity_base`. Equal to `value` for every kind but [`IdentityKind::Doi`],
+    /// which is the only one that versions this way.
+    ///
+    /// Read by nothing that links: `bidslake link list` uses it to *report* two datasets whose
+    /// DOIs differ only in version, precisely because the views will not join them. Two
+    /// versions of one dataset are deliberately different identities; `--source-dataset` is how
+    /// a user overrides that.
     pub base: String,
 }
 
@@ -255,6 +278,7 @@ fn strip_version(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use rstest::rstest;
 
     /// Every reference form, and the `(value, kind)` it canonicalizes to.
@@ -386,23 +410,111 @@ mod tests {
         );
     }
 
-    /// Every form that stands on its own must be unaffected by the root, so the
-    /// hand-written escape hatches keep working.
-    #[rstest]
-    #[case("dataset:studyB")]
-    #[case("10.18112/openneuro.ds001761.v2.0.1")]
-    #[case("https://doi.org/10.18112/openneuro.ds001761.v2.0.1")]
-    #[case("s3://bucket/other")]
-    #[case("file:///elsewhere/x")]
-    #[case("/elsewhere/x")]
-    #[case("https://example.org/repo")]
-    fn an_absolute_reference_passes_through_untouched(#[case] reference: &str) {
-        let joined = canonicalize_relative_to(reference, "file:///data/study");
+    /// A reference that stands on its own, in any of the shapes that can.
+    ///
+    /// `label` is deliberately not restricted to what OpenNeuro emits: these strings come
+    /// from a dataset's own `DatasetLinks`/`Sources`, so the parser meets whatever an author
+    /// wrote.
+    fn an_absolute_reference() -> impl Strategy<Value = String> {
+        let label = "[0-9A-Za-z._-]{1,8}";
+        prop_oneof![
+            label.prop_map(|s| format!("dataset:{s}")),
+            (label, label).prop_map(|(a, b)| format!("10.{a}/{b}")),
+            (label, label).prop_map(|(a, b)| format!("https://doi.org/10.{a}/{b}")),
+            (label, label).prop_map(|(a, b)| format!("doi:10.{a}/{b}")),
+            (label, label).prop_map(|(a, b)| format!("s3://{a}/{b}")),
+            (label, label).prop_map(|(a, b)| format!("file:///{a}/{b}")),
+            (label, label).prop_map(|(a, b)| format!("/{a}/{b}")),
+            (label, label).prop_map(|(a, b)| format!("https://{a}.org/{b}")),
+        ]
+    }
+
+    /// The one kind that is not a fixed point, pinned so the boundary is documented rather
+    /// than merely excluded from the property above.
+    ///
+    /// An opaque value is a *result*, not a reference. Re-canonicalizing `"opaque:"` does not
+    /// merely double the prefix — the bare token has no whitespace, so it is read as a dataset
+    /// id and the kind flips `Opaque` -> `Dataset`, which is the part that would be hard to
+    /// diagnose from a `dataset_links` row.
+    #[test]
+    fn an_opaque_value_is_not_itself_a_valid_reference() {
+        let once = canonicalize("");
+
+        let twice = canonicalize(&once.value);
 
         assert_eq!(
-            joined.value,
-            canonicalize(reference).value,
-            "{reference} must not be joined to the root"
+            (
+                once.value.as_str(),
+                once.kind,
+                twice.value.as_str(),
+                twice.kind
+            ),
+            (
+                "opaque:",
+                IdentityKind::Opaque,
+                "dataset:opaque:",
+                IdentityKind::Dataset
+            )
         );
+    }
+
+    /// Every reference form, including the ones that reduce to [`IdentityKind::Opaque`]: an
+    /// unknown scheme, free text with whitespace, and the empty string. These are what a
+    /// `Sources` entry looks like when an author wrote prose instead of an identifier, so they
+    /// are the *common* bad input rather than an exotic one.
+    fn any_reference() -> impl Strategy<Value = String> {
+        let label = "[0-9A-Za-z._-]{1,8}";
+        prop_oneof![
+            an_absolute_reference(),
+            (label, label).prop_map(|(a, b)| format!("ftp://{a}/{b}")),
+            (label, label).prop_map(|(a, b)| format!("{a} {b}")),
+            label.prop_map(|s| s.to_string()),
+            Just(String::new()),
+        ]
+    }
+
+    proptest! {
+        /// Every form that stands on its own is unaffected by the root, so the hand-written
+        /// escape hatches keep working.
+        ///
+        /// Was seven fixed strings. The assertion was already the metamorphic relation —
+        /// "joining it to a root changes nothing" — so the rows were seven points of a law
+        /// this states directly, over generated hosts, DOI registrants and path segments.
+        #[test]
+        fn an_absolute_reference_passes_through_untouched(reference in an_absolute_reference()) {
+            let joined = canonicalize_relative_to(&reference, "file:///data/study");
+
+            prop_assert_eq!(joined.value, canonicalize(&reference).value);
+        }
+
+        /// Canonicalizing a canonical identity returns it unchanged.
+        ///
+        /// The point of the type: two spellings of one source collide because both reduce to
+        /// the same `value`. That only holds if reducing is a fixed point — otherwise a value
+        /// that has been through the function once is not comparable with one that has been
+        /// through it twice, and which of those a `dataset_links` row holds depends on the
+        /// path it took to get there.
+        ///
+        /// Over *every* reference form, not just the absolute ones — restricted to those, the
+        /// property passes without ever reaching the one kind where it fails.
+        ///
+        /// `Opaque` is excluded, and the exclusion is the finding. `opaque:` is a prefix this
+        /// function *adds* rather than recognizes, so feeding an opaque value back in prefixes
+        /// it again and re-kinds it (see
+        /// `an_opaque_value_is_not_itself_a_valid_reference`). That is a boundary, not a bug:
+        /// no caller re-canonicalizes: every call site passes a string declared by a dataset,
+        /// a CLI argument, or a root URI, never a stored `identity_value`. Stated here so the
+        /// boundary is visible to whoever first thinks of round-tripping one.
+        #[test]
+        fn canonicalizing_an_identity_again_leaves_it_unchanged(reference in any_reference()) {
+            let once = canonicalize(&reference);
+
+            let twice = canonicalize(&once.value);
+
+            prop_assert!(
+                once.kind == IdentityKind::Opaque || twice == once,
+                "{reference:?} canonicalized to {once:?} then {twice:?}"
+            );
+        }
     }
 }

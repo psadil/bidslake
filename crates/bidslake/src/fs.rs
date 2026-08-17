@@ -49,6 +49,14 @@ pub fn local_root(root_uri: &str) -> Option<PathBuf> {
 /// can ask of a catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileStat {
+    /// Apparent size, as the backend already knows it: `len()` from a local `stat`, or the
+    /// object's `Size` from the S3 listing.
+    ///
+    /// Local stats follow symlinks, so a symlinked or git-annexed file reports its *target's*
+    /// size — and a broken symlink yields no [`FileStat`] at all rather than a zero. A
+    /// pseudo-file (a directory the schema treats as one datafile: `.ds/`, `.ome.zarr/`) is
+    /// stat-ed like any other walked path, so this is the size of the directory inode and
+    /// says nothing about the data inside it.
     pub size_bytes: u64,
     /// Nanoseconds since the Unix epoch. Signed, because a pre-1970 mtime is legal and a
     /// backup restore does produce them; `i64` reaches year 2262, which is enough.
@@ -133,6 +141,20 @@ pub trait BidsFileSystem: Send + Sync {
     }
 }
 
+/// The [`BidsFileSystem`] for a dataset on this machine — every input that is not an
+/// `s3://` URI, and the only backend a build without the `s3` feature has.
+///
+/// Two things it does that the trait does not promise. It is the one backend that can hand
+/// back a [`FileTree`], so `bids-core`'s inheritance and association helpers work here and
+/// fall back to per-path logic on S3; the tree is a by-product of
+/// [`walk`](BidsFileSystem::walk), so [`file_tree`](BidsFileSystem::file_tree) is `None`
+/// until a walk has run. And the root it *reports* is canonicalized while the root it
+/// *reads through* is the path as given: `read_to_string` and `stat_many` join onto the
+/// original, [`root`](BidsFileSystem::root) and
+/// [`read_csv_source`](BidsFileSystem::read_csv_source) onto the symlink-resolved one. So a
+/// dataset reached through a symlinked path is cataloged under its real location — which is
+/// what makes a second ingest by either spelling land on the same `root_uri`, and so on the
+/// same `file_id` for every file, rather than duplicating the dataset.
 pub struct LocalFileSystem {
     root: PathBuf,
     /// The tree produced by the last [`walk`](BidsFileSystem::walk), cached so
@@ -145,6 +167,12 @@ pub struct LocalFileSystem {
 }
 
 impl LocalFileSystem {
+    /// A backend rooted at `root` — the directory holding `dataset_description.json`, or, for
+    /// a dataset read through a layout adapter, the top of the producer's tree.
+    ///
+    /// Touches the filesystem not at all: the root is neither canonicalized nor checked to
+    /// exist, so a mistyped path is reported by [`walk`](BidsFileSystem::walk) (which names
+    /// the root in its error) rather than here.
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),

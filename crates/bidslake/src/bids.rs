@@ -118,6 +118,24 @@ fn stored_matches(have: Option<&str>, want: Option<&Value>) -> bool {
     }
 }
 
+/// One ingest run: the [`BidsFileSystem`] to walk, the [`Schema`] to interpret it with, and
+/// the in-memory accumulators the walk fills.
+///
+/// One parser, one root, one use. [`Self::parse`] leaves every accumulator populated, so
+/// calling it twice would re-write what the first call collected; a dataset that spans several
+/// ingest roots (ADR 0005) is several runs against the same database, each with its own parser
+/// and its own `root_uri`.
+///
+/// Most of the fields are deferred work rather than settings. Associations, gradient payloads,
+/// sidecars, headerless recordings and routed tabular files are all held until the walk is
+/// finished, because each needs something only a finished walk knows: which paths the dataset
+/// actually ships, what every sidecar said, which files share a header and can be read in one
+/// `read_csv`. The consequence is that peak memory scales with the dataset rather than with a
+/// bounded window — the prefetched file bodies are the bulk of it, and are dropped the moment
+/// the serial passes end.
+///
+/// Built by [`Self::new`], adjusted by the `with_*` builders, then driven by [`Self::parse`];
+/// nothing else on it is public.
 pub struct BidsParser {
     fs: Box<dyn BidsFileSystem>,
     dataset_id: Option<String>,
@@ -157,7 +175,7 @@ pub struct BidsParser {
     file_stats: HashMap<String, crate::fs::FileStat>,
     /// Whether to run that pass at all (`--no-stat` turns it off).
     stat_files: bool,
-    /// The tenure this run asserts for its root (docs/adr/0009). Defaults to
+    /// The tenure this run asserts for its root (docs/adr/0007). Defaults to
     /// [`Tenure::Attached`]; `--managed` is what raises it.
     tenure: Tenure,
     /// Statuses decided during the **walk**, keyed by dataset-relative path.
@@ -481,6 +499,28 @@ struct PendingTabular {
 }
 
 impl BidsParser {
+    /// A parser for one ingest root, with everything the walk needs settled up front.
+    ///
+    /// `dataset_id` is the caller's *assertion* that this root belongs to that dataset, and is
+    /// treated as one. `None` infers it instead — the root `dataset_description.json`'s `Name`,
+    /// falling back to the root directory or S3 prefix name — and an inferred id that collides
+    /// with a dataset already in the catalog is refused unless the two descriptions agree
+    /// (ADR 0005), because a pipeline writes its own name into `Name` identically for every
+    /// study it processes.
+    ///
+    /// `schema` must be the *effective* schema already — base plus every overlay, ingestion
+    /// fragment and term map this catalog uses — since the parser reads it and never augments
+    /// it. `s3_httpfs` is `Some` only for an `s3://` root and is applied at the start of
+    /// [`Self::parse`], not here. `apply_bidsignore = false` (`--no-bidsignore`) stops both the
+    /// walk and the parser filtering, which is how a pipeline's deliberately hidden outputs get
+    /// indexed. `stat_files = false` (`--no-stat`) leaves `size_bytes`/`mtime_ns` NULL on every
+    /// registry row, which downgrades `verify` to a presence check.
+    ///
+    /// Everything else takes a default: `attached` tenure ([`Self::with_tenure`]), no term maps
+    /// ([`Self::with_term_maps`]), no declared sources ([`Self::with_declared_sources`]), and
+    /// the readers bidslake ships. Construction opens the in-memory read-preflight connection
+    /// eagerly, so it touches DuckDB — but never the dataset, which is not read until
+    /// [`Self::parse`].
     pub fn new(
         fs: Box<dyn BidsFileSystem>,
         dataset_id: Option<String>,
@@ -525,7 +565,7 @@ impl BidsParser {
         }
     }
 
-    /// Assert that this run's root is bidslake-managed (docs/adr/0009).
+    /// Assert that this run's root is bidslake-managed (docs/adr/0007).
     ///
     /// A builder rather than another `new` parameter because it is the CLI's `--managed` and
     /// nothing else: every other construction — tests, benches, embedders — wants the
@@ -809,6 +849,27 @@ impl BidsParser {
             .collect())
     }
 
+    /// Run the whole ingest into `db`: walk and route, write the registry and the tables that
+    /// point at it, then apply BIDS inheritance.
+    ///
+    /// `db` must already carry this run's [`Schema`] (via [`BidsDb::create_tables`]), and the
+    /// caller owns the transaction — `main` wraps this call in one, which is what makes a
+    /// failed run leave no half-written catalog behind. Nothing here commits.
+    ///
+    /// Per-file trouble is a warning on stderr, never an error: an unparseable
+    /// `dataset_description.json`, a TSV that `read_csv` cannot open, a content reader that
+    /// fails, a file that disappeared between the walk and the read. Where the catalog can say
+    /// so it does — a failed tabular batch leaves `status = 'failed'` on those rows — and the
+    /// run carries on. What *does* return `Err` is the small set of writes every other table
+    /// depends on: the file registry, the file associations, the gradient payloads, plus a
+    /// dataset id that cannot be resolved unambiguously (see [`Self::new`]).
+    ///
+    /// The ordering is load-bearing rather than incidental. The root is registered as soon as
+    /// the id is settled, before any per-file pass, so a refused id costs no writes; the
+    /// registry is written before anything that foreign-keys into it, which is what lets the
+    /// batched tabular flush resolve `file_id`s by joining it; and inheritance runs last,
+    /// because a merged sidecar row cannot be built until every sidecar in the dataset has been
+    /// seen.
     pub async fn parse(&mut self, db: &BidsDb) -> Result<()> {
         // Whether the caller named the dataset. Captured before the walk resolves an
         // inferred one, because `resolve_root` treats the two differently: an asserted id
@@ -1144,7 +1205,7 @@ impl BidsParser {
         // naming an image that does not exist, and a `.bval` shipped without its `.bvec`
         // (or either half inherited from a different level) is stored rather than dropped.
         // Which images they describe is `file_associations`' answer, and the `diffusion`
-        // view's (docs/adr/0007).
+        // view's (docs/adr/0003).
         //
         // Split by kind and written in two batches rather than a call per file, because each
         // call is one staged upsert: per file that would be a temp table per file, which costs
@@ -3348,11 +3409,9 @@ const HEADER_READ_OPTS: &str = concat!("header=true, ", non_poisoning_read_flags
 /// What a file *is* — the `kind` column of the file registry, and what a consumer filters
 /// `all_files` on (docs/adr/0006).
 ///
-/// Deliberately coarse. BIDS has no data/metadata/table axis to borrow: `rules.files` bundles a
-/// data file and its sidecar into one rule (149 of its 169 extension-bearing rules list `.json`
-/// beside a non-JSON extension), `objects.extensions` is a glossary, and upstream itself defines
-/// "is a sidecar" as `extension == ".json"` plus a hand-written exception. So this is bidslake's
-/// own vocabulary, in the sense ADR 0002 §4 established for read-vs-catalog.
+/// Deliberately coarse, and bidslake's own vocabulary rather than one borrowed from BIDS, which
+/// has no data/metadata/table axis to lend: `rules.files` cannot separate a data file from its
+/// sidecar, the one distinction `kind` exists to draw (ADR 0006).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     /// A primary data file — an image, a recording, a surface. `all_files WHERE kind = 'data'`
@@ -3374,6 +3433,12 @@ pub enum Kind {
 }
 
 impl Kind {
+    /// The lowercase literal written to `file_registry.kind`, and therefore what a query
+    /// compares against (`WHERE kind = 'data'`).
+    ///
+    /// A stored vocabulary, not a display name: these six strings are already in every catalog
+    /// bidslake has written and in every query anyone has saved against one, so changing a
+    /// spelling changes what those queries match rather than how a row prints.
     pub fn as_str(self) -> &'static str {
         match self {
             Kind::Data => "data",
@@ -3399,42 +3464,12 @@ impl Kind {
 /// `\x1f` (ASCII unit separator) delimits the parts because it cannot occur in a path or URI, so
 /// no combination of the three can be confused for another.
 ///
-/// # Why 64 bits and not 128
-///
-/// It used to be 128, stored as `HUGEINT`. That does not survive the trip to Python: the Arrow
-/// bridge maps `HUGEINT` to `Decimal128(38, 0)`, whose maximum is `10^38 - 1` while `HUGEINT`
-/// reaches `2^127 - 1 ≈ 1.7 × 10^38` — so **41% of the id space was outside the type the value
-/// was handed over in**. The value read back fine but could not be used to build a new frame:
-///
-/// ```text
-/// >>> pl.DataFrame([{"file_id": df["file_id"][0]}])
-/// RuntimeError: BindingsError: "Decimal is too large to fit in Decimal128"
-/// ```
-///
-/// Serializing a query result is an ordinary thing to do, and it failed for about two files in
-/// five, chosen by hash — so it presented as flakiness rather than as a type error. Widening the
-/// decimal is not available: polars caps precision at 38 (`precision must be between 1 and 38`),
-/// because its `Decimal` is Decimal128-backed, so the ceiling is upstream of both crates.
-///
-/// `UBIGINT` crosses as `UInt64` and arrives as a plain Python `int` — no decimal, no rounding,
-/// no range to fall off. It also fits `serde_json::Number` exactly, which is why this returns an
-/// integer rather than the decimal string the 128-bit version needed, and why
-/// [`Schema::row_values`] no longer parses an id back out of a string.
-///
-/// The cost is collision resistance, and it is worth stating rather than assuming. By the
-/// birthday bound the probability of any collision in a catalog of `n` files is `≈ n² / 2^65`:
-///
-/// | files in one catalog | P(collision) |
-/// |---|---|
-/// | 10⁴ | 3 × 10⁻¹² |
-/// | 10⁶ | 3 × 10⁻⁸ |
-/// | 10⁷ | 3 × 10⁻⁶ |
-/// | 10⁸ | 3 × 10⁻⁴ |
-///
-/// A million-file catalog — a study of ~10,000 fMRI runs, counting its FreeSurfer trees — is at
-/// one in thirty million, below the rate at which the disk under it corrupts a block. It stops
-/// being comfortable somewhere past 10⁸ files, which is where this decision should be revisited;
-/// `TODO.md` carries the note.
+/// The width is 64 and not 128 because `HUGEINT` does not survive the Arrow bridge to Python,
+/// which hands it over as `Decimal128(38, 0)` — a range two ids in five fall outside of. ADR
+/// 0006 works that through, along with the collision resistance it costs and the point past
+/// which the choice wants revisiting. `UBIGINT` crosses as `UInt64` and arrives as a plain
+/// Python `int`, and it fits `serde_json::Number` exactly, which is why this returns an integer
+/// and [`Schema::row_values`] takes one without a decimal-string detour.
 pub(crate) fn file_id(dataset_id: &str, root_uri: &str, file_path: &str) -> u64 {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -3499,7 +3534,8 @@ pub fn build_bidsignore(content: &str) -> Result<Gitignore> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BidsParser, Kind, build_bidsignore, kind_of};
+    use super::{BidsParser, Kind, build_bidsignore, file_id, kind_of};
+    use proptest::prelude::*;
     use rstest::rstest;
     use std::path::Path;
 
@@ -3770,6 +3806,38 @@ mod tests {
             file_id("ds", "file:///r1", "desc-aseg_dseg.tsv"),
             file_id("ds", "file:///r2", "desc-aseg_dseg.tsv")
         );
+    }
+
+    proptest! {
+        /// No two distinct identity triples in a catalog-sized corpus share an id.
+        ///
+        /// `file_id` is a primary key written with `INSERT OR REPLACE`, so a collision does not
+        /// raise — it quietly merges two files into one row, which ADR 0006 records as open.
+        /// This is the half that can be checked without a catalog, and the half that would
+        /// fail first if the hash, the truncation to 64 bits, or the `\x1f` join ever changed.
+        ///
+        /// The alphabets include `/`, `:`, `.`, `_` and `-` because the claim being tested is
+        /// that the unit separator "cannot occur in a path or URI" — an alphabet of bare
+        /// letters would never put that to the question. A `BTreeSet` supplies the distinctness
+        /// by construction, so no case is spent rejecting a duplicate.
+        ///
+        /// This does not disprove the birthday bound in the doc above; 200 triples is far below
+        /// where 64 bits gets interesting. It asserts the function is injective on the shapes a
+        /// real catalog holds, which is the property the primary key actually rests on.
+        #[test]
+        fn no_two_identity_triples_in_a_corpus_share_an_id(
+            triples in prop::collection::btree_set(
+                ("[a-z0-9-]{1,6}", "(file|s3)://[a-z0-9/._-]{1,10}", "[a-z0-9/._-]{1,14}"),
+                1..200,
+            )
+        ) {
+            let ids: std::collections::BTreeSet<u64> = triples
+                .iter()
+                .map(|(dataset, root, path)| file_id(dataset, root, path))
+                .collect();
+
+            prop_assert_eq!(ids.len(), triples.len());
+        }
     }
 
     /// The case `is_datafile` cannot express, and the reason `kind_of` takes `datatype` as an

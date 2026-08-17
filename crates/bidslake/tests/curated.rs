@@ -110,7 +110,7 @@ async fn ds000117_diffusion_and_associations() -> anyhow::Result<()> {
 
     // 11 dwi acquisitions, each 65 volumes -> one row per volume = 715 rows.
     //
-    // Unchanged by docs/adr/0007, and that is the point of keeping the assertion: every
+    // Unchanged by docs/adr/0003, and that is the point of keeping the assertion: every
     // ds000117 image has its *own* sibling gradient pair, so the re-keying view fans each
     // one out to exactly one image and the image-facing answer is identical to what the
     // old image-keyed table stored. The datasets where the shape differs — ds114's one

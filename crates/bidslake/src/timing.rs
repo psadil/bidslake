@@ -20,11 +20,10 @@
 //! that is always latency-bound. And nothing counts `stat` calls, which is the other
 //! per-file round trip a regression could reintroduce.
 //!
-//! State is process-global. The alternative — threading a handle through `parse` and
-//! its callees — is what the previous five-`Option<Duration>`-parameter reporter did,
-//! and it could not reach the phases that live in `main` (schema load, DDL, and the
-//! commit, which on a network-hosted catalog is not a small share). Nothing here is
-//! read except by [`report`], so a global costs nothing in clarity.
+//! State is process-global. The alternative — threading a handle through `parse` and its
+//! callees — cannot reach the phases that live in `main` (schema load, DDL, and the commit,
+//! which on a network-hosted catalog is not a small share). Nothing here is read except by
+//! [`report`], so a global costs nothing in clarity.
 //!
 //! Everything is gated on one `bool` read once at startup: when timing is off,
 //! [`scope`] returns a guard holding `None` and its `Drop` is a single branch.

@@ -57,3 +57,32 @@ tempfile = "3.8"
 # spelled as a `for` loop over an inline table — which reports one failing test for N cases
 # and stops at the first, the masking CONTRIBUTING.md asks contributors to avoid.
 rstest = "0.26"
+# Property-based tests: state the rule, let the generator find the case. Note this is *not*
+# dev-only in `bids-core`/`bids-schema` — each exposes a `strategy` module behind a `proptest`
+# feature so the crates above can reuse one set of generators, and a `[dev-dependencies]`
+# entry is not linkable from a downstream crate.
+#
+# `default-features = false` drops `fork` and `timeout`, which exist to run each case in a
+# subprocess so a property that segfaults or hangs still reports. Nothing here can do either —
+# these are pure parsers and a JSON merge — and the two would add `rusty-fork`, `quick-error`
+# and `wait-timeout` to the lock for no benefit. `bit-set` is kept: it is what proptest shrinks
+# collections with, and `bit-set`/`bit-vec` 0.8 are already in the lock via `fancy-regex`.
+proptest = { version = "1.11", default-features = false, features = ["std", "bit-set"] }
+
+# Documentation lints. `missing_docs` is on workspace-wide so a new undocumented public item is
+# a warning the moment it is written, rather than a debt discovered later — CI runs clippy with
+# `-D warnings`, so it is effectively an error.
+#
+# The two validator crates opt out at their crate root: between them they carry 463 undocumented
+# public items, and clearing that is its own task rather than a rider on a documentation review.
+# Removing those two `allow`s is the whole of that task.
+#
+# `missing_errors_doc`/`missing_panics_doc` are deliberately absent. They are clippy::pedantic
+# and would add 93 items across the workspace; the intent is to adopt them once the prose above
+# is settled, not to blanket-enable a pedantic group.
+[workspace.lints.rust]
+missing_docs = "warn"
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "warn"
+private_intra_doc_links = "warn"

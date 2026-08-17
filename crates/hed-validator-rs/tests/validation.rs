@@ -1,3 +1,9 @@
+//! Conformance tests against the vendored `hed-standard/hed-tests` suite.
+//!
+//! Drives the same string, sidecar and tabular validators the CLI does, over the upstream
+//! test corpus, so a divergence from `hed-python` shows up as a failing case rather than as
+//! a difference nobody measured. The corpus is a submodule at `tests/hed-tests`.
+
 use hed_validator_rs::data::{Sidecar, TabularInput};
 use hed_validator_rs::errors::HedError;
 use hed_validator_rs::parser::parse_hed_string;

@@ -1,3 +1,12 @@
+//! The `hed-validator-rs` command-line validator.
+//!
+//! Validates a HED string (`--string`), or a file of them one per line (`--file`), against one
+//! or more schema versions. `--schema-version` takes either a single version (`8.4.0`) or a
+//! comma-separated merge group with optional namespace prefixes (`8.3.0,sc:score_1.0.0`);
+//! `--schema-dir` points at a `hed-standard/hed-schemas` checkout so schemas load offline.
+//!
+//! The library this drives is [`hed_validator_rs`].
+
 use clap::Parser;
 use hed_validator_rs::parser::parse_hed_string;
 use hed_validator_rs::schema::{SchemaCollection, load_schema_version};
