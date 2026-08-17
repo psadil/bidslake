@@ -296,15 +296,13 @@ role's declared extension is what will be *written* there, not what to go lookin
 
 ## Backwards Compatibility
 
-A plain BIDS catalog is unaffected in every byte: with no term map configured the projectable-concept
-set is empty, the registry gets no `projected` column, and the emitted DDL is unchanged.
+A plain BIDS catalog is unaffected in every byte: with no term map configured the
+projectable-concept set is empty and the emitted DDL is unchanged.
 
-Adding an adapter to an existing catalog is the one migration. Tables are created only if absent, so
-a catalog's `file_registry` keeps the physical shape its first run gave it, and a later run whose
-term map would store a projection has nowhere to put it; `BidsDb::check_registry_shape` refuses that
-run rather than dropping the column silently. The rule that makes run order irrelevant is that
-**the adapter set describes the catalog, not the dataset being added**: pass every adapter the
-catalog uses on every index run, or index into a fresh catalog.
+Adding an adapter to an existing catalog is the one migration, and the rule that makes run order
+irrelevant is that **the adapter set describes the catalog, not the dataset being added**: pass
+every adapter the catalog uses on every index run, or index into a fresh catalog. What a catalog's
+first run freezes, and which later run is refused for it, is [ADR 0006](0006-file-registry.md).
 
 ## Rejected Ideas
 
@@ -337,8 +335,9 @@ Projection and the concepts derived from it stay in one relation
 ([ADR 0006](0006-file-registry.md)).
 
 **Rebuilding the registry in place instead of refusing a widening run.** It would lift the
-constraint entirely, but the satellite tables — `sidecars` among them — carry a foreign key to
-`file_registry`.
+constraint entirely, and nothing here settles against it: the registry's shape belongs to
+[ADR 0006](0006-file-registry.md), which carries the rebuild as an open issue with the cost that
+keeps it open. What this record settles is that configuring an adapter does not attempt it.
 
 **`$schema` fields on the artifacts.** The URIs are unhosted, so they help no IDE, and the BIDS
 metaschema's top-level `additionalProperties: false` forbids one on an overlay anyway.

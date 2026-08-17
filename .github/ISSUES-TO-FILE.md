@@ -128,13 +128,6 @@ both `docs/adr/0003-associations.md` and `docs/adr/0006-file-registry.md`. ADR 0
 a property of the registry's shape. Cut the copy in 0003 to a clause plus a link, per the
 own-it-or-link-it rule the documentation set otherwise follows.
 
-## Stop ADR 0002 restating ADR 0006's migration rule
-
-`docs/adr/0002-adapters-and-layouts.md`'s Backwards Compatibility restates the mechanism
-`docs/adr/0006-file-registry.md` owns — the frozen registry shape, the absent `projected` column,
-and the run being refused. Three copies of one rule exist across the set. Keep the operational
-consequence for an adapter author in 0002 and move the mechanism to 0006 alone.
-
 ## Give ADR 0002's ingest percentages a corpus and a date
 
 The two percentages in `docs/adr/0002-adapters-and-layouts.md`'s Rationale name only the query

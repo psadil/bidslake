@@ -133,8 +133,8 @@ the same `--dataset-id` on a later run adds a root rather than being refused
 
 **Name every adapter the catalog uses on every index run, not only the one for the dataset being
 added** — a term map's `projected` column is physical, so a catalog first built without it cannot
-gain it later ([ADR 0002](../../docs/adr/0002-adapters-and-layouts.md)). Do that and run order
-stops mattering.
+gain it later ([ADR 0006](../../docs/adr/0006-file-registry.md)). Do that and run order stops
+mattering.
 
 Adding another adapter is authoring those documents, not writing an ingester — see
 [ADR 0002](../../docs/adr/0002-adapters-and-layouts.md). The write direction — naming a file a

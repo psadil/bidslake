@@ -167,9 +167,11 @@ reports the union, so `lake.get(table="scans", suffix="bold")` works against a t
 ## Backwards Compatibility
 
 What is frozen is the registry's shape, tables being created `IF NOT EXISTS` — in practice one
-column, `projected`, which a catalog built without a term map lacks and a later run needing it is
-refused for, by name. Pass every adapter the catalog uses on every index run (order does not
-matter), or index into a new catalog.
+column, `projected`, which a catalog built without a term map lacks, so a later run whose term map
+would store a projection has nowhere to put it. `BidsDb::check_registry_shape` refuses that run and
+names the missing column, rather than letting `IF NOT EXISTS` drop the difference in silence. Pass
+every adapter the catalog uses on every index run (order does not matter), or index into a new
+catalog.
 
 ## Rejected Ideas
 
@@ -224,8 +226,7 @@ could drift from `all_files`' concept expressions.
   buys, plus reconciling `sub` (`01`) against `participants.participant_id` (`sub-01`) and accepting
   that a file whose subject is absent becomes an ingest error rather than a queryable fact.
 - **A catalog cannot gain `projected` short of a rebuild.** The concepts widen retroactively because
-  they ride the view; `projected` is a physical column, so a catalog created without a term map is
-  refused the later run that needs one, by name, and the remedy is to name every adapter on every
-  run or index afresh. Rebuilding in place — new table, copy, swap, most of the machinery being in
-  `compact.rs` — is the fuller fix, and has to carry the four foreign keys aimed at `file_registry`
-  across the swap.
+  they ride the view; `projected` is a physical column, so the refusal under *Backwards
+  Compatibility* is the whole of today's answer. Rebuilding in place — new table, copy, swap, most
+  of the machinery being in `compact.rs` — is the fuller fix, and has to carry the four foreign
+  keys aimed at `file_registry` across the swap.
