@@ -111,17 +111,6 @@ direction against the read side at load time, and the round-trip check does the 
 overlays under `crates/bids-schema/data/overlays/` to name their vocabulary from, and no term map yet.
 ADR 0002 (`docs/adr/0002-adapters-and-layouts.md`) records the gap.
 
-## Repoint the five doc comments that cite `TODO.md`
-
-`TODO.md` is gone, its contents split between the ADRs' `## Open Issues` sections and this file, and
-five doc comments still cite it by name: `crates/bidslake/src/bids.rs` twice (a note, and the silent
-`file_id` merge), `crates/bidslake/src/db.rs` on the narrowing caveat beside `check_registry_shape`,
-`crates/bidslake/tests/test_diffusion_inherited.rs`, and `crates/bidslake-py/tests/test_bind_values.py`
-on the `HUGEINT`-to-`UBIGINT` trip. Each has a real destination:
-`docs/adr/0006-file-registry.md` for the registry, key-width and narrowing notes,
-`docs/adr/0003-associations.md` for the inherited-gradient case. Cite the ADR file rather than a
-section number.
-
 ## Give the four under-specified `feat` roles their `Entities`
 
 Of the 23 roles in `crates/bids-schema/data/layouts/feat.json`, four declare no `Entities`:

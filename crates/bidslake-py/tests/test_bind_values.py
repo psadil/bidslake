@@ -13,7 +13,7 @@ would write by hand, ``2**63``, *passes*. It is exactly representable as an ``f6
 round trip happens to be lossless there. The first value that fails is ``2**63 + 1``,
 because ``f64`` spacing at that magnitude is 2048.
 
-This is the other half of a trip `TODO.md` already documents. ``file_id`` moved from
+This is the other half of a trip docs/adr/0006 already documents. ``file_id`` moved from
 ``HUGEINT`` to ``UBIGINT`` because ``HUGEINT`` "does not survive the trip to Python" — the
 Arrow bridge handed it over as ``Decimal128(38, 0)`` and 41% of the id space fell outside
 its own declared type. That fixed the *result* direction. This is the *parameter*

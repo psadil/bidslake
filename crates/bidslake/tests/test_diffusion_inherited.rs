@@ -29,7 +29,7 @@ fn shape(db: &BidsDb) -> anyhow::Result<(i64, i64, i64)> {
 /// A dataset-root `dwi.bval`/`dwi.bvec` applies to every image below it. ds114 has 10
 /// subjects x 2 sessions, so one stored gradient set answers for 20 images.
 ///
-/// This is the case `TODO.md` opened with, and it yielded **zero** rows before: the
+/// This is the case docs/adr/0003 opens with, and it yielded **zero** rows before: the
 /// synthesized `dwi.nii.gz` is nothing on disk, so the write was skipped entirely.
 #[tokio::test]
 async fn a_root_level_gradient_set_reaches_every_image() -> anyhow::Result<()> {
