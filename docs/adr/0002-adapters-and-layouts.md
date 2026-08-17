@@ -87,7 +87,9 @@ those three, and every other concept this tree projects is one base BIDS already
 mostly intermediates — a FIX run leaves roughly 230 of them in `fix/` alone — so the ingestion
 fragment's main job is `ignore`, discriminating *within* a directory, since `mc/` and
 `filtered_func_data.ica/` each hold one keeper amongst the noise. Measured on a real 27-unit tree:
-863 files walked, 404 cataloged, 0 unmatched by the term map.
+863 files walked, 404 kept, 0 unmatched by the term map. The keeper in `mc/` is the motion trace,
+and it is `read` rather than `catalog` — `matrix` turns it into `feat_motion` — so 27 of those 404
+are rows rather than paths.
 
 ### On the schema deciding and the engines executing
 
@@ -101,6 +103,12 @@ also skips a per-file `find_datatype`. The per-file selector evaluation it adds 
 both sides: data files never reach the dispatch, and selector expressions are parsed once and
 cached in `bids_schema::expression`, worth 25–30% of validator runtime measured over ds007 and
 7t_trt in July 2026.
+
+`matrix` is an engine for a different reason, since its files are single and small enough that
+batching is beside the point. What a Rust reader would have to write is a delimiter split and a
+type coercion, and DuckDB has both. The one thing it does *not* have is a whitespace-*run*
+delimiter — `delim` is a fixed string, and these files separate their columns by runs — so the read
+takes each line whole and `str_split_regex` does the split in SQL.
 
 ### On invertibility
 
@@ -243,11 +251,29 @@ Rules key on the *projected* `suffix` rather than on a computed extension, and t
 
 ### 4. The schema decides; the existing engines execute
 
-A rule names a disposition and a reader *name*; the engines are unchanged. `reader: "csv"` is the
-batched tabular ingest, `reader: "diffusion"` the bval/bvec accumulator, `reader: "fs_stats"` and
-`reader: "fs_ctab"` per-file `ContentReader`s. A multi-table reader's internal routing stays
-reader-internal — `fs_stats` picks `freesurfer_aseg` or `freesurfer_aparc` by inspecting
-`ColHeaders`, because choosing the table requires parsing the body.
+A rule names a disposition and a reader *name*; the engines are unchanged. Three names are
+engines, which hand the file to DuckDB: `csv` is the batched tabular ingest, `diffusion` the
+bval/bvec accumulator, and `matrix` a headerless whitespace-delimited read. One is a per-file
+`ContentReader`: `fs_stats`.
+
+**A reader does not name its table.** The file's projected concepts route through
+`rules.tabular_data` — the same routing the `.tsv` path does — and the reader is handed the answer,
+along with that table's columns *in declared order*. For `matrix` that order is the whole format:
+column *i* of the table is field *i* of the line, `initial_columns` is where the order is stated,
+and `TRY_CAST` to each column's declared type is the typing. So FSL's `mcflirt` motion parameters
+and FreeSurfer's `.ctab` colour tables — both headerless, one separated by two spaces and the other
+column-aligned — are described in JSON alone, with no reader in Rust. Nothing is dropped for being
+malformed: a short or unparseable line becomes a NULL row rather than no row, because on a
+positional table the ordinal is the alignment to the file the rows describe, and a dropped line
+shifts every later one silently.
+
+A reader names a table only where the routing cannot reach one, which is a narrower case than it
+first appears: not "the table depends on the contents" but "one file holds two payloads". A
+`?h.aparc.stats` yields both per-structure rows — whose table its projected suffix decides — and
+`# Measure` scalars, which belong in `freesurfer_measures`; no projection of one path yields two
+tables, so `fs_stats` states that one name. It stays a reader for a second reason too: its column
+names are in the file, on the `# ColHeaders` line, and matching them by name survives a FreeSurfer
+release reordering a column where positions would quietly mis-assign.
 
 Two structural guards bound the dispatch. Primary data files are recognized by structure (`kind_of`
 over the parent datatype) and short-circuit *before* it, so imaging files are cataloged by structure

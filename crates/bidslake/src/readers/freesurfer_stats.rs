@@ -2,15 +2,26 @@
 //!
 //! Schema-on-read, mirroring FreeSurfer's own format (and a2cps's `freesurfer_wf.py`):
 //! `# Measure <key>, <shortname>, <desc>, <value>, <units>` lines become one row in
-//! `freesurfer_measures`; the `# ColHeaders …` line names the per-structure columns (and
-//! selects the target table by family); each subsequent whitespace-delimited line is one
-//! structure row. Values are emitted as raw strings and typed by
-//! [`Schema::row_values`](crate::schema::Schema).
+//! `freesurfer_measures`; the `# ColHeaders …` line names the per-structure columns; each
+//! subsequent whitespace-delimited line is one structure row. Values are emitted as raw strings
+//! and typed by [`Schema::row_values`](crate::schema::Schema).
+//!
+//! Two things keep this a reader rather than a use of the `matrix` engine, and they are
+//! different things:
+//!
+//! - **The column names are in the file**, on the `# ColHeaders` line, so they are matched by
+//!   name. Positions would also work for one FreeSurfer version and quietly mis-assign under
+//!   the next, since `ColHeaders` is what changes when a release adds or reorders a column.
+//! - **A `.stats` file holds two payloads.** The per-structure rows go to the table the
+//!   projected suffix routes to (`segstats` → `freesurfer_aseg`, `parcstats` →
+//!   `freesurfer_aparc`), but the `# Measure` scalars are whole-hemisphere facts that belong in
+//!   `freesurfer_measures` — and no projection of one path yields two tables, so that one name
+//!   is stated here.
 
 use bids_schema::term_map::FileFacts;
 use serde_json::Value;
 
-use super::{ContentReader, ReaderRows, seed_row};
+use super::{ContentReader, DeclaredTable, ReaderRows, seed_row};
 
 pub struct FreeSurferStats;
 
@@ -20,6 +31,7 @@ impl ContentReader for FreeSurferStats {
         file_id: u64,
         content: &str,
         facts: &FileFacts,
+        declared: Option<DeclaredTable<'_>>,
     ) -> anyhow::Result<Vec<ReaderRows>> {
         let mut col_headers: Vec<String> = Vec::new();
         let mut measures: Vec<(String, String)> = Vec::new();
@@ -43,15 +55,12 @@ impl ContentReader for FreeSurferStats {
             }
         }
 
-        // Select the target table by column-header family (this is why the reader
-        // self-routes: you must parse the header to know aseg vs aparc).
-        let data_table = if col_headers.iter().any(|h| h == "SegId") {
-            Some("freesurfer_aseg")
-        } else if col_headers.iter().any(|h| h == "ThickAvg") {
-            Some("freesurfer_aparc")
-        } else {
-            None
-        };
+        // The per-structure table is the schema's answer, not this reader's: `aseg.stats` and
+        // `wmparc.stats` project `suffix: segstats`, `?h.*.stats` projects `parcstats`, and the
+        // overlay's rules turn those into `freesurfer_aseg` and `freesurfer_aparc`. `None` means
+        // no rule claimed the file, in which case there is no table to write to — the
+        // `# Measure` rows below still go out, since their table is named here.
+        let data_table = declared.map(|d| d.table);
 
         let mut out = Vec::new();
 

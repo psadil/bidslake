@@ -128,17 +128,26 @@ pub async fn ingest_with_adapters_into(
     ];
     let mut term_map_prov: Vec<(String, serde_json::Value)> = Vec::new();
     let mut ingestion_prov: Vec<(String, serde_json::Value)> = Vec::new();
+    // Each artifact is optional, as it is for `--adapter` itself (`main::resolve_adapters`): a
+    // producer whose files are BIDS-named needs no term map (`fmriprep`), and one that only
+    // scopes a policy needs no overlay (`dcmstack`). Requiring all three here would make the
+    // helper stricter than the CLI and put a legitimate adapter combination out of test reach.
     for name in adapter_names {
-        overlays.push(AppliedOverlay {
-            source: name.to_string(),
-            content: bids_schema::overlay::bundled_overlay(name).expect("bundled overlay"),
-        });
-        term_maps.push(bundled_term_map(name).expect("bundled term map"));
-        let ing = bids_schema::bundled_ingestion_source(name).expect("bundled ingestion");
-        ingestion_sources.push(ing.to_string());
-        ingestion_prov.push((name.to_string(), serde_json::from_str(ing).unwrap()));
-        let tm = bids_schema::term_map::bundled_term_map_source(name).unwrap();
-        term_map_prov.push((name.to_string(), serde_json::from_str(tm).unwrap()));
+        if let Some(content) = bids_schema::overlay::bundled_overlay(name) {
+            overlays.push(AppliedOverlay {
+                source: name.to_string(),
+                content,
+            });
+        }
+        if let Some(tm) = bundled_term_map(name) {
+            term_maps.push(tm);
+            let src = bids_schema::term_map::bundled_term_map_source(name).unwrap();
+            term_map_prov.push((name.to_string(), serde_json::from_str(src).unwrap()));
+        }
+        if let Some(ing) = bids_schema::bundled_ingestion_source(name) {
+            ingestion_sources.push(ing.to_string());
+            ingestion_prov.push((name.to_string(), serde_json::from_str(ing).unwrap()));
+        }
     }
     let ingestion = Ingestion::from_sources(
         &ingestion_sources

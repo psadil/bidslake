@@ -29,7 +29,9 @@
 use crate::db::{BidsDb, BvalFile, BvecFile, FileAssociation, TabularStatus};
 use crate::fs::BidsFileSystem;
 use crate::links;
-use crate::readers::{self, ContentReader};
+use crate::readers::{
+    self, CSV_READER, ContentReader, DIFFUSION_READER, DeclaredTable, MATRIX_READER,
+};
 use crate::schema::dynamic::{quote_ident, sql_lit};
 use crate::schema::ingestion::{Disposition, Undeclared};
 use crate::schema::recording::ColumnNames;
@@ -63,6 +65,25 @@ macro_rules! non_poisoning_read_flags {
 macro_rules! non_poisoning_read_flags_typed {
     () => {
         "delim='\\t', nullstr='n/a', strict_mode=false, null_padding=true, ignore_errors=true"
+    };
+}
+
+/// The same relaxations again, for the whole-line read the `matrix` engine does
+/// ([`BidsParser::ingest_matrix`]). Third of three: read them together, because they differ only
+/// in the dialect they state and drifting apart would make one file class malformation-poisoning
+/// while the others are not.
+///
+/// A headerless whitespace-delimited matrix has no delimiter DuckDB's CSV reader can express —
+/// its columns are separated by *runs* of spaces, and `delim` is a fixed string — so the read
+/// takes each line whole and the split happens in SQL. That needs a delimiter, quote and escape
+/// that cannot occur in the text: `\x1e` is ASCII RECORD SEPARATOR, and an empty `quote`/`escape`
+/// turns off quoting entirely, so a `"` inside a line is one more character rather than the start
+/// of a quoted field. `comment='#'` drops comment lines in the reader, which is what lets
+/// FreeSurfer's `.ctab` headers through the same path as FSL's `.par`.
+macro_rules! non_poisoning_read_flags_lines {
+    () => {
+        "delim='\\x1e', quote='', escape='', comment='#', \
+         nullstr='n/a', strict_mode=false, null_padding=true, ignore_errors=true"
     };
 }
 
@@ -1582,9 +1603,10 @@ impl BidsParser {
 
     /// Whether a pass reads this file's body **in Rust** (so [`prefetch_contents`]
     /// should cache it). True for `.bval`/`.bvec` (the native `diffusion` reader) and
-    /// for term-map adapter files the ingestion schema classifies as `read`
-    /// (`fs_stats`/…) — mirroring [`Self::ingest_projected`]. JSON is decided by the
-    /// caller; `.tsv` bodies are DuckDB's and return false here.
+    /// for term-map adapter files the ingestion schema classifies as `read` by a
+    /// [`ContentReader`] (`fs_stats`) — mirroring [`Self::ingest_projected`]. JSON is
+    /// decided by the caller; `.tsv` bodies are DuckDB's and return false here, as do
+    /// the bodies of the `matrix` engine's files, which DuckDB opens for itself.
     ///
     /// `dataset_type` isn't known until `dataset_description.json` is processed (after
     /// prefetch), so it's passed as `None`; the diffusion (`extension`) and adapter
@@ -1610,13 +1632,10 @@ impl BidsParser {
             sidecar: &null,
             dataset_type: None,
         };
-        matches!(
-            self.schema
-                .ingestion()
-                .classify(&ctx)
-                .map(|r| r.disposition),
-            Some(Disposition::Read)
-        )
+        let Some(rule) = self.schema.ingestion().classify(&ctx) else {
+            return false;
+        };
+        rule.disposition == Disposition::Read && rule.reader.as_deref() != Some(MATRIX_READER)
     }
 
     /// The file's content from the concurrent prefetch, or a direct read if it
@@ -1830,12 +1849,16 @@ impl BidsParser {
         }
 
         match disposition {
+            // Only these two engines can act on a BIDS-named file. A `ContentReader` and the
+            // `matrix` engine both find their table by routing the *projected* concepts, and
+            // this path has none — it deliberately leaves `datatype` unbound so an adapter's
+            // datatype-keyed rules cannot claim ordinary BIDS files.
             Some((Disposition::Read, reader)) => match reader.as_deref() {
-                Some("diffusion") => {
+                Some(DIFFUSION_READER) => {
                     self.process_diffusion_file(path, db, rel_path, file_name, dataset_id)
                         .await?;
                 }
-                Some("csv") => {
+                Some(CSV_READER) => {
                     self.process_tabular_file(rel_path, file_name, dataset_id, &entities)
                         .await?;
                 }
@@ -1896,22 +1919,33 @@ impl BidsParser {
         // with a leading slash, matching the tabular selector convention.
         let leading = format!("/{rel_path}");
         let dataset_type = self.dataset_type.clone();
-        let (disposition, reader) = {
-            let ctx = FileContext {
-                path: &leading,
-                datatype: facts.datatype.as_deref(),
-                suffix: facts.suffix.as_deref(),
-                extension: facts.extension.as_deref(),
-                sidecar: &Value::Null,
-                dataset_type: dataset_type.as_deref(),
-            };
-            match self.schema.ingestion().classify(&ctx) {
-                Some(rule) => (Some(rule.disposition), rule.reader.clone()),
-                // Recognized by a term map but claimed by no ingestion rule — a `recon-all`
-                // bookkeeping file, say. Nothing to read or catalog, but it is still a file
-                // the dataset contains, so it earns a registry row like any other.
-                None => (None, None),
-            }
+        // The selector context these two questions share. Built once and reused, because
+        // evaluating selectors is the expensive part of both and a recon-all tree asks them of
+        // thousands of files.
+        let ctx = FileContext {
+            path: &leading,
+            datatype: facts.datatype.as_deref(),
+            suffix: facts.suffix.as_deref(),
+            extension: facts.extension.as_deref(),
+            sidecar: &Value::Null,
+            dataset_type: dataset_type.as_deref(),
+        };
+        let (disposition, reader) = match self.schema.ingestion().classify(&ctx) {
+            Some(rule) => (Some(rule.disposition), rule.reader.clone()),
+            // Recognized by a term map but claimed by no ingestion rule — a `recon-all`
+            // bookkeeping file, say. Nothing to read or catalog, but it is still a file
+            // the dataset contains, so it earns a registry row like any other.
+            None => (None, None),
+        };
+        // The table those same concepts route to, and its columns in declared order — the same
+        // routing the batched tabular path does. It is what lets a reader be told which table it
+        // is filling instead of restating a name the schema already holds. Resolved only for a
+        // `read`, since it is a second sweep of the selectors and every other disposition would
+        // pay for an answer nothing asks for. Cloned rather than borrowed: `self` is borrowed
+        // mutably again before the rows are written.
+        let routed = match disposition {
+            Some(Disposition::Read) => self.schema.tabular().route(&ctx).cloned(),
+            _ => None,
         };
 
         // What the projection says this file is. A term-mapped path is a data file when the
@@ -1956,6 +1990,24 @@ impl BidsParser {
             eprintln!("Warning: `read` rule for {rel_path} has no reader; skipping");
             return Ok(());
         };
+
+        // `matrix` is an engine rather than a `ContentReader` — DuckDB opens the file itself —
+        // so it is dispatched here, before the body is pulled into memory, exactly as the BIDS
+        // path dispatches `csv` and `diffusion`.
+        if reader_name == MATRIX_READER {
+            let Some(spec) = routed.as_ref() else {
+                eprintln!(
+                    "Warning: `matrix` rule for {rel_path} routes to no table the schema declares; skipping"
+                );
+                return Ok(());
+            };
+            self.ingest_matrix(db, dataset_id, rel_path, spec, &facts)
+                .await?;
+            self.walk_status
+                .insert(rel_path.to_string(), TabularStatus::Ingested);
+            return Ok(());
+        }
+
         let content = match self.take_cached(path, rel_path).await {
             Ok(c) => c,
             Err(e) => {
@@ -1967,7 +2019,16 @@ impl BidsParser {
             eprintln!("Warning: reader `{reader_name}` is not registered; skipping {rel_path}");
             return Ok(());
         };
-        match rdr.read(self.file_key(dataset_id, rel_path), &content, &facts) {
+        let declared = routed.as_ref().map(|spec| DeclaredTable {
+            table: &spec.table,
+            columns: &spec.columns,
+        });
+        match rdr.read(
+            self.file_key(dataset_id, rel_path),
+            &content,
+            &facts,
+            declared,
+        ) {
             Ok(batches) => {
                 for batch in &batches {
                     // Clear this file's prior rows before re-inserting them. These tables are
@@ -2731,6 +2792,128 @@ impl BidsParser {
                 Ok(Some(table.to_string()))
             }
         }
+    }
+
+    /// Ingest one headerless, whitespace-delimited matrix — the ingestion schema's `matrix`
+    /// engine (`disposition: read`, `reader: "matrix"`).
+    ///
+    /// Nothing about the format is written down in Rust. The file's projected concepts route it
+    /// through `rules.tabular_data` to a table ([`Tabular::route`](crate::schema::tabular::Tabular::route)), and
+    /// that table's columns *in declared order* are the positional mapping: column *i* of the
+    /// table is field *i* of the line. Fixing that order is what `initial_columns` is for, so a
+    /// producer adds a headerless format with JSON alone.
+    ///
+    /// DuckDB does all the parsing. The read takes each line whole (see
+    /// `non_poisoning_read_flags_lines!`), because these files separate their columns by *runs*
+    /// of whitespace and `delim` is a fixed string — FSL writes `.par` with two spaces,
+    /// FreeSurfer writes `.ctab` column-aligned, and one `delim` describes neither. So the split
+    /// is `str_split_regex(…, '\s+')` in SQL and the typing is `TRY_CAST` to each column's
+    /// declared type.
+    ///
+    /// **No line is dropped for being malformed.** A short line's missing fields index past the
+    /// end of the list, and a garbage field fails its cast; both yield NULL rather than an
+    /// error, so the row keeps its ordinal. That matters more than it looks: on a motion table
+    /// `row_idx` *is* the volume ordinal, and dropping a line would silently shift every later
+    /// volume against the image it describes. A NULL row is visible; a shifted trace is not.
+    ///
+    /// These tables get no `describes` view, though their rows do describe an image.
+    /// [`Self::resolve_structural_associations`] skips any file whose *path-derived* datatype is
+    /// `None`, and a tree that needs this engine has no datatype directories — so there is no
+    /// `file_associations` edge for such a view to join through.
+    async fn ingest_matrix(
+        &self,
+        db: &BidsDb,
+        dataset_id: &str,
+        rel_path: &str,
+        spec: &TableSpec,
+        facts: &FileFacts,
+    ) -> Result<()> {
+        // The engine writes `file_id` and `row_idx` and nothing else structural, which is the
+        // per-row shape. A rule pointing it at a keyed table would silently write neither key.
+        if spec.identity != RowIdentity::PerRow {
+            eprintln!(
+                "Warning: `matrix` rule for {rel_path} routes to {}, which is not a per-row table; skipping",
+                spec.table
+            );
+            return Ok(());
+        }
+        // With no declared columns there is no positional mapping to apply, and the insert
+        // would write rows of nothing but a key.
+        if spec.columns.is_empty() {
+            eprintln!(
+                "Warning: `matrix` rule for {rel_path} routes to {}, which declares no columns; skipping",
+                spec.table
+            );
+            return Ok(());
+        }
+
+        let source = self.fs.read_csv_source(Path::new(rel_path)).await?;
+        let file_key = self.file_key(dataset_id, rel_path);
+
+        // An order-preserving read needs a sequential scan, for the same reason the batched
+        // tabular path does: `row_number()` is assigned in physical read order, and only a
+        // sequential read makes that line order.
+        let preserve_order = self.schema.ingestion().ordered(&spec.table);
+        let read_opts = format!(
+            "header=false, auto_detect=false, columns={{'line': 'VARCHAR'}}, {}{}",
+            non_poisoning_read_flags_lines!(),
+            if preserve_order {
+                ", parallel=false"
+            } else {
+                ""
+            }
+        );
+        let read_from = format!("read_csv({}, {read_opts})", sql_lit(&source));
+        // Pre-flight on the throwaway connection, as the recording path does: a file DuckDB
+        // cannot open would otherwise poison the whole ingest transaction.
+        if !self.read_csv_ok(&read_from) {
+            return Ok(());
+        }
+
+        let mut selects: Vec<String> = vec![format!("{file_key} AS file_id")];
+        if preserve_order {
+            selects.push("(row_number() OVER () - 1)::BIGINT AS row_idx".to_string());
+        }
+        // Field *i* is column *i*; DuckDB lists are 1-based.
+        for (i, c) in spec.columns.iter().enumerate() {
+            let q = quote_ident(&c.name);
+            let field = format!("raw.f[{}]", i + 1);
+            if needs_try_cast(&c.sql_type) {
+                selects.push(format!("TRY_CAST({field} AS {}) AS {q}", c.sql_type));
+            } else {
+                selects.push(format!("{field} AS {q}"));
+            }
+        }
+        // Materialized concepts as literals from the projection: a non-BIDS path encodes nothing
+        // in its name, so a table that declares `concepts` has them written here rather than
+        // derived from a path. Entities only, matching what `seed_row` puts on a reader's rows.
+        for concept in self.schema.ingestion().materialized_concepts(&spec.table) {
+            let value = facts
+                .get(concept)
+                .map_or_else(|| "NULL".to_string(), sql_lit);
+            selects.push(format!("{value} AS {}", quote_ident(concept)));
+        }
+
+        // Re-index idempotency. A per-row table has no primary key, so a second ingest does not
+        // conflict — it doubles the table, and a third triples it.
+        db.conn.execute(
+            &format!("DELETE FROM {} WHERE file_id = {file_key}", spec.table),
+            [],
+        )?;
+
+        // Blank lines are filtered *before* the row number, so a trailing newline contributes no
+        // phantom row; `comment='#'` has already dropped comment lines inside the reader.
+        let sql = format!(
+            "INSERT INTO {} BY NAME SELECT {} \
+             FROM (SELECT str_split_regex(trim(line), '\\s+') AS f \
+                   FROM {read_from} WHERE trim(line) <> '') AS raw",
+            spec.table,
+            selects.join(", "),
+        );
+        if let Err(e) = db.conn.execute(&sql, []) {
+            eprintln!("Warning: failed to ingest matrix {rel_path}: {e}");
+        }
+        Ok(())
     }
 
     /// The schema-declared columns of a recording table (`physio`, `physio_events`),

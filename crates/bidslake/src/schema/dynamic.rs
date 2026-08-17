@@ -44,9 +44,10 @@
 //! its concepts in its name. With no term map the wrapping is absent and the DDL is byte
 //! for byte what a plain-BIDS run emits.
 //!
-//! An adapter *data* table is the third case: it holds reader output with no path to
-//! regex, so the concepts its ingestion policy lists are physical `TEXT` columns a reader
-//! writes ([`Ingestion::materialized_concepts`]).
+//! An adapter *data* table is the third case: it holds ingested rows with no path to
+//! regex, so the concepts its ingestion policy lists are physical `TEXT` columns the ingest
+//! writes ([`Ingestion::materialized_concepts`]) — from `seed_row` on the reader path, and as
+//! literals in the generated SELECT on the `matrix` engine's.
 //!
 //! The static tables `bvals`/`bvecs` and `file_associations` live in the parent
 //! [`crate::schema`] module, not here.

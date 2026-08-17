@@ -14,8 +14,16 @@
       "disposition": "ignore"
     },
     {
+      "selectors": ["suffix == \"timeseries\"", "extension == \".par\""],
+      "disposition": "read",
+      "reader": "matrix"
+    },
+    {
       "selectors": ["intersects([datatype], [\"func\", \"anat\"])"],
       "disposition": "catalog"
     }
-  ]
+  ],
+  "tables": {
+    "feat_motion": { "ordered": true }
+  }
 }

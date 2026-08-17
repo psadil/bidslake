@@ -11,7 +11,8 @@
 
 mod common;
 
-use common::ingest_with_adapters;
+use bidslake::db::BidsDb;
+use common::{ingest_with_adapters, ingest_with_adapters_into};
 use rstest::rstest;
 use std::fs;
 use std::path::Path;
@@ -26,6 +27,19 @@ const UNIT: &str = "sub-01_ses-V1_task-rest_run-01_desc-preproc_bold";
 /// A second unit, sessionless and runless, to pin the optional groups in the templates.
 const BARE: &str = "sub-02_task-cuff_desc-preproc_bold";
 
+/// Where the motion parameters sit inside a unit.
+const MCF_PAR_PATH: &str = "mc/prefiltered_func_data_mcf.par";
+
+/// Three volumes of motion in `mcflirt`'s own output format: fields separated by two spaces
+/// with a trailing pair before the newline, values at the default `ostream` precision of six
+/// significant figures (so a small one prints in scientific notation), and rotations — the
+/// first three, in radians — two orders of magnitude smaller than the translations that follow
+/// in mm. That last part is the point: a read that swapped the two halves would fail here
+/// rather than merely look odd.
+const MCF_PAR: &[u8] = b"-0.00123456  0.00234567  -1.23456e-05  0.123456  -0.234567  1.23456  \n\
+                         0.000234567  -0.00345678  2.34567e-05  -0.345678  0.456789  -2.34567  \n\
+                         0  0  0  0  0  0  \n";
+
 fn write_feat_tree(root: &Path) {
     for (rel, body) in [
         // -- the outputs that matter -------------------------------------------------
@@ -36,7 +50,7 @@ fn write_feat_tree(root: &Path) {
         ("filtered_func_data.ica/melodic_mix", b"1 2\n3 4\n"),
         ("filtered_func_data.ica/melodic_IC.nii.gz", b"nii"),
         ("filtered_func_data.ica/melodic_oIC.nii.gz", b"nii"),
-        ("mc/prefiltered_func_data_mcf.par", b"0 0 0 0 0 0\n"),
+        (MCF_PAR_PATH, MCF_PAR),
         ("fix4melview_UKBiobank_thr1.txt", b"1, Signal\n"),
         ("fix4melview_UKBiobank_thr1_psadil.txt", b"1, Signal\n"),
         // A second automatic labelling, from a training set whose name carries an
@@ -68,6 +82,13 @@ fn write_feat_tree(root: &Path) {
     }
     write(root, &format!("{BARE}/mask.nii.gz"), b"nii");
     write(root, &format!("{BARE}/fix/icmap0.nii.gz"), b"nii");
+}
+
+/// The same tree with a different motion file, for the cases where the file's *contents* are
+/// what is under test.
+fn write_feat_tree_with_par(root: &Path, par: &[u8]) {
+    write_feat_tree(root);
+    write(root, &format!("{UNIT}/{MCF_PAR_PATH}"), par);
 }
 
 /// Each FEAT slot is reachable by what it *is*, not by where it sits.
@@ -253,6 +274,198 @@ async fn scratch_is_ignored_not_cataloged(#[case] pattern: &str) -> anyhow::Resu
     )?;
 
     assert_eq!(got, 0, "scratch should not be cataloged: {pattern}");
+    Ok(())
+}
+
+/// The motion parameters are a table, not a path: one row per volume, read by the `matrix`
+/// engine from a file with no header at all.
+#[tokio::test]
+async fn motion_parameters_are_read_into_a_table() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_feat_tree(dir.path());
+    let db = ingest_with_adapters(dir.path(), &["feat"]).await?;
+
+    let rows: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM feat_motion", [], |r| r.get(0))?;
+
+    assert_eq!(rows, 3, "one row per volume in the .par");
+    Ok(())
+}
+
+/// Nothing in the file says which column is which — `mcflirt` writes six bare numbers — so the
+/// mapping comes from the order the schema declares, and that order is FSL's: three rotations
+/// (radians), then three translations (mm). The reverse of fMRIPrep's confounds, which is
+/// exactly why it is worth pinning value by value.
+#[rstest]
+#[case("rot_x", -0.00123456)]
+#[case("rot_y", 0.00234567)]
+#[case("rot_z", -1.23456e-05)]
+#[case("trans_x", 0.123456)]
+#[case("trans_y", -0.234567)]
+#[case("trans_z", 1.23456)]
+#[tokio::test]
+async fn motion_columns_follow_mcflirts_order(
+    #[case] column: &str,
+    #[case] want: f64,
+) -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_feat_tree(dir.path());
+    let db = ingest_with_adapters(dir.path(), &["feat"]).await?;
+
+    let got: f64 = db.conn.query_row(
+        &format!("SELECT {column} FROM feat_motion WHERE row_idx = 0"),
+        [],
+        |r| r.get(0),
+    )?;
+
+    assert!((got - want).abs() < 1e-12, "{column}: {got} != {want}");
+    Ok(())
+}
+
+/// `row_idx` is the volume ordinal, so it runs densely from zero in file order — which is what
+/// makes the table joinable to the image frame by frame.
+#[tokio::test]
+async fn row_idx_is_the_volume_ordinal() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_feat_tree(dir.path());
+    let db = ingest_with_adapters(dir.path(), &["feat"]).await?;
+
+    let trace: Vec<(i64, f64)> = db
+        .conn
+        .prepare("SELECT row_idx, trans_z FROM feat_motion ORDER BY row_idx")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+
+    assert_eq!(trace, vec![(0, 1.23456), (1, -2.34567), (2, 0.0)]);
+    Ok(())
+}
+
+/// A line that is too short, or that is not numbers at all, becomes a NULL row rather than no
+/// row. Dropping it would slide every later volume one frame earlier against the image the rows
+/// describe — a silent error, where a hole in the trace is a visible one.
+#[rstest]
+#[case::too_short("1  2  3\n")]
+#[case::not_numbers("not  a  number  at  all  here\n")]
+#[tokio::test]
+async fn a_malformed_line_keeps_its_ordinal(#[case] bad: &str) -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let par = format!("1  2  3  4  5  6\n{bad}7  8  9  10  11  12\n");
+    write_feat_tree_with_par(dir.path(), par.as_bytes());
+    let db = ingest_with_adapters(dir.path(), &["feat"]).await?;
+
+    let trace: Vec<Option<f64>> = db
+        .conn
+        .prepare("SELECT trans_z FROM feat_motion ORDER BY row_idx")?
+        .query_map([], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+
+    assert_eq!(trace, vec![Some(6.0), None, Some(12.0)]);
+    Ok(())
+}
+
+/// Blank lines are not volumes. A trailing newline is the common case and must not add a row
+/// of NULLs at the end of every motion trace.
+#[tokio::test]
+async fn blank_lines_are_not_volumes() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_feat_tree_with_par(dir.path(), b"\n1  2  3  4  5  6\n\n7  8  9  10  11  12\n\n");
+    let db = ingest_with_adapters(dir.path(), &["feat"]).await?;
+
+    let rows: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM feat_motion", [], |r| r.get(0))?;
+
+    assert_eq!(rows, 2, "two data lines amongst three blanks");
+    Ok(())
+}
+
+/// The rows carry no subject of their own — they key on the `.par` file, and the file's
+/// concepts come from the registry (docs/adr/0006). So the question "whose motion is this?" is
+/// a join, and it is the same join for any producer's timeseries table.
+#[tokio::test]
+async fn motion_rows_reach_their_subject_through_the_registry() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_feat_tree(dir.path());
+    let db = ingest_with_adapters(dir.path(), &["feat"]).await?;
+
+    let (sub, ses, task, run, desc): (String, String, String, String, String) = db.conn.query_row(
+        "SELECT f.sub, f.ses, f.task, f.run, f.\"desc\" \
+         FROM feat_motion m JOIN all_files f USING (file_id) WHERE m.row_idx = 0",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+    )?;
+
+    assert_eq!(
+        (
+            sub.as_str(),
+            ses.as_str(),
+            task.as_str(),
+            run.as_str(),
+            desc.as_str()
+        ),
+        ("01", "V1", "rest", "01", "motion")
+    );
+    Ok(())
+}
+
+/// A file whose contents were read says so in the registry. It used to be cataloged, and the
+/// status is the only place the difference shows.
+#[tokio::test]
+async fn a_read_par_is_recorded_ingested() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_feat_tree(dir.path());
+    let db = ingest_with_adapters(dir.path(), &["feat"]).await?;
+
+    let status: String = db.conn.query_row(
+        "SELECT status FROM file_registry WHERE file_path LIKE ?",
+        duckdb::params![format!("%/{MCF_PAR_PATH}")],
+        |r| r.get(0),
+    )?;
+
+    assert_eq!(status, "ingested");
+    Ok(())
+}
+
+/// `feat_motion` is per-row and so carries no primary key: a second ingest does not conflict,
+/// it doubles the table. The `matrix` engine clears the file's rows first, and this is what
+/// says so.
+#[tokio::test]
+async fn reindexing_does_not_duplicate_motion_rows() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_feat_tree(dir.path());
+    let db = BidsDb::new(":memory:")?;
+    ingest_with_adapters_into(&db, dir.path(), &["feat"], None).await?;
+    ingest_with_adapters_into(&db, dir.path(), &["feat"], None).await?;
+
+    let rows: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM feat_motion", [], |r| r.get(0))?;
+
+    assert_eq!(rows, 3, "a re-index replaces the file's rows");
+    Ok(())
+}
+
+/// FEAT's motion parameters and fMRIPrep's confounds are the same measurement under different
+/// producers, so they are declared from one vocabulary: `trans_x` is one column definition, and
+/// a query for it needs no advance knowledge of which tool wrote the run.
+#[rstest]
+#[case("feat_motion")]
+#[case("fmriprep_confounds")]
+#[tokio::test]
+async fn trans_x_is_one_column_across_producers(#[case] table: &str) -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_feat_tree(dir.path());
+    let db = ingest_with_adapters(dir.path(), &["feat", "fmriprep"]).await?;
+
+    let sql_type: String = db.conn.query_row(
+        "SELECT data_type FROM information_schema.columns \
+         WHERE table_name = ? AND column_name = 'trans_x'",
+        duckdb::params![table],
+        |r| r.get(0),
+    )?;
+
+    assert_eq!(sql_type, "DOUBLE", "{table}.trans_x");
     Ok(())
 }
 

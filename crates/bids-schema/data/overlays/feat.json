@@ -66,6 +66,74 @@
         "display_name": "Motion parameters",
         "description": "A whitespace-delimited, headerless table of rigid-body motion parameters, one row per volume, as written by `mcflirt`.\n"
       }
+    },
+    "columns": {
+      "trans_x__confounds": {
+        "name": "trans_x",
+        "display_name": "Translation (x)",
+        "description": "Estimated framewise translation along the x axis (mm).\n",
+        "type": "number"
+      },
+      "trans_y__confounds": {
+        "name": "trans_y",
+        "display_name": "Translation (y)",
+        "description": "Estimated framewise translation along the y axis (mm).\n",
+        "type": "number"
+      },
+      "trans_z__confounds": {
+        "name": "trans_z",
+        "display_name": "Translation (z)",
+        "description": "Estimated framewise translation along the z axis (mm).\n",
+        "type": "number"
+      },
+      "rot_x__confounds": {
+        "name": "rot_x",
+        "display_name": "Rotation (x)",
+        "description": "Estimated framewise rotation about the x axis (radians).\n",
+        "type": "number"
+      },
+      "rot_y__confounds": {
+        "name": "rot_y",
+        "display_name": "Rotation (y)",
+        "description": "Estimated framewise rotation about the y axis (radians).\n",
+        "type": "number"
+      },
+      "rot_z__confounds": {
+        "name": "rot_z",
+        "display_name": "Rotation (z)",
+        "description": "Estimated framewise rotation about the z axis (radians).\n",
+        "type": "number"
+      }
+    }
+  },
+  "rules": {
+    "tabular_data": {
+      "feat": {
+        "feat_motion": {
+          "selectors": [
+            "datatype == \"func\"",
+            "suffix == \"timeseries\"",
+            "extension == \".par\""
+          ],
+          "additional_columns": "not_allowed",
+          "initial_columns": [
+            "rot_x__confounds",
+            "rot_y__confounds",
+            "rot_z__confounds",
+            "trans_x__confounds",
+            "trans_y__confounds",
+            "trans_z__confounds"
+          ],
+          "columns": {
+            "rot_x__confounds": "required",
+            "rot_y__confounds": "required",
+            "rot_z__confounds": "required",
+            "trans_x__confounds": "required",
+            "trans_y__confounds": "required",
+            "trans_z__confounds": "required"
+          }
+        }
+      }
     }
   }
 }

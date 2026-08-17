@@ -461,6 +461,51 @@ mod tests {
         }
     }
 
+    /// Every `reader` a bundled fragment names has somewhere to go.
+    ///
+    /// The metaschema says `reader` is "validated against the compiled-in reader registry", and
+    /// nothing does it — a name is dispatched at ingest, where an unknown one is a warning on
+    /// stderr and a table that reads back empty. A typo in a bundled fragment should fail here
+    /// instead, and the check has to span both halves of the dispatch: an engine handled by name
+    /// in `bids.rs` never appears in `default_readers()`, and a `ContentReader` never appears in
+    /// `ENGINE_READERS`.
+    #[test]
+    fn every_bundled_reader_name_resolves() {
+        let readers = crate::readers::default_readers();
+        for name in std::iter::once(&"base").chain(bids_schema::BUNDLED_INGESTION_NAMES) {
+            let src = bids_schema::bundled_ingestion_source(name).unwrap();
+            let ing = Ingestion::from_sources(&[src]).unwrap();
+            for rule in &ing.rules {
+                let Some(reader) = rule.reader.as_deref() else {
+                    continue;
+                };
+                assert!(
+                    crate::readers::ENGINE_READERS.contains(&reader)
+                        || readers.contains_key(reader),
+                    "bundled ingestion {name:?} names reader {reader:?}, which is neither an \
+                     engine nor a registered content reader"
+                );
+            }
+        }
+    }
+
+    /// A `read` rule with no reader has nothing to dispatch, and the metaschema cannot say so —
+    /// it has no way to make one property required by another's value.
+    #[test]
+    fn every_bundled_read_rule_names_a_reader() {
+        for name in std::iter::once(&"base").chain(bids_schema::BUNDLED_INGESTION_NAMES) {
+            let src = bids_schema::bundled_ingestion_source(name).unwrap();
+            let ing = Ingestion::from_sources(&[src]).unwrap();
+            for rule in &ing.rules {
+                assert!(
+                    rule.disposition != Disposition::Read || rule.reader.is_some(),
+                    "bundled ingestion {name:?} has a `read` rule with no reader: {:?}",
+                    rule.selectors
+                );
+            }
+        }
+    }
+
     #[test]
     fn stats_files_are_read_by_fs_stats() {
         let ing = fs();

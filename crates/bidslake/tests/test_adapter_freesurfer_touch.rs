@@ -74,6 +74,6 @@ fn the_stats_files_they_shadowed_still_read() {
     );
     assert_eq!(
         classify(&ing, "/sub-01_ses-V1/label/aseg.ctab", Some("fslabels")),
-        Some((Disposition::Read, Some("fs_ctab".to_string())))
+        Some((Disposition::Read, Some("matrix".to_string())))
     );
 }

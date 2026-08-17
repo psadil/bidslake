@@ -3,7 +3,7 @@
   "rules": [
     { "selectors": ["match(path, \"/touch/\")"], "disposition": "ignore" },
     { "selectors": ["intersects([suffix], [\"segstats\", \"parcstats\"])"], "disposition": "read", "reader": "fs_stats" },
-    { "selectors": ["suffix == \"fslabels\""], "disposition": "read", "reader": "fs_ctab" },
+    { "selectors": ["suffix == \"fslabels\""], "disposition": "read", "reader": "matrix" },
     { "selectors": ["datatype == \"anat\""], "disposition": "catalog" }
   ],
   "tables": {

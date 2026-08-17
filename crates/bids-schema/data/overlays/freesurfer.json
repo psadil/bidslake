@@ -356,7 +356,6 @@
         "freesurfer_aseg": {
           "selectors": [
             "datatype == \"anat\"",
-            "extension == \".stats\"",
             "suffix == \"segstats\""
           ],
           "additional_columns": "allowed",
@@ -376,7 +375,6 @@
         "freesurfer_aparc": {
           "selectors": [
             "datatype == \"anat\"",
-            "extension == \".stats\"",
             "suffix == \"parcstats\""
           ],
           "additional_columns": "allowed",
@@ -422,10 +420,17 @@
         },
         "freesurfer_labels": {
           "selectors": [
-            "extension == \".ctab\"",
             "suffix == \"fslabels\""
           ],
           "additional_columns": "allowed",
+          "initial_columns": [
+            "seg_id__fs_labels",
+            "struct_name__fs_labels",
+            "r__fs_labels",
+            "g__fs_labels",
+            "b__fs_labels",
+            "a__fs_labels"
+          ],
           "columns": {
             "seg_id__fs_labels": "optional",
             "struct_name__fs_labels": "optional",

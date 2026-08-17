@@ -88,19 +88,29 @@ in the emitter — `crates/bidslake-py/src/bin/emit_types.rs`, and `stubgen.py` 
 — so the typed surface offers only tables a query means. The regenerated module ships in the same
 commit; CI's codegen-drift job compares the two.
 
-## A reader for headerless numeric matrices
+## One name for a motion trace, whatever produced it
 
-FSL writes several: `filtered_func_data.ica/melodic_mix` and `mc/prefiltered_func_data_mcf.par` are
-whitespace-delimited with no header, and `melodic_mix`'s column count varies per run. The `csv` reader
-assumes tabs and schema-declared columns, so the `feat` adapter catalogs these files as paths rather
-than reading them. Widening the recording path does not reach them: a BIDS headerless recording is
-*derived* — `crates/bidslake/src/schema/recording.rs` finds a tabular suffix whose column names the
-schema locates outside the file, in the sidecar `Columns` or an associated `_channels.tsv` — and no
-BIDS rule describes an FSL matrix. The `feat` term map projects `mcf.par` to `datatype=func,
-suffix=timeseries, desc=motion`, and nothing declares where its column names live, so a reader is the
-declarative hook it needs: add one to `crates/bidslake/src/readers/mod.rs`, register it in
-`default_readers`, and select it from `crates/bids-schema/data/ingestion/feat.json` so the mixing
-matrix and the motion parameters become tables.
+`fmriprep_confounds`, `qsiprep_confounds` and `feat_motion` now declare their six rigid-body columns
+from one vocabulary — the `rot_*__confounds`/`trans_*__confounds` keys in
+`crates/bids-schema/data/overlays/`, byte-identical in all three, so `trans_x` is one column
+definition catalog-wide — but they are still three tables. Asking for a run's motion therefore means
+knowing which tool wrote it, which is the thing the shared vocabulary was supposed to stop mattering.
+
+Merging the tables is not the answer, and it is worth writing down why so it is not re-attempted. A
+per-row table carries `file_id` and nothing else structural, so concepts come from joining
+`all_files`; `fmriprep_confounds` is filled by the batched `read_csv` path, which never reads
+`Ingestion::materialized_concepts` (that is consumed only in DDL generation,
+`crates/bidslake/src/schema/dynamic.rs`), so a merged table would leave fMRIPrep's rows with NULL
+concept columns. Beyond that: `TabularRule::identity_key` cannot express "extension in
+`[.tsv, .par]`" (the tabular selector parser has `intersects([suffix], …)` and no extension
+equivalent); the rules disagree on `undeclared` (fMRIPrep is `catalog` for ~1,800 columns) and only
+one can own the `describes` view; and grouping picks the base rule by fewest selectors, a tie that
+sorts `feat.*` before `fmriprep.*` and would rename the shipped `fmriprep_confounds` table.
+
+The cheaper shape is a view keyed on the `timeseries` suffix these tables share, unioning every
+table whose `rules.tabular_data` rule selects it. `describes`
+(`crates/bidslake/src/schema/ingestion.rs`) is the only view mechanism today and is per-table, so
+this needs a declaration it does not have — which is the design question to settle first.
 
 ## Author layouts for fMRIPrep, MRIQC and QSIPrep
 
