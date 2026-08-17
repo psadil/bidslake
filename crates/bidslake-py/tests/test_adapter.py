@@ -101,9 +101,10 @@ def test_adapter_provenance(fs_lake) -> None:
 
 
 def test_a_term_mapped_file_is_reachable_by_projected_concept(fs_lake) -> None:
-    """`mri/wmparc.mgz` carries no BIDS entity in its name, so before the projection was
-    retained the only way to reach it was matching the path by hand. This is the query
-    that replaces `file_path.endswith("mri/wmparc.mgz")`.
+    """The query that replaces `file_path.endswith("mri/wmparc.mgz")`.
+
+    `mri/wmparc.mgz` carries no BIDS entity in its name, so without the retained projection
+    the only way to reach it is matching the path by hand.
     """
     hits = list(fs_lake.get(sub="01", ses="1", seg="wmparc", extension=".mgz"))
 

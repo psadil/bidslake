@@ -28,23 +28,25 @@
 //! (`build_insert_statements`) and executed via `prepare_cached`, so
 //! DuckDB reuses one compiled plan across every row of that table.
 //!
-//! ## Generated (virtual) BIDS-concept columns
+//! ## The BIDS-concept columns
 //!
-//! On top of the written columns, the `scans` table carries generated columns —
-//! `task`, `sub`, `ses`, `run`, …, plus `datatype`, `suffix`, `extension`, and
-//! `modality` — produced by `generated_bids_columns`. These are
-//! `GENERATED ALWAYS AS (…) VIRTUAL`, computed on read, so they let callers query
-//! by BIDS concept (`WHERE task = 'rest'`) instead of by path regex, and are *not*
-//! part of `table_columns` (the write path never touches them). They too are
-//! generated from `objects.entities` / `objects.datatypes` / `rules.modalities`.
+//! `generated_bids_columns` builds the concept select items — one per BIDS entity
+//! (`sub`, `ses`, `task`, `run`, …) plus `datatype`, `suffix`, `extension`, `modality`
+//! and `pseudofile` — as regexes over `file_path`, again out of `objects.entities` /
+//! `objects.datatypes` / `rules.modalities`. They land on the `all_files` view over
+//! `file_registry`, computed on read and never written, so a caller filters by BIDS
+//! concept (`WHERE task = 'rest'`) instead of by path regex. A table keyed by `file_id`
+//! carries none of them and joins the view to reach them (ADR 0006).
 //!
-//! They read from `file_path` — except that when a term map is configured, the
-//! concepts *it* can project instead read `COALESCE(<the projection>, <the regex>)`
-//! over a physical `projected JSON` column. A term-mapped path
-//! (`sub-01/mri/wmparc.mgz`) carries almost none of its concepts in its name, so
-//! without the fallback the projection would be computed and discarded. See ADR
-//! 0002 §7; with no term map the wrapping is absent entirely and the DDL is
-//! unchanged.
+//! Where a term map can project a concept, its select item is wrapped
+//! `COALESCE(<the projection>, <the regex>)` over the physical `projected JSON` column
+//! (ADR 0002), since a term-mapped path (`sub-01/mri/wmparc.mgz`) carries almost none of
+//! its concepts in its name. With no term map the wrapping is absent and the DDL is byte
+//! for byte what a plain-BIDS run emits.
+//!
+//! An adapter *data* table is the third case: it holds reader output with no path to
+//! regex, so the concepts its ingestion policy lists are physical `TEXT` columns a reader
+//! writes ([`Ingestion::materialized_concepts`]).
 //!
 //! The static tables `bvals`/`bvecs` and `file_associations` live in the parent
 //! [`crate::schema`] module, not here.
@@ -72,6 +74,21 @@ pub struct AppliedOverlay {
     pub content: Value,
 }
 
+/// The DuckDB table model generated from one BIDS schema document, plus the policy that
+/// shaped it.
+///
+/// Built by [`Schema::load`] and its wider forms, which merge any overlays, validate what
+/// those overlays add against the BIDS metaschema, and then compile everything the write path
+/// needs **once**: the `CREATE TABLE` text per table, the ordered write columns with the JSON
+/// key each is filled from, the primary keys, and the INSERT statement built from those. An
+/// instance is immutable afterwards — nothing here is recomputed per row, which is the whole
+/// reason the ingest holds one for the run rather than consulting the schema JSON.
+///
+/// The policy is part of the object, not a later argument: the [`Ingestion`] policy decides
+/// which tables materialize concept columns and which get an `other_data` column at all, and
+/// the term maps decide which concept expressions consult a stored projection. Both are read
+/// during generation, so a `Schema` cannot be re-pointed at a different policy — load another
+/// one instead.
 #[derive(Clone, Debug)]
 pub struct Schema {
     schema: Value,
@@ -247,7 +264,7 @@ impl Schema {
     ///
     /// Exists so an *existing* catalog can be checked against what this run expects.
     /// Tables are created `IF NOT EXISTS`, so a catalog's registry keeps the shape
-    /// the first run gave it while datasets accumulate across runs (ADR 0002 §3) —
+    /// the first run gave it while datasets accumulate across runs (ADR 0002) —
     /// and a later run whose overlays or term maps are wider has nowhere to put the
     /// difference. Derived from the same call that emits the DDL, so the two cannot
     /// drift.
@@ -325,16 +342,27 @@ impl Schema {
         self.table_columns.insert(table.to_string(), fields);
     }
 
-    /// Whether `table` has a dedicated column for the source field `key`, matched
-    /// case-insensitively (see `table_keys_lower`).
     /// The write-path column names of `table`, in the order [`Self::row_values`] returns
     /// them. Positional, so a caller can line a shaped row up with the columns it fills.
+    ///
+    /// `None` — not an empty list — for a table this schema did not generate, which includes
+    /// every static table and every view.
     pub fn write_columns(&self, table: &str) -> Option<Vec<String>> {
         self.table_columns
             .get(table)
             .map(|fields| fields.iter().map(|(name, _, _)| name.clone()).collect())
     }
 
+    /// Whether `table` has a dedicated column for the source field `key` — equivalently,
+    /// whether a value under `key` would reach a column of its own rather than the
+    /// `other_data` overflow. Matched case-insensitively, for the reason `table_keys_lower`
+    /// records: DuckDB folds identifier case, so one column absorbs both spellings of a BIDS
+    /// field that differs only in case.
+    ///
+    /// `false` for a table this schema did not generate, so an unknown name reads as
+    /// "declares nothing" rather than erroring. Worth knowing at the one call site: the
+    /// sidecar path uses this to *drop* keys under an `undeclared: catalog` policy, where a
+    /// mistyped table name would empty the row instead of failing.
     pub fn declares(&self, table: &str, key: &str) -> bool {
         self.table_keys_lower
             .get(table)
@@ -456,7 +484,7 @@ impl Schema {
         // columns, and the `projected` column exists only when a term map is configured.
         self.generate_file_registry_def();
 
-        // Views that re-key a table's rows onto the data files they describe (docs/adr/0007).
+        // Views that re-key a table's rows onto the data files they describe (docs/adr/0003).
         self.generate_described_views();
     }
 
@@ -543,9 +571,9 @@ impl Schema {
     /// of generated columns, so the bulk staged upsert can write it.
     fn generate_file_registry_def(&mut self) {
         let table = "file_registry";
-        // `file_id` is a 128-bit hash of the three identity columns (see `bids::file_id`),
+        // `file_id` is a 64-bit hash of the three identity columns (see `bids::file_id`),
         // so it is stable across runs and machines and needs no second UNIQUE constraint —
-        // which DuckDB would anyway refuse to upsert against.
+        // which DuckDB would anyway refuse to upsert against (ADR 0006).
         let mut columns = vec![
             "file_id UBIGINT PRIMARY KEY".to_string(),
             "dataset_id TEXT".to_string(),
@@ -749,21 +777,18 @@ impl Schema {
             ));
         }
 
-        // Where a table's BIDS-concept columns come from — now two cases, not ADR 0002 §7's
-        // three (see docs/adr/0006):
+        // Where a table's BIDS-concept columns come from — two cases here:
         //
         // - MATERIALIZED (physical `TEXT`, written by a reader) for adapter *data* tables,
         //   whose paths encode no BIDS entities. Marked by the ingestion policy's per-table
         //   `concepts` list. These tables hold reader output only, so there is nothing to
         //   regex out of a path even if they still carried one.
-        // - NOWHERE, for every other table here. The virtual-regex columns moved to the
-        //   `all_files` view over `file_registry`, because a table keyed by `file_id` has no
-        //   `file_path` to compute them from — and because computing them once, on the one
-        //   relation that holds every file, is what stops 24 tables each carrying their own
-        //   copy of the same 40 expressions. "Which subject is this row from?" is now a join.
-        //
-        // The projection fallback moved with them: `projected` is a column of the registry,
-        // so `ingest_projected` writes it in exactly one place.
+        // - NOWHERE, for every other table here. The virtual-regex columns live on the
+        //   `all_files` view over `file_registry` instead: a table keyed by `file_id` has no
+        //   `file_path` to compute them from, and one relation holding every file computes
+        //   them once rather than per table (ADR 0006). "Which subject is this row from?" is
+        //   a join. `projected` is a registry column for the same reason, so
+        //   `ingest_projected` writes it in exactly one place.
         let concepts: Vec<String> = self.ingestion.materialized_concepts(&spec.table).to_vec();
         if !concepts.is_empty() {
             let existing: std::collections::HashSet<String> =
@@ -1178,6 +1203,21 @@ impl Schema {
         self.table_definitions.get(table_name).map(String::as_str)
     }
 
+    /// Write one row — `data`, a JSON object — into a schema-generated table, through the
+    /// statement prebuilt for it at load and executed with `prepare_cached`, so DuckDB reuses
+    /// one compiled plan across every row of the table.
+    ///
+    /// **First writer wins.** For a table with a primary key the statement carries
+    /// `WHERE NOT EXISTS (<pk>)`, so a row whose key is already stored is skipped in silence —
+    /// not updated, not refused. That is what makes the walk's stub rows and a re-index safe
+    /// to issue repeatedly; when a row is meant to be *refreshed* from its source file,
+    /// [`Self::insert_or_replace`] is the one that does that.
+    ///
+    /// Values are shaped by [`Self::row_values`], which keeps the row and stores NULL for any
+    /// value its column's type cannot hold, so a single unparseable field does not cost the
+    /// other 450. Keys with no column of their own land in `other_data`, unless the ingestion
+    /// policy left the table without that column. A table with no generated statement — a
+    /// static table, a view, a name that does not exist — is an error, not a no-op.
     pub fn insert(&self, conn: &Connection, table_name: &str, data: &Value) -> Result<()> {
         self.write_row(conn, table_name, data, &self.insert_sql)
     }
@@ -1436,9 +1476,8 @@ impl Schema {
 /// from `file_path` (optionally falling back from a stored term-map projection).
 ///
 /// No SQL type, because these are select items rather than declared columns — DuckDB infers
-/// the type from the expression. They used to be `GENERATED ALWAYS AS (…) VIRTUAL` columns on
-/// every file-keyed table; once those tables key on `file_id` they have no `file_path` to
-/// compute from, so the concepts are computed once, on the one relation that holds every file.
+/// the type from the expression. A file-keyed table has no `file_path` to compute them from,
+/// so they are computed once, on the one relation that holds every file (ADR 0006).
 struct ConceptColumn {
     name: String,
     expr: String,

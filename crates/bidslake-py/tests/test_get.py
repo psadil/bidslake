@@ -52,8 +52,10 @@ def test_ses_none_selects_sessionless(lake):
 
 
 def test_sequence_filter_in_clause(lake):
-    """Every named subject comes back, and nothing else — a subset would also pass a
-    containment check while meaning the `IN` had dropped one."""
+    """Every named subject comes back, and nothing else.
+
+    A subset would also pass a containment check while meaning the `IN` had dropped one.
+    """
     files = list(lake.get(suffix="bold", sub=["01", "02"]))
 
     assert {f.sub for f in files} == {"01", "02"}

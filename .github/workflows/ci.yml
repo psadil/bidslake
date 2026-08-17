@@ -75,6 +75,38 @@ jobs:
         working-directory: crates/bidslake-py
         run: .venv/bin/ty check python/bidslake
 
+  docs:
+    name: docs (rustdoc · mdbook · links)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: cargo doc
+        # `-D warnings` is what makes this a check rather than a build: the workspace enables
+        # rustdoc::broken_intra_doc_links, and two crate READMEs send readers to
+        # `cargo doc --open` as the primary documentation, so a broken link is a real defect.
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
+      - name: cargo test --doc
+        # Explicit rather than relying on plain `cargo test` picking up lib doctests. The
+        # bidslake crate page's examples ingest from `third_party/bids-examples`, so they
+        # depend on the recursive checkout above.
+        run: cargo test --doc
+      - name: mdbook build
+        run: |
+          cargo install mdbook --locked --version ^0.5
+          mdbook build
+      - name: Link check (including external)
+        # The pre-commit hook runs `lychee --offline`, which only resolves relative links.
+        # This is the same check with the network on. A dead upstream URL should fail here
+        # rather than block a local commit.
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: --no-progress docs/ README.md CONTRIBUTING.md 'crates/*/README.md'
+          fail: true
+
   codegen-drift:
     name: codegen drift (emit-types == committed)
     runs-on: ubuntu-latest

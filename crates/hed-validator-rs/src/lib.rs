@@ -67,6 +67,8 @@
 //! assert!(validator.validate(&parsed, &ctx).is_empty());
 //! ```
 
+#![allow(missing_docs)] // Backlog: 176 undocumented public items. Clearing this and
+// deleting this line is a task of its own; see the workspace `[workspace.lints]` note.
 pub mod data;
 pub mod errors;
 pub mod models;

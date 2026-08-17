@@ -1,3 +1,5 @@
+//! Ingestion of diffusion `.bval`/`.bvec` arrays into their table.
+
 use anyhow::Result;
 use bidslake::{bids::BidsParser, db::BidsDb, fs::LocalFileSystem, schema::Schema};
 use tempfile::TempDir;

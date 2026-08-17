@@ -1,148 +1,138 @@
 # ADR 0001 — Schema augmentation via additive overlays
 
-Status: accepted (2026-07-13)
+```
+ADR: 0001
+Title: Schema augmentation via additive overlays
+Status: Provisional
+Type: Design
+Created: 13-Jul-2026
+```
 
-## Context
+## Abstract
 
-bidslake derives its entire DuckDB schema at *runtime* from the vendored BIDS
-`schema.json`. This keeps the catalog faithful to the formal standard, but the
-standard evolves slowly: flagship BIDS apps (fMRIPrep, MRIQC, QSIPrep) emit
-"bidsish" derivative files that are not in the schema and pass validation only by
-hiding behind a `.bidsignore`. Users could not index most of what they wanted from
-these pipelines — derivative tabular files (e.g. `*_desc-confounds_timeseries.tsv`)
-were routed nowhere and recorded `skipped`; non-BIDS entities (fMRIPrep's
-`from`/`to`/`mode` on transforms) produced no queryable columns.
+bidslake derives its whole DuckDB schema at runtime from the vendored BIDS `schema.json`. An
+**overlay** is a partial BIDS schema deep-merged onto that base before generation, turning
+vocabulary the standard has not reached into real tables and columns: additive-only,
+metaschema-checked by delta, applied as an unordered set, stamped into the catalog.
 
-We needed a way for users to teach bidslake about these outputs that (a) works for
-both DB construction and Python query, (b) does not fork or drift from the vendored
-BIDS schema, and (c) does not silently invent BIDS semantics.
+## Motivation
 
-## Decisions
+The standard evolves slowly and the flagship BIDS apps do not wait: fMRIPrep, MRIQC and QSIPrep emit
+"bidsish" derivatives absent from the schema, hidden behind a `.bidsignore` to pass validation.
+bidslake then indexes almost nothing a user wants: `*_desc-confounds_timeseries.tsv` routes nowhere
+and is recorded `skipped`, and a transform's `from`/`to`/`mode` give no queryable columns, for DDL
+or Python query alike, no BIDS entities of those names existing. `--schema-path`, the only lever,
+replaces the schema wholesale. Vocabulary alone would not reach them either: the walker honors
+`.bidsignore`, and fMRIPrep's lists `*_timeseries.tsv`, `*_xfm.*`, `*_boldref.nii.gz` — exactly what
+an overlay exists to index.
 
-### 1. Overlays, not schema replacement
+## Rationale
 
-Users supply a metaschema-conformant **overlay** — a partial BIDS schema (same
-`objects.*` / `rules.*` shape) — that is deep-merged onto the base schema before
-generation. Every DDL/ingest generator (and the validator's `BidsSchema::from_value`)
-already reads the schema as a `serde_json::Value`, so a merged fragment lights up new
-tables, columns, and generated entity columns through the existing code with no
-per-generator change.
+Every consumer reads the schema as a `serde_json::Value` — the DuckDB table generators, the
+validator's `BidsSchema::from_value` — so a merged fragment lights up new tables, columns and
+generated entity columns with no per-consumer change. Stamped into the catalog, it reaches past
+the process: Python query and `--from-db` stubgen recover a catalog's schema without re-passing it.
 
-*Rejected:* full-replacement schema (today's `--schema-path`) forces users to fork
-and maintain the whole schema and drift on every BIDS bump; a bespoke mini-format
-would need a second parser and evaluator.
+Additive-only merging keeps a typo from shadowing BIDS semantics — an overlay disagreeing with the
+base fails at the JSON pointer rather than redeclaring `trans_x` as a string — and buys
+order-independence for objects. Arrays do not: merging appends the overlay's new elements after the
+base's, so folding over `[a, b]` and `[b, a]` differ in element order whenever two overlays extend
+one array. Sorting the fold by serialized content, not by the caller's names, is what makes two
+callers naming one set differently get one schema.
 
-Implementation: `bids_schema::overlay` (shared, since both `bidslake` and the
-validator depend on it). `Schema::load_with_overlays` in `bidslake`.
+Validation is by delta because schema and metaschema come from separate upstreams and the metaschema
+lags: the vendored BIDS 1.11.1 render carries `rules.dataset_metadata`, absent from the metaschema's
+`rules`, so validating a merged schema outright would reject even a no-op overlay. Reporting only
+error signatures — instance pointer plus message — absent from validating the base alone catches an
+overlay-added bad key where a base-added one beside it is tolerated.
 
-### 2. Additive-only merge
+`--no-bidsignore` is a separate flag because relaxing a dataset-wide walk guard is not something a
+vocabulary flag should change silently. On `third_party/bids-examples/ds000001-fmriprep`, without it
+the tree's 48 `*_xfm.*` transforms and 12 `*_timeseries.tsv` confounds files are invisible; with it,
+the transforms parse with `from`/`to`/`mode` and the confounds route to `fmriprep_confounds`.
 
-An overlay may add object keys and extend arrays, but never rewrite or delete a value
-the base already defines; a conflicting scalar is an error naming the JSON pointer.
-This makes merging order-independent and prevents a typo from shadowing BIDS
-semantics. See `overlay::merge_into`.
+## Specification
 
-*Amended (2026-08-16).* Additive-only gets order-independence for objects but not for
-arrays: merging appends the overlay's new elements after the base's, so folding two
-overlays that extend one array orders it by which was applied first. It went unnoticed
-because no bundled overlay extends a base array — every array they carry sits under a
-new rule id — so the fold was order-independent in practice while not being so in
-general. A set of overlays is now applied through `overlay::merge_all`, which orders
-them by serialized content before folding; the result depends on *which* overlays were
-named, not the order they were named in.
+### 1. An overlay is a partial BIDS schema merged onto the base before generation
 
-Deliberately **not** fixed by canonicalizing each array's appended tail. An overlay's own
-array order is intent: `rules.entities` is the BIDS entity ordering, so an overlay
-declaring `from`, `to`, `mode` means that sequence, and reordering it to `from`, `mode`,
-`to` would make `from-X_to-Y_mode-Z` fail entity-order validation. Only the application
-order is canonical; each overlay's declarations are preserved as written.
+An overlay is a JSON object with the same `objects.*`/`rules.*` shape as `schema.json`, deep-merged
+into the schema `Value` by `Schema::load_full` before any DDL is generated. Overlays arrive by path
+(`--overlay`), from a dataset's `.bidslake/overlay.json`, or bundled under `--adapter <name>` beside
+that producer's term map and ingestion fragment ([ADR 0002](0002-adapters-and-layouts.md)).
 
-### 3. Metaschema validation by *delta*
+### 2. Merging is additive-only, atomic, and applied as a set
 
-Overlays are validated against the BIDS metaschema — but the vendored base schema
-itself does not fully satisfy the vendored metaschema (an inherent upstream lag, e.g.
-`rules.dataset_metadata` is unknown to the metaschema). So validating the merged
-schema outright would reject even a no-op overlay. Instead `overlay::validate_effective`
-computes the *delta*: it fails only on metaschema violations the overlay *introduces*,
-tolerating pre-existing base deviations. Uses the `jsonschema` crate.
+- **object ⊕ object**: recurse key by key; a key only the overlay has is inserted.
+- **array ⊕ array**: append each overlay element not already present, by structural equality.
+- **anything else**: equal values are a no-op, so re-applying an overlay is idempotent; a differing
+  value, kind mismatches included, is an error naming the RFC 6901 pointer.
 
-### 4. Self-describing databases
+An overlay may add and extend, never rewrite or delete; a failed merge names the offender and leaves
+the base as found. `merge_all` sorts a set by serialized content when folding, so the effective
+schema depends on *which* overlays were named, not their order, each overlay's array order surviving
+as written.
 
-Every catalog embeds its effective schema in `bidslake_schema`; when overlays were
-applied, their provenance (source, sha256, content) is recorded in
-`bidslake_overlays`. The augmentation travels with the data — the Python query side
-and codegen recover it without re-passing anything (the Iceberg/Delta principle). See
-`db::BidsDb::stamp_schema`.
+### 3. An overlay is validated against the BIDS metaschema by delta
 
-### 5. Vendoring the schema and metaschema from two pinned sources
+`validate_effective(pre_overlay, effective)` runs the vendored metaschema over both documents with
+the `jsonschema` crate and fails only on violations the overlay introduces, tolerating those the
+base already carries. An overlay may use only constructs the vendored metaschema already permits.
 
-The compiled schema and the metaschema live in **different** upstream repositories:
-`schema.json` in `bids-standard/bids-schema`, `metaschema.json` in
-`bids-standard/bids-specification` (the `bids-schema` repo has no metaschema). A full
-git subtree of either is heavy (~92 MB for bids-schema, mostly PR/BEP renders). So we
-vendor both as lean, pinned, in-tree files (`third_party/bids-schema/...` and
-`third_party/bids-specification/...`, each with a `.pinned-commit`), refreshable via
-`tools/vendor-schema.sh`, embedded at build time (`bids_schema::{SCHEMA_JSON,
-METASCHEMA_JSON}`). Builds stay fully offline.
+### 4. Every catalog embeds the schema it was built from
 
-### 6. Row-order stays upstream; positional handling stays hardcoded
+`stamp_schema` writes one `bidslake_schema` row — `base_schema_version`, the full `effective_schema`
+JSON, an `overlay_digest` over the applied overlays (NULL when none) — and, where overlays applied,
+`bidslake_overlays`, one row each with `idx`, `source`, `sha256` and verbatim `content`.
 
-> **Superseded by [ADR 0002](0002-layout-adapters.md) §4 (2026-07-14).** The conclusion below
-> — that the only alternatives were "invent a BIDS concept" or "hardcode it" — was a false
-> dichotomy. Read-vs-catalog and row-order are not BIDS questions at all (BIDS has no
-> database), so they needed no *BIDS* concept; they needed a **bidslake** schema. They now
-> live in the formal, metaschema-validated **ingestion schema**
-> (`data/ingestion/base.json` declares `events` as `{"ordered": false}`), and
-> `bids::is_order_insensitive` no longer exists. The reasoning about not inventing *BIDS*
-> concepts still stands, and bids-2-devel#98 remains the upstream home for row-order if BIDS
-> ever wants it — but bidslake no longer waits on it. Retained below as written.
+### 5. The schema and the metaschema are vendored from two pinned sources
 
-Some tabular files raised a real gap: `*_desc-confounds_timeseries.tsv` rows are
-positional (row N == volume N), so their order must be preserved. BIDS has no schema
-field to express row-order semantics. We deliberately do **not** invent one, nor
-extend the metaschema in-memory to allow it — that deviation would cause long-term
-headaches. Instead the ordering policy lives outside the BIDS schema, as a per-table
-`ordered` flag in bidslake's own ingestion schema (ADR 0002; `Ingestion::ordered`,
-which this ADR's original hardcoded predecessor became). Only `events` is declared
-reorderable; everything else, including positional derivative time series and
-recordings, preserves TSV line order so `row_idx` is a faithful row number. The flag also
-decides whether the column exists: a table declared reorderable is read concurrently, which
-fixes no row order, so it carries no `row_idx` at all rather than a column of arbitrary
-labels inviting `ORDER BY row_idx`. `events` therefore has none, and its rows are addressed
-by `onset`. A `row_order` schema field is proposed upstream at
-[bids-standard/bids-2-devel#98](https://github.com/bids-standard/bids-2-devel/issues/98);
-if adopted, the hardcode can be driven from the schema.
+`schema.json` comes from `bids-standard/bids-schema`, `metaschema.json` from
+`bids-standard/bids-specification`, which ships the metaschema the schema repo lacks. Each is pinned
+under `third_party/` as a lean file rather than a git subtree, beside a `.pinned-commit`, refreshed
+by `tools/vendor-schema.sh` and embedded at build time.
 
-The same reasoning defers the other "lift the hardcoded limits" items (declarable
-`row_identity`, etc.) wherever they would require inventing schema concepts.
+### 6. Indexing overlay-described output requires `--no-bidsignore`
 
-### 7. Overlays need to walk past `.bidsignore`
+`index --no-bidsignore` walks every file regardless of the dataset's `.bidsignore`, nested ones
+included; it is explicit, not implied by `--overlay` or `--adapter`. Walking is not indexing:
+classification still decides what becomes a scan or a table, so `*.html` is walked, not indexed.
 
-Pipelines hide their non-standard outputs from BIDS validation with a `.bidsignore`
-(fMRIPrep lists `*_timeseries.tsv`, `*_xfm.*`, `*_boldref.nii.gz`, …) — i.e. it hides
-*exactly* the files an overlay exists to index. bidslake's walker honors `.bidsignore`,
-so by default an overlay is inert against a real derivative dataset. The `index
---no-bidsignore` flag walks every file so overlay-described outputs are indexed;
-bidslake's own classification still decides what becomes a scan/table, so reports/logs
-(`*.html`, `figures/`) are walked but not indexed. Verified against a real fMRIPrep
-dataset (`third_party/bids-examples/ds000001-fmriprep`): without the flag its transforms
-and confounds are invisible; with it, 48 transforms parse with `from`/`to`/`mode` and the
-confounds route to `fmriprep_confounds`.
+## Backwards Compatibility
 
-Kept as an explicit flag rather than implied by `--overlay` (auto-relaxing `.bidsignore`
-whenever an overlay is present is a reasonable future default; see the TODO).
+A catalog built without overlays is unaffected. Tables are created `IF NOT EXISTS`, so an
+overlay-added table appears on the first run carrying it, while the columns of a table already
+present are frozen by the run that created it: widening an overlay over an existing table needs a
+fresh catalog ([ADR 0006](0006-file-registry.md)). Statically typed overlay columns must be
+regenerated by stubgen from the stored `effective_schema`; runtime query needs no regeneration,
+validating columns against the live `information_schema`.
 
-## Consequences
+## Rejected Ideas
 
-- New derivative outputs become first-class (real tables, generated entity columns,
-  typed sidecar fields) via a small additive overlay, and the augmentation is
-  reproducible from the database itself.
-- Static Python typing of augmented columns requires regenerating types per project
-  (opt-in stubgen); runtime querying works with no extra step, because column
-  validation is against the live `information_schema`.
-- bidslake honors only what the metaschema (as vendored) permits; it will not accept
-  overlays that invent new schema constructs until those land upstream.
-- ~~The ordering hardcode is a known, documented exception to bidslake's
-  "everything is schema-driven" design, tracked against bids-2-devel#98.~~ Resolved: the
-  exception is gone. The ordering policy (and read-vs-catalog generally) is now driven by the
-  **ingestion schema** — see [ADR 0002](0002-layout-adapters.md) §4.
+**A full-replacement schema.** `--schema-path` does this and is the wrong tool: the user forks all
+of `schema.json` and re-merges on every BIDS release, where an overlay carries only the delta.
+
+**A bespoke augmentation mini-format.** It would need its own parser and evaluator; an overlay
+reuses the metaschema, the merge, and every generator that already reads the schema `Value`.
+
+**Canonicalizing each array's appended tail.** Deterministic and wrong: an overlay's array order is
+intent. `rules.entities` is the BIDS entity ordering, so reordering `from`, `to`, `mode` makes
+`from-X_to-Y_mode-Z` fail entity-order validation; the test
+`one_overlays_own_array_order_is_preserved` pins it.
+
+**A BIDS schema field for row-order.** Rows of `*_desc-confounds_timeseries.tsv` are positional and
+BIDS has no way to say so, but a field declaring it makes bidslake the de facto author of BIDS
+semantics; `row_order` is proposed upstream at
+[bids-2-devel#98](https://github.com/bids-standard/bids-2-devel/issues/98) and bidslake does not
+front-run it. Such a concern gets a bidslake schema of its own
+([ADR 0002](0002-adapters-and-layouts.md)), and the same refusal defers a declarable `row_identity`,
+still a hardcoded match on table name in `crates/bidslake/src/schema/tabular.rs`.
+
+**Loosening the metaschema in memory.** The same authorship problem from the other side: it would
+let an overlay declare constructs BIDS has not adopted.
+
+## Open Issues
+
+- **Should an adapter relax `.bidsignore` by itself?** Implying `--no-bidsignore`, or un-ignoring
+  only what the effective schema recognizes, would make the common case one flag: MRIQC's metrics
+  live in `*_T1w.json`/`*_bold.json` sidecars its `.bidsignore` hides, so `--adapter mriqc` reaches
+  none.

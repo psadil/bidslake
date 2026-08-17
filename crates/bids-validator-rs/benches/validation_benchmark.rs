@@ -1,3 +1,5 @@
+#![allow(missing_docs)] // `criterion_main!` generates an undocumented `main`.
+
 //! Validation benchmarks.
 //!
 //! Two groups:

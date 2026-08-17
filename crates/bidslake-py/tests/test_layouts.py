@@ -96,7 +96,7 @@ def test_placeholders_come_from_keywords(
 def test_unbound_placeholder_raises_rather_than_guessing(feat: bidslake.Layout) -> None:
     """An empty substitution would produce a plausible path pointing at nothing.
 
-    The guarantee ADR 0008 states; binding at `under()` (below) moved only the *moment*
+    The guarantee ADR 0002 states; binding at `under()` (below) moved only the *moment*
     of binding, not this.
     """
     at = feat.under(Path("/work") / UNIT)
@@ -193,7 +193,7 @@ def test_rendered_paths_index_back_as_declared(
 #
 # `feat`'s two `classification` roles render `fix4melview_{training}_thr{threshold}.txt`,
 # and those values are the pipeline's configuration rather than anything the layout knows.
-# Raising for an unbound one is right (docs/adr/0008) and is pinned above. What these add is
+# Raising for an unbound one is right (docs/adr/0002) and is pinned above. What these add is
 # that the values may be supplied *once*, where the root is, since they have the same
 # lifetime — before this, `for role in layout.roles: at[role]` was an error and every
 # consumer that walked the role list special-cased the same two names by hand.
@@ -344,8 +344,11 @@ def test_a_renderable_role_is_reported(partially_bound):
 
 
 def test_an_unrenderable_role_is_omitted_not_reported_absent(partially_bound):
-    """Conflating them would report a finished tree as incomplete because a caller forgot a
-    keyword — which is exactly the confusion the raise on `path()` exists to prevent."""
+    """Exactly the confusion the raise on `path()` exists to prevent.
+
+    Conflating them would report a finished tree as incomplete because a caller forgot a
+    keyword.
+    """
     assert "classification_by_rater" not in partially_bound.present()
 
 

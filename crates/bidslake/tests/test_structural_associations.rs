@@ -144,7 +144,7 @@ async fn inherited_gradients_resolve_without_sessions() -> anyhow::Result<()> {
 }
 
 /// `resolve_structural_associations` builds its tree from the **registry path set** rather than
-/// the backend's walked `FileTree`, which is what lets it run on S3 (docs/adr/0007). The two must
+/// the backend's walked `FileTree`, which is what lets it run on S3 (docs/adr/0003). The two must
 /// denote the same files, so the edge set must be identical to what the walk produces.
 ///
 /// Asserted indirectly but exactly: every association's source and target are registry rows, and

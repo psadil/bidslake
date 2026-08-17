@@ -1,6 +1,6 @@
 //! `bidslake verify` — is the catalog still true about the files it names?
 //!
-//! An `attached` root is somebody else's tree (ADR 0009): bidslake does not own it, so it
+//! An `attached` root is somebody else's tree (ADR 0007): bidslake does not own it, so it
 //! moves without asking, and the catalog's rows describe what the walk saw rather than what
 //! is there now. This asks the only two questions an index can answer about that gap — is
 //! every file it recorded still there, and does it still look the way it did.
@@ -9,16 +9,11 @@
 //! A `verify` that has passed since the last index is what lets a caller act on those rows
 //! without re-checking the files itself.
 //!
-//! **What "look the way it did" means is bounded by what the ingest stored**, and that is
-//! deliberately size and mtime rather than a checksum. Hashing means *reading* every file,
-//! which is a different order of cost from stat-ing one, and an index that read every byte
-//! of a study to build itself would not be an index. So this detects a file that was
-//! replaced, truncated, or rewritten — the failures that actually happen to a derivative
-//! tree — and cannot detect a rewrite that preserved both. That is the same bargain `make`
-//! has always made.
-//!
-//! A catalog indexed with `--no-stat` has neither column, and then this degrades to
-//! presence alone and says so, rather than reporting a clean bill it cannot support.
+//! **What "look the way it did" means is bounded by what the ingest stored**, which is
+//! `size_bytes` and `mtime_ns` and not a checksum (ADR 0007 weighs that, and records the
+//! rewrite that preserves both as the gap it leaves). A catalog indexed with `--no-stat` has
+//! neither column, and then this degrades to presence alone and says so, rather than
+//! reporting a clean bill it cannot support.
 
 use anyhow::{Context as _, Result};
 use std::collections::BTreeMap;

@@ -3,9 +3,9 @@
 #   prek install            # install the git hook
 #   prek run --all-files    # run every hook against the whole tree
 #
-# Only fast checks run here — ruff, `cargo fmt --check`, and ty. Anything that
-# compiles or runs a test suite (cargo clippy, cargo test, pytest) belongs in CI,
-# so commits and pushes stay quick.
+# Checks that need no network and no test corpus run here: ruff, `cargo fmt --check`,
+# `cargo clippy`, ty, and an offline link check. Anything that runs a test suite
+# (cargo test, pytest) or reaches the network belongs in CI, so commits stay quick.
 #
 # ruff comes from the maintained upstream mirror. The cargo and ty hooks are
 # `local` (system cargo / the crate's uv venv): the published Rust mirror
@@ -19,6 +19,15 @@ hooks = [
     { id = "ruff-check", args = ["--fix"], files = '^crates/bidslake-py/.*\.py$' },
     { id = "ruff-format", files = '^crates/bidslake-py/.*\.py$' },
 ]
+
+# `--offline` resolves relative and anchor links only, with no network, which is both fast
+# enough for a hook and the check that actually matters here: the ADRs and the READMEs link
+# each other by relative path, so renaming or renumbering a record breaks them silently.
+# External URLs are checked in CI instead — a dead upstream link should not block a commit.
+[[repos]]
+repo = "https://github.com/lycheeverse/lychee"
+rev = "lychee-v0.24.2"
+hooks = [{ id = "lychee", args = ["--offline", "--no-progress"], files = '\.md$' }]
 
 [[repos]]
 repo = "local"

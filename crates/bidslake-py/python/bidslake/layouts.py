@@ -3,43 +3,28 @@
 A query resolves what a unit *consumes* — files the catalog already knows about. A
 layout is the other direction: where a unit's outputs *go*. Nothing can query for a file
 a pipeline has not written yet, so without this every consumer hardcodes the convention,
-which is how a script ends up with two dozen properties that are only string joins::
+which is how a script ends up with two dozen properties that are only string joins:
 
     @property
     def highres2standard_mat(self) -> Path:
         return self.outdir / "reg" / "highres2standard.mat"
 
-With a layout that becomes a lookup, and the convention lives in one declared place::
+With a layout that becomes a lookup, and the convention lives in one declared place:
 
     out = bidslake.layout("feat").under(dst / stem)
     out["highres2standard_mat"]     # <dst>/<stem>/reg/highres2standard.mat
     out["filtered_func_clean"]      # <dst>/<stem>/filtered_func_data_clean.nii.gz
 
-Why this is a separate artifact from the term map
--------------------------------------------------
-The term map already parses these exact paths, so the obvious question is why it cannot
-simply be run backwards. Its templates are PCRE, pinned because optional groups collapse
-FreeSurfer's ``sub-01_ses-1`` / ``sub-01`` / bare ``bert`` forms into one mapping — and
-that collapsing is precisely what makes them non-invertible.
+The term map that reads such a tree back cannot simply be run backwards — it is
+non-invertible, and ADR 0002 measures why. So a layout is its own artifact, and the two
+are kept honest at load time: loading one renders every role under every declared example
+and feeds each result back through the term map it names, raising unless
+`classify(render(role))` reproduces the role's declared concepts.
 
-Swapping PCRE for ``{var}`` does not rescue it, because invertibility is a property of
-the *mapping*, not of the syntax: a mapping that recognizes a whole class of filenames
-(``mri/*.mgz``, ``label/*.annot``) has no concept to render *from*. Measured on a real
-recon-all tree, a pure-``{var}`` rewrite needed 50% more mappings and still lost a third
-of the files. So the read direction keeps PCRE, and the roles that *can* be written are
-declared separately.
-
-What stops the two drifting
----------------------------
-Every layout declares ``Examples``, and loading one renders **every role under every
-example** and feeds the result back through its term map. If ``classify(render(role))``
-does not reproduce the role's declared concepts, the layout raises rather than loading.
-The two directions are therefore checked against each other, not merely kept side by
-side — co-locating them would only have prevented *textual* drift.
-
-That check earns its keep immediately: it caught a role (``reg/wmparc.nii.gz``) that the
-pipeline writes but the term map had no mapping for, so those files were being produced
-and then silently ignored at index time.
+Two consequences for a caller. A role whose placeholders nothing has bound raises rather
+than rendering a plausible wrong path. And a role describes its file *at the destination*,
+so its concepts are routinely narrower than a source-side query needs — a role is not a
+catalog filter.
 """
 
 from __future__ import annotations
@@ -62,6 +47,12 @@ class RoleState:
     the price of a `stat`. That is the question a workflow engine's staleness check asks,
     and the one `bidslake verify` asks of a catalog — the same pair of numbers the ingest
     records in `all_files.size_bytes`/`mtime_ns`, so the two are directly comparable.
+
+    Attributes:
+        role: The role this answers for.
+        exists: Whether the file is there.
+        size_bytes: The file's size, or `None` when it is absent.
+        mtime_ns: The file's modification time in nanoseconds, or `None` when it is absent.
     """
 
     role: str
@@ -72,27 +63,37 @@ class RoleState:
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class LayoutAt:
-    """A layout bound to one unit's output root: role name in, path out."""
+    """A layout bound to one unit's output root: role name in, path out.
+
+    Attributes:
+        layout: The layout whose roles this renders.
+        root: The output root every rendered path is joined onto.
+        bindings: Placeholder values every lookup through this binding inherits — see
+            `Layout.under`. A per-call keyword to `path` overrides one.
+    """
 
     layout: Layout
     root: Path
-    #: Placeholder values every lookup through this binding inherits — see
-    #: :meth:`Layout.under`. A per-call keyword to :meth:`path` overrides one.
     bindings: Mapping[str, str] = dataclasses.field(default_factory=dict)
 
     def __getitem__(self, role: str) -> Path:
+        """`path` with nothing bound per call, so a role reads as a lookup."""
         return self.path(role)
 
     def path(self, role: str, **bindings: str) -> Path:
-        """The absolute path for ``role`` under this root.
+        """The absolute path for `role` under this root.
 
-        Raises rather than returning a guess: an unknown role is a typo, an unbound
-        ``{placeholder}`` would otherwise render as a plausible path pointing at the
-        wrong file, and a binding carrying a path separator would render one that leaves
-        this root entirely.
+        Args:
+            role: A role name this layout declares.
+            **bindings: Placeholder values for this call, merged over whatever
+                `Layout.under` bound, and winning — so a run-wide value is stated once and
+                a per-call one still overrides it.
 
-        Keywords here are merged over whatever :meth:`Layout.under` bound, and win — so a
-        run-wide value is stated once and a per-call one still overrides it.
+        Raises:
+            KeyError: An unknown role, an unbound `{placeholder}`, or a binding carrying a
+                path separator — rather than returning a guess. The first is a typo, the
+                second would otherwise render as a plausible path pointing at the wrong
+                file, and the third one that leaves this root entirely.
         """
         merged = {**self.bindings, **bindings}
         rel = self.layout._inner.render(role, merged)
@@ -124,7 +125,7 @@ class LayoutAt:
         return self.root / rel
 
     def mkdir(self, role: str, **bindings: str) -> Path:
-        """:meth:`path`, with the parent directory created. Returns the path."""
+        """`path`, with the parent directory created. Returns the path."""
         target = self.path(role, **bindings)
         target.parent.mkdir(parents=True, exist_ok=True)
         return target
@@ -144,10 +145,12 @@ class LayoutAt:
     def states(self, *roles: str) -> list[RoleState]:
         """Every role's presence and stat, in the layout's order.
 
-        With no arguments, every role this binding can *render* — a role whose placeholders
-        nothing has bound is omitted rather than reported absent, because unaddressable and
-        missing are different answers and conflating them reports a finished tree as
-        incomplete for a forgotten keyword.
+        Args:
+            *roles: Restrict the answer to these roles. With none, every role this binding
+                can *render* — a role whose placeholders nothing has bound is omitted rather
+                than reported absent, because unaddressable and missing are different
+                answers and conflating them reports a finished tree as incomplete for a
+                forgotten keyword.
         """
         rows = self.layout._inner.present(str(self.root), dict(self.bindings))
         states = [RoleState(r, e, sz, mt) for (r, e, sz, mt) in rows]
@@ -160,7 +163,7 @@ class LayoutAt:
         """Is this one role's file there?
 
         `False` for a role that cannot be rendered, which is the one place this
-        deliberately differs from :meth:`path` — a caller asking "is it there" wants an
+        deliberately differs from `path` — a caller asking "is it there" wants an
         answer, not a `KeyError`.
         """
         return any(st.exists for st in self.states(role))
@@ -170,7 +173,7 @@ class LayoutAt:
         return {st.role: st.exists for st in self.states()}
 
     def state(self, role: str) -> RoleState | None:
-        """One role's :class:`RoleState`, or `None` if it cannot be rendered."""
+        """One role's `RoleState`, or `None` if it cannot be rendered."""
         return next(iter(self.states(role)), None)
 
     def digest(self, *roles: str) -> str:
@@ -186,6 +189,9 @@ class LayoutAt:
         file, which is the same assumption `make` has always made and is wrong only for a
         deliberate forgery or a filesystem with second-granularity timestamps that was
         written to twice within one tick.
+
+        Args:
+            *roles: The roles to fold in. With none, every renderable role.
         """
         h = hashlib.sha256()
         for st in self.states(*roles):
@@ -195,13 +201,18 @@ class LayoutAt:
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class Layout:
-    """A validated output layout, addressed by role name."""
+    """A validated output layout, addressed by role name.
+
+    Attributes:
+        name: The bundled layout's name, as passed to `layout`.
+    """
 
     name: str
     _inner: _bidslake.PyLayout
 
     @property
     def roles(self) -> tuple[str, ...]:
+        """Every role this layout declares, sorted by name — the order `states` reports."""
         return tuple(self._inner.roles())
 
     @property
@@ -216,32 +227,37 @@ class Layout:
     def under(self, root: str | os.PathLike[str], **bindings: str) -> LayoutAt:
         """Bind this layout to one unit's output root, and optionally its placeholders.
 
-        Most roles are fully determined by the root, so ``under(root)`` is the whole call.
+        Most roles are fully determined by the root, so `under(root)` is the whole call.
         A few are not: `feat`'s two `classification` roles render
-        ``fix4melview_{training}_thr{threshold}.txt``, and those values are the pipeline's
+        `fix4melview_{training}_thr{threshold}.txt`, and those values are the pipeline's
         configuration — which FIX model, which threshold — not something the layout can
-        know. Such a role raises rather than guessing (docs/adr/0008), which is right.
+        know. Such a role raises rather than guessing (docs/adr/0002), which is right.
 
-        What was wrong is *when* the values had to be supplied. They are constant for a
-        whole run, and requiring them per access made
-        ``for role in layout.roles: at[role]`` an error, so every consumer that walked the
-        role list special-cased the same two names by hand::
+        Those values are constant for a whole run, so they are bound here rather than per
+        access. Otherwise `for role in layout.roles: at[role]` is an error and every
+        consumer that walks the role list special-cases the same two names by hand:
 
             out = layout("feat").under(dst / stem, training="UKBiobank", threshold="1")
             out["classification"]                                  # now just works
             out.path("classification_by_rater", rater="psadil")    # merged over the above
 
-        The guarantee is unchanged: a placeholder *nothing* has bound still raises. Only
-        the moment of binding moved.
+        Binding early moves the moment, not the guarantee: a placeholder *nothing* has
+        bound still raises.
+
+        Args:
+            root: The unit's output root. Every path the binding renders is under it.
+            **bindings: Placeholder values every lookup through the binding inherits. A
+                per-call keyword to `LayoutAt.path` is merged over these and wins.
         """
         return LayoutAt(self, Path(root), dict(bindings))
 
     def __repr__(self) -> str:
+        """The layout's name and how many roles it declares."""
         return f"Layout({self.name!r}, {len(self.roles)} roles)"
 
 
 def layout(name: str) -> Layout:
-    """Load a bundled layout by name (``feat``).
+    """Load a bundled layout by name (`feat`).
 
     Loading runs the round-trip check described in the module docstring, so a layout
     that has drifted from its term map raises here rather than at write time.

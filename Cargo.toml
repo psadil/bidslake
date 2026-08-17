@@ -68,3 +68,21 @@ rstest = "0.26"
 # and `wait-timeout` to the lock for no benefit. `bit-set` is kept: it is what proptest shrinks
 # collections with, and `bit-set`/`bit-vec` 0.8 are already in the lock via `fancy-regex`.
 proptest = { version = "1.11", default-features = false, features = ["std", "bit-set"] }
+
+# Documentation lints. `missing_docs` is on workspace-wide so a new undocumented public item is
+# a warning the moment it is written, rather than a debt discovered later — CI runs clippy with
+# `-D warnings`, so it is effectively an error.
+#
+# The two validator crates opt out at their crate root: between them they carry 463 undocumented
+# public items, and clearing that is its own task rather than a rider on a documentation review.
+# Removing those two `allow`s is the whole of that task.
+#
+# `missing_errors_doc`/`missing_panics_doc` are deliberately absent. They are clippy::pedantic
+# and would add 93 items across the workspace; the intent is to adopt them once the prose above
+# is settled, not to blanket-enable a pedantic group.
+[workspace.lints.rust]
+missing_docs = "warn"
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "warn"
+private_intra_doc_links = "warn"

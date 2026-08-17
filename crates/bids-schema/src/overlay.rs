@@ -10,8 +10,7 @@
 //!
 //! Merging is **additive-only** ([`merge_into`]): an overlay may add keys and extend
 //! arrays but never rewrite or delete a value the base defines — a conflict is an
-//! error, not a silent override. Rationale and the wider design live in
-//! `docs/adr/0001-schema-augmentation-overlays.md`.
+//! error, not a silent override. Rationale and the wider design live in ADR 0001.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -25,36 +24,91 @@ use crate::METASCHEMA_JSON;
 /// caller via `?`, since it is `Error + Send + Sync + 'static`.
 #[derive(Debug, thiserror::Error)]
 pub enum OverlayError {
+    /// The overlay file could not be read off disk — it is missing, or unreadable. Only
+    /// [`load_overlay`] can produce this; [`bundled_overlay`] embeds its JSON at compile
+    /// time and touches no filesystem.
     #[error("reading overlay {path}")]
     Read {
+        /// The path as the caller of [`load_overlay`] named it — a `--overlay` argument, or
+        /// the `<input>/.bidslake/overlay.json` bidslake synthesizes from `<input>` when the
+        /// dataset carries one — rendered through `Path::display` and never canonicalized, so
+        /// an explicit `--overlay` argument reads back exactly as it was given rather than as
+        /// a resolved absolute path.
         path: String,
+        /// The underlying `std::fs::read_to_string` failure (not found, permissions).
         #[source]
         source: std::io::Error,
     },
+    /// The file was read but its bytes are not JSON. Nothing BIDS-specific has been looked
+    /// at yet; this is `serde_json` refusing the syntax.
     #[error("parsing overlay {path} as JSON")]
     Parse {
+        /// The overlay path, as in [`OverlayError::Read`].
         path: String,
+        /// The `serde_json` failure, whose `Display` carries the line and column.
         #[source]
         source: serde_json::Error,
     },
+    /// The file is valid JSON whose root is not an object — a bare array, string or number.
+    /// This is the *only* shape check [`load_overlay`] makes: an overlay mirrors the
+    /// schema's `objects.*` / `rules.*` object, and everything below the root is left to
+    /// [`validate_effective`], which can only judge it once the merge has happened.
     #[error("overlay {path} must be a JSON object (a partial BIDS schema)")]
-    NotObject { path: String },
+    NotObject {
+        /// The overlay path, as in [`OverlayError::Read`].
+        path: String,
+    },
+    /// The overlay tried to change something the base already defines, which additive-only
+    /// merging forbids (ADR 0001): the two documents hold different values at one location,
+    /// or the two disagree in kind — a scalar facing a container, or an object facing an
+    /// array. Reported for the first such
+    /// location the walk reaches in key order (`serde_json::Map` is a `BTreeMap` here), so
+    /// a doubly-conflicting overlay names one conflict and hides the rest; either way the
+    /// base is left as it was found.
     #[error(
         "overlay conflict at `{pointer}`: base has `{base}`, overlay has `{overlay}`. \
          Overlays are additive-only and may not change a value the base already defines."
     )]
     Conflict {
+        /// RFC 6901 pointer to the disagreeing location in the merged document, each key
+        /// escaped (`~` → `~0`, `/` → `~1`): `/objects/columns/trans_x/type`. A conflict at
+        /// the root — where the two documents are neither both objects nor both arrays, so no
+        /// key was ever pushed — renders as the bare `/`; realistically that is the vendored
+        /// schema, an object, against an overlay whose root is not one. Only an overlay that
+        /// did not come through [`load_overlay`] can get there, since that is the crate's one
+        /// root check: [`bundled_overlay`] parses with none, and a hand-built [`Value`] has
+        /// none either. Both public entry points reach it — [`merge_all`] also merges from an
+        /// empty path, and yields the same pointer wrapped in [`OverlayError::InOverlay`].
         pointer: String,
+        /// What the base holds there, as one line of JSON, elided past 80 characters.
         base: String,
+        /// What the overlay holds there, rendered like `base`.
         overlay: String,
     },
+    /// The merged schema violates the BIDS metaschema in a way the pre-overlay schema did
+    /// not — see [`validate_effective`], which compares the two so the vendored schema's own
+    /// known deviations stay tolerated. In practice this is an added `objects.entities` or
+    /// `objects.columns` entry missing a key the metaschema requires, such as
+    /// `display_name` or `description`.
     #[error("overlay makes the schema violate the BIDS metaschema:\n{}", .violations.join("\n"))]
-    Invalid { violations: Vec<String> },
+    Invalid {
+        /// One entry per *introduced* violation, sorted and deduplicated, each already
+        /// indented and formatted as ``  at `<instance pointer>`: <message>`` for the
+        /// `Display` above. Never empty — an empty delta is `Ok(())`, not this variant.
+        violations: Vec<String>,
+    },
     /// Which overlay of a set failed, so [`merge_all`] can name it without the caller
     /// having to track the fold position itself.
     #[error("merging overlay {name}")]
     InOverlay {
+        /// The label the caller paired with this overlay's content — bidslake passes the
+        /// `--overlay` path or the `--adapter` name. Deliberately the caller's own name and
+        /// not a position in the content-sorted order [`merge_all`] merges in, so the
+        /// message points at something the user typed.
         name: String,
+        /// The failure being attributed, in practice an [`OverlayError::Conflict`]. Boxed
+        /// because the enum is recursive. [`merge_all`] wraps *every* merge failure this
+        /// way, so a caller matching on `Conflict` has to look through this source.
         #[source]
         source: Box<OverlayError>,
     },
@@ -134,7 +188,7 @@ pub fn merge_into(base: &mut Value, overlay: &Value) -> Result<(), OverlayError>
 /// the base's, so folding `merge_into` over `[a, b]` and over `[b, a]` gives arrays that differ
 /// in element *order*. Objects do not have this problem — a key lands in the same place either
 /// way — which is why the fold looked order-independent for as long as no two overlays extended
-/// one array. ADR 0001 §2 states that additive-only merging "makes merging order-independent";
+/// one array. ADR 0001 states that additive-only merging "makes merging order-independent";
 /// this is what makes that true rather than nearly true.
 ///
 /// **The fix is the application order, not the array order.** Sorting each array's appended

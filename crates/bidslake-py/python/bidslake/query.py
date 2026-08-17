@@ -6,12 +6,11 @@ mask per run, one T1w per session, a FreeSurfer segmentation from a different da
 entirely. Each sibling matches on a **different subset** of the anchor's entities, and
 each has three possible outcomes rather than two: resolved, missing, or ambiguous.
 
-:func:`sibling` is that shape as one `LEFT JOIN LATERAL`. Everything else stays an
-ordinary SQLAlchemy statement the caller writes and can print.
+`sibling` is that shape as one `LEFT JOIN LATERAL`. Everything else stays an ordinary
+SQLAlchemy statement the caller writes and can print.
 
-:func:`sibling_path` and :func:`unresolved` read back the columns :func:`sibling` writes.
-They exist because it invented that column convention and shipped nothing to decode it, so
-every consumer wrote the same unpack by hand.
+`sibling_path` and `unresolved` read back the columns `sibling` writes, so that every
+consumer does not write the same unpack by hand.
 """
 
 from __future__ import annotations
@@ -32,11 +31,15 @@ if TYPE_CHECKING:
 
 
 class Sibling(NamedTuple):
-    """What :func:`sibling` returns: a lateral to join, and the columns to select."""
+    """What `sibling` returns: a lateral to join, and the columns to select.
 
-    #: `LEFT JOIN` this against the anchor, unconditionally — ``frm.outerjoin(lat, true())``.
+    Attributes:
+        lateral: `LEFT JOIN` this against the anchor, unconditionally —
+            `frm.outerjoin(lat, true())`.
+        columns: `<name>__dataset_id`, `__root_uri`, `__file_path`, `__n`.
+    """
+
     lateral: LateralFromClause
-    #: ``<name>__dataset_id``, ``__root_uri``, ``__file_path``, ``__n``.
     columns: list[ColumnElement[Any]]
 
 
@@ -48,29 +51,14 @@ def sibling(
     *,
     via: str | None = None,
 ) -> Sibling:
-    """One file that belongs with each row of ``anchor``, matched on ``join``.
+    """One file that belongs with each row of `anchor`, matched on `join`.
 
-    ``anchor`` is an alias of the registry — ``AllFiles.__table__.alias("a")`` — and the
-    sibling is drawn from *that same relation*, so a catalog whose overlay added columns
-    (fMRIPrep's ``from``/``to``, a FreeSurfer adapter's ``seg``) needs nothing extra:
-    alias the model :mod:`~bidslake.stubgen` generated and both sides see those columns.
+    The sibling is drawn from the *same relation* as the anchor, so a catalog whose overlay
+    added columns (fMRIPrep's `from`/`to`, a FreeSurfer adapter's `seg`) needs nothing extra:
+    alias the model `bidslake.stubgen` generated and both sides see those columns.
 
-    ``join`` names the entities the sibling must share with the anchor — the whole unit
-    key for a per-run mask, ``("sub", "ses")`` for the session's T1w. ``where`` filters
-    the sibling itself; a value of ``None`` means ``IS NULL``, which is how a
-    native-space image is separated from its ``space-*`` resamplings. It is a mapping
-    rather than ``**kwargs`` because ``from`` is a Python keyword and fMRIPrep uses it.
-
-    ``via`` scopes the sibling to a *linked* dataset by the name this catalog gives it
-    (``DatasetLinks``, or ``bidslake link alias``), resolved in the **anchor's own**
-    dataset. A hardcoded ``dataset_id`` cannot do this: ids are free text, and a study
-    processed one subject at a time has one dataset per subject. Matching entities
-    catalog-wide instead is unsound in a way the count below cannot catch (``docs/adr/0003``
-    §7).
-
-    Returns the sibling's ``dataset_id``/``root_uri``/``file_path`` (all three, because a
-    path only means something together with the root it was walked from) and ``__n``, the
-    match count::
+    One query serves the whole study, not one per role per unit; DuckDB decorrelates the
+    laterals:
 
         a = AllFiles.__table__.alias("a")
         cols, frm = [a.c.sub, a.c.ses, a.c.dataset_id, a.c.root_uri, a.c.file_path], a
@@ -80,10 +68,27 @@ def sibling(
             frm = frm.outerjoin(lat, true())
         units = lake.sql(select(*cols).select_from(frm).where(a.c.suffix == "bold"))
 
-    ``__n`` is the point, and it is a count rather than a raise: ``1`` resolved, ``0``
-    missing — that subject is incomplete, which is data — and ``2+`` ambiguous, meaning
-    ``join``/``where`` under-specify and the answer must not be silently taken. One query
-    for the whole study, not one per role per unit; DuckDB decorrelates the laterals.
+    Args:
+        anchor: An alias of the registry — `AllFiles.__table__.alias("a")`.
+        name: Prefixes the returned columns, and names the lateral.
+        join: Entities the sibling must share with the anchor — the whole unit key for a
+            per-run mask, `("sub", "ses")` for the session's T1w.
+        where: Filters on the sibling itself. A value of `None` means `IS NULL`, which is how
+            a native-space image is separated from its `space-*` resamplings. A mapping
+            rather than `**kwargs` because `from` is a Python keyword and fMRIPrep uses it.
+        via: Scopes the sibling to a *linked* dataset by the name this catalog gives it
+            (`DatasetLinks`, or `bidslake link alias`), resolved in the **anchor's own**
+            dataset. A hardcoded `dataset_id` cannot do this: ids are free text, and a study
+            processed one subject at a time has one dataset per subject. Matching entities
+            catalog-wide instead is unsound in a way `__n` cannot catch (ADR 0003).
+
+    Returns:
+        A `Sibling`: the lateral to join, and four columns to select. Three carry the
+        sibling's `dataset_id`, `root_uri` and `file_path` — all of them, because a path only
+        means something together with the root it was walked from. The fourth, `__n`, is the
+        match count, and it is the point: a count rather than a raise, so `1` is resolved,
+        `0` is missing (that subject is incomplete, which is data), and `2+` is ambiguous,
+        meaning `join`/`where` under-specify and the answer must not be silently taken.
     """
     where = dict(where or {})
     f = getattr(anchor, "element", anchor).alias(f"f_{name}")
@@ -136,35 +141,45 @@ def sibling(
 
 
 def sibling_path(lake: BidsLake, row: Mapping[str, Any], name: str | None = None) -> UPath:
-    """Where the sibling ``name`` of ``row`` is, or the anchor when ``name`` is None.
+    """Where the sibling `name` of `row` is, or the anchor when `name` is None.
 
-    The read side of :func:`sibling`'s columns. A row carries
-    ``<name>__dataset_id``/``__root_uri``/``__file_path`` per sibling because a path only
-    means something together with the root it was walked from, and
-    :meth:`BidsLake.resolve` is what applies ``base_dir``/``root_override`` to the pair.
-    ``name=None`` reads the unprefixed columns — the anchor, when the caller selected them.
+    The read side of `sibling`'s columns. A row carries
+    `<name>__dataset_id`/`__root_uri`/`__file_path` per sibling because a path only means
+    something together with the root it was walked from, and `BidsLake.resolve` is what
+    applies `base_dir`/`root_override` to the pair.
 
-    Returns a :class:`~upath.UPath`, like :meth:`BidsLake.resolve`; wrap it in
-    :func:`~bidslake.to_local_path` for a catalog you know is local.
+    Args:
+        lake: The catalog the row came from, which supplies `base_dir`/`root_override`.
+        row: A row carrying the columns `sibling` writes.
+        name: Which sibling to read. `None` reads the unprefixed columns — the anchor, when
+            the caller selected them.
+
+    Returns:
+        A `upath.UPath`, like `BidsLake.resolve`. Wrap it in `bidslake.to_local_path` for a
+        catalog you know is local.
     """
     p = f"{name}__" if name else ""
     return lake.resolve(row[f"{p}dataset_id"], row[f"{p}file_path"], row[f"{p}root_uri"])
 
 
 def unresolved(row: Mapping[str, Any], names: Iterable[str]) -> dict[str, int]:
-    """The siblings of ``row`` that are not exactly one file, as ``{name: count}``.
+    """The siblings of `row` that are not exactly one file, as `{name: count}`.
 
-    ``0`` is missing — that unit is incomplete — and ``2+`` is ambiguous, meaning the
-    ``join``/``where`` given to :func:`sibling` under-specify. Both are data rather than
-    errors, and both are wrong to take silently, which is what this exists to make hard.
-    An empty result means every named sibling resolved::
+    `0` is missing — that unit is incomplete — and `2+` is ambiguous, meaning the
+    `join`/`where` given to `sibling` under-specify. Both are data rather than errors, and
+    both are wrong to take silently, which is what this exists to make hard:
 
         if bad := unresolved(row, ROLES):
             log.warning(f"skipping {label}: {bad}")
             continue
 
-    The counts rather than a formatted reason, because callers phrase it differently and
-    the difference between *missing* and *ambiguous* is often the difference between a
-    subject to skip and a query to fix.
+    Args:
+        row: A row carrying the `__n` column `sibling` writes for each name.
+        names: The sibling names to check.
+
+    Returns:
+        Counts rather than a formatted reason, because callers phrase it differently and the
+        difference between *missing* and *ambiguous* is often the difference between a
+        subject to skip and a query to fix. An empty dict means every named sibling resolved.
     """
     return {n: c for n in names if (c := row[f"{n}__n"]) != 1}

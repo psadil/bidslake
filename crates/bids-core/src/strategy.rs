@@ -5,8 +5,9 @@
 //! - **No `prop_filter`.** Every strategy is total. Entity-key uniqueness is enforced by
 //!   deduplicating inside `prop_map`, not by rejecting a generated value, so the case budget
 //!   is never quietly spent on rejections.
-//! - **The strategy returns the expected answer.** [`bids_filename`] yields the name *and* the
-//!   [`BidsFileParts`] `read_entities` owes for it. It gets there by *rendering* a structure it
+//! - **The strategy returns the expected answer.** [`crate::strategy::bids_filename`] yields the
+//!   name *and* the [`crate::entities::BidsFileParts`] `read_entities` owes for it. It gets there
+//!   by *rendering* a structure it
 //!   already holds, never by re-deriving what the parser would do — a strategy that models the
 //!   parsing rules would be the implementation again, and would agree with a broken parser.
 //!
@@ -58,7 +59,7 @@ pub fn suffix() -> impl Strategy<Value = String> {
     "[0-9A-Za-z]{1,10}"
 }
 
-/// One of [`EXTENSIONS`].
+/// One of the extensions the splitter has to keep whole, including the empty one.
 pub fn extension() -> impl Strategy<Value = String> {
     prop::sample::select(EXTENSIONS).prop_map(str::to_owned)
 }

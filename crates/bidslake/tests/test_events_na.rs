@@ -1,3 +1,5 @@
+//! `n/a` handling when an events table is ingested.
+
 use bidslake::bids::BidsParser;
 use bidslake::db::BidsDb;
 use bidslake::fs::LocalFileSystem;

@@ -10,19 +10,11 @@ bidslake borrows the [DuckLake](https://ducklake.select/manifesto/) insight: **m
 
 1. **Query engine (read-only).** Point bidslake at an existing BIDS dataset and get a DuckDB database. Run SQL to select files, filter by metadata, and audit the dataset. Nothing on disk changes.
 
-2. **Fully-managed (bidslake owns the dataset).** Once ingested, bidslake is the source of truth. All metadata lives in SQL — there are no JSON sidecars or metadata TSVs on disk, just the data files. Editing metadata (renaming a participant, fixing a value) is a plain SQL `UPDATE`; it never touches the files. This mode is under active development.
+2. **Fully-managed (bidslake owns the dataset).** Once ingested, bidslake is the source of truth. All metadata lives in SQL — there are no JSON sidecars or metadata TSVs on disk, just the data files. Editing metadata (renaming a participant, fixing a value) is a plain SQL `UPDATE`; it never touches the files. This mode is under active development, and its subcommands are stubs; the design is in the book's [roadmap](../../docs/roadmap.md).
 
 The vision is for bidslake to *supplant* BIDS as the working format, not to round-trip back to it.
 
-### Managed mode (design)
-
-Managed mode is where bidslake is headed; the notes below are design, and the CLI subcommands for it are stubs that return "not yet implemented".
-
-- **Storage is decoupled from metadata.** A nifti's on-disk path is an opaque storage location bidslake assigns — it does *not* encode `sub-01`, `task-x`, or `run-02`. So metadata edits are pure SQL `UPDATE`s that never move files, and cross-dataset queries/aggregation come for free (many datasets in one database, keyed by `dataset_id`). This is the DuckLake analogy applied to BIDS: opaque data files + a SQL catalog that gives them meaning.
-- **Ingestion is one-way.** Standard BIDS → managed store. Exporting back to a standard BIDS layout is an explicit non-goal — the aim is to supplant BIDS, not round-trip.
-- **Management is per root, not per database** ([ADR 0009](../../docs/adr/0009-root-tenure.md)). Each row of `dataset_roots` carries a `tenure`: `attached` (the default — somebody else writes there, bidslake only reads) or `managed` (`index --managed`; bidslake owns the storage). One catalog therefore holds an attached OpenNeuro dataset beside a managed derivative, and destructive verbs refuse to run against an attached root. An attached root's rows say what was true when it was walked, so `verify` is how that claim gets rechecked — where a root lives, and whether it will still be there tomorrow, is the indexer's business and not something bidslake tries to infer.
-- **The CLI acts on the store, not the metadata** (metadata is edited with SQL): `index` brings data under management (today's command), `verify` audits an attached root's promise and a managed root's integrity, and `transcode` *(stub)* changes the on-disk storage format (e.g. `.nii.gz` → `.nii.zst`).
-- **Beyond BIDS.** The opaque-files + SQL-catalog model isn't BIDS-specific, and the read-only half already works: an **adapter** supplies a vocabulary overlay, a [BEP043](https://bids.neuroimaging.io/extensions/beps/bep_043.html) term map projecting paths onto BIDS concepts, and an ingestion policy — so a recon-all or FEAT tree is queryable by `sub`/`seg`/`suffix` beside the BIDS data it came from ([ADR 0002](../../docs/adr/0002-layout-adapters.md)). bidslake *consumes* BEP043 rather than replacing it. What is still ahead is bringing such trees under *management*, where bidslake owns their storage rather than only reading it.
+Which of the two applies is a property of each ingest root, not of the database: a root is `attached` by default (somebody else writes there, bidslake only reads) or `managed` (`index --managed`), and destructive verbs refuse to run against an attached root ([ADR 0007](../../docs/adr/0007-root-tenure.md)).
 
 ## Install
 
@@ -92,13 +84,13 @@ joins back to it ([ADR 0006](../../docs/adr/0006-file-registry.md)).
 
 BIDS keeps a surprising amount of information in `.tsv` tables — event timings, channel and electrode descriptions, physiological and motion recordings, blood curves, participant and session variables, diffusion b-values. bidslake treats **all of it as a first-class, tracked invariant**:
 
-> Every tabular file a dataset contains is accounted for. Header-bearing tables are ingested into the database; large compressed recordings (`*.tsv.gz`) are, for now, left on disk (a size policy — see the roadmap) but still recorded. Files excluded by `.bidsignore` are never read; a tabular file the BIDS schema does not describe is skipped with a warning and recorded — never silently dropped.
+> Every tabular file a dataset contains is accounted for. Header-bearing tables are ingested into the database; large compressed recordings (`*.tsv.gz`) are, for now, left on disk (a size policy — see the [roadmap](../../docs/roadmap.md)) but still recorded. Files excluded by `.bidsignore` are never read; a tabular file the BIDS schema does not describe is skipped with a warning and recorded — never silently dropped.
 
 Accounted for is not the same as *stored verbatim*. What a table stores is what the schema declares it stores; a table may be configured to leave undeclared columns in the file rather than in the database, in which case the file — still on disk, still in the file registry — is the record of them.
 
 The tables and their columns are **derived from the BIDS schema** (`rules.tabular_data`, `objects.columns`, and — for the headerless recordings — `rules.sidecars` and `meta.associations`), not hardcoded. Each modality gets its own table (`eeg_channels`, `meg_channels`, `blood`, `physio`, …); uncompressed continuous recordings (chiefly `motion`) are stored one row per sample, with their column names taken from the sidecar `Columns` field or the associated `_channels.tsv`. The file registry records every file with a `status` (`ingested` / `on_disk` / `skipped` / `failed`, or NULL for a file there was nothing to read), and a test asserts nothing is silently dropped (`tests/tabular_coverage.rs` — `#[ignore]`d because it ingests the whole corpus, so run it with `cargo test -- --ignored`).
 
-*What bidslake does* with each file — read its contents, catalog it unread, or ignore it — is a separate, equally declarative layer: the **ingestion schema** ([ADR 0002](../../docs/adr/0002-layout-adapters.md)), a bidslake-specific document whose rules select over projected BIDS concepts and are validated against their own metaschema. That is what routes `.bval`/`.bvec` to the diffusion reader and leaves `*.tsv.gz` on disk, and it is where per-table policy lives (row ordering, materialized concepts, and whether a table stores columns the schema does not declare — see the roadmap).
+*What bidslake does* with each file — read its contents, catalog it unread, or ignore it — is a separate, equally declarative layer: the **ingestion schema** ([ADR 0002](../../docs/adr/0002-adapters-and-layouts.md)), a bidslake-specific document whose rules select over projected BIDS concepts and are validated against their own metaschema. That is what routes `.bval`/`.bvec` to the diffusion reader and leaves `*.tsv.gz` on disk, and it is where per-table policy lives (row ordering, materialized concepts, and whether a table stores columns the schema does not declare — [ADR 0004](../../docs/adr/0004-undeclared-column-policy.md)).
 
 ## Adapters: indexing what BIDS does not describe
 
@@ -135,21 +127,19 @@ The saving is the whole reason the dial exists: measured 2026-08 on a 1,800-scan
 `undeclared: catalog` dial, which would have discarded every other custom field along with
 these two.
 
-Datasets accumulate in one catalog, and a dataset may itself span several ingest roots —
-subject-sharded pipeline output is one logical dataset with one root per subject, and naming
-the same `--dataset-id` for each adds a root rather than being refused
+Datasets accumulate in one catalog, and a dataset may itself span several ingest roots: naming
+the same `--dataset-id` on a later run adds a root rather than being refused
 ([ADR 0005](../../docs/adr/0005-multi-root-datasets.md)).
 
-One constraint survives: a term map's `projected` column is physical, so a catalog created
-without one cannot gain it, and **the adapter set describes the catalog, not the dataset being
-added**. Name every adapter the catalog uses on every run and order stops mattering. The
-concept columns no longer have this problem — they live on a view, which a wider run simply
-redefines.
+**Name every adapter the catalog uses on every index run, not only the one for the dataset being
+added** — a term map's `projected` column is physical, so a catalog first built without it cannot
+gain it later ([ADR 0002](../../docs/adr/0002-adapters-and-layouts.md)). Do that and run order
+stops mattering.
 
 Adding another adapter is authoring those documents, not writing an ingester — see
-[ADR 0002](../../docs/adr/0002-layout-adapters.md). The write direction — naming a file a
+[ADR 0002](../../docs/adr/0002-adapters-and-layouts.md). The write direction — naming a file a
 pipeline has not produced yet — is a fourth, separate artifact, the **layout**
-([ADR 0008](../../docs/adr/0008-layouts.md)).
+([ADR 0002](../../docs/adr/0002-adapters-and-layouts.md)).
 
 ## Documentation
 
@@ -176,23 +166,6 @@ cargo test -- --ignored
 
 ## Roadmap
 
-**Where large tabular data lives.** High-rate continuous recordings do not belong in the catalog as-is: stored one row per sample, a single `*_physio` recording can run to millions of rows, dwarfing the metadata it accompanies.
-
-The **mechanism** for this is settled. [ADR 0002](../../docs/adr/0002-layout-adapters.md) replaced bidslake's hardcoded read-vs-catalog logic with the ingestion schema: selector-driven `read` / `catalog` / `ignore` dispositions, metaschema-validated, with per-table policy alongside. Nothing about deciding what to ingest requires new machinery — it requires writing rules.
-
-What remains crude is the **criterion**. Two levers exist, at different granularities:
-
-- *Whole file* — one rule, `extension == ".tsv.gz"` → `catalog`, is all that stands between a catalog and two million rows of physio. It is a proxy, not a principle: it happens to catch the physio/stim recordings because BIDS always compresses them. The files stay recorded in the registry (`kind = 'tabular'`, `status = 'on_disk'`), tracked and findable, just unread. Candidate replacements — row count, byte size, sampling rate from the sidecar, the BIDS suffix — all have failure modes, and the choice interacts with the (stubbed) `transcode` and `verify` commands.
-- *Per column* — `undeclared: "catalog"` in a table's policy, which stores the columns a table declares and leaves the rest in the file. This is what keeps fMRIPrep confounds tractable: the file has ~1,800 columns, the schema declares ~13, and storing the remainder as per-row JSON cost 24 MB of database per confounds file. See [ADR 0004](../../docs/adr/0004-undeclared-column-policy.md).
-
-In managed mode the likely answer for the whole-file case is the DuckLake split applied one level down: small tabular data stays in the catalog, while large continuous recordings are written to partitioned Parquet (or [Vortex](https://vortex.dev/)) files on disk and exposed as views, so SQL still sees one table.
-
-**Reclaiming space after a re-index.** Re-indexing a dataset deletes its rows and re-inserts them; DuckDB reuses the vacated blocks for later writes but never returns them to the OS, and `CHECKPOINT` does not shrink the file. A catalog that has been re-indexed a few times can be substantially holes — the one that motivated ADR 0004 was 28% free blocks, 478 MB of a 1.74 GB file. `bidslake compact` rewrites it:
-
-```bash
-bidslake compact -d study.duckdb
-```
-
-It preserves every table, row, key, constraint, and view, verifies per-table row counts before replacing the original, and reports what it reclaimed. An index run that leaves a substantial fraction free says so rather than waiting to be discovered. It is deliberately not automatic: a rewrite transiently needs twice the disk, and a first index has nothing to reclaim.
-
-**S3.** Ingesting a dataset straight from S3 works end-to-end: object listing and JSON metadata via the AWS SDK, `.tsv` contents streamed into DuckDB via the `httpfs` extension (`read_csv` opens `s3://` directly), and Rust-side reads (JSON sidecars, `.bval`/`.bvec`) issued concurrently to overlap network latency. Remaining gaps are minor: dataset-embedded overlay auto-discovery (`.bidslake/overlay.json`) is skipped for remote inputs, and the S3 integration tests are network-gated (`#[ignore]`, run with `cargo test --test s3_ingest -- --ignored`).
+What is not settled — where large tabular data should live, managed mode, reclaiming space with
+`bidslake compact` after a re-index, and the remaining S3 gaps — is in the book:
+[docs/roadmap.md](../../docs/roadmap.md).

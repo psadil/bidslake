@@ -26,3 +26,6 @@ proptest = { workspace = true }
 # Under `resolver = "3"` a feature reached only through a dev-dependency is not unified into a
 # plain `cargo build`, so the shipped library is unchanged.
 proptest = ["dep:proptest"]
+
+[lints]
+workspace = true

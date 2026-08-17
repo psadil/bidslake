@@ -1,139 +1,157 @@
 # ADR 0005 — A dataset may span several ingest roots
 
-Status: accepted (2026-08-12)
-
-Relates to: `dataset_roots` and the `dataset_description` contract (`schema.rs`),
-`BidsParser::resolve_root` (`bids.rs`), and root resolution in `bidslake-py` (`paths.py`,
-`layout.py`). Supersedes ADR 0002 §3's "a dataset also has exactly one root" and §10's
-placement of `root_uri` on `dataset_description`.
-
-## Context
-
-`dataset_id` was doing two jobs at once: naming the logical dataset, and naming the ingest
-root. The second job was structural — `root_uri` lived on the `dataset_description` row, one per
-dataset, and `root_uri` + a dataset-relative `file_path` is the only route from a stored row
-back to an openable file. So a second root under one `dataset_id` was not additive, and
-`check_dataset_root` refused it.
-
-The refusal was not the bug. **Subject-sharded pipeline output is one logical dataset with one
-root per subject** — the normal way fMRIPrep and FreeSurfer are run at scale — so the model
-forced it apart into one `dataset_id` per shard. Everything dataset-scoped then repeated per
-shard: `dataset_description`, `dataset_links`, `dataset_identity`, and `participants` (the same
-person once per shard, so `participants` stopped being a list of participants). `shares_source`
-fired *between shards of the same pipeline*, producing N×(N−1) edges of a dataset with itself
-and burying the real fMRIPrep↔MRIQC relation ADR 0003 exists to surface. None of it was
-recoverable downstream: nothing recorded that two shards were one dataset — that lived only in
-the id strings the user chose.
-
-Two further problems surfaced while fixing it, neither in the original write-up:
-
-- **The guard was aimed backwards.** `check_dataset_root` early-returned when `dataset_id` was
-  `None`, and ran *before* the id was inferred from `Name`. So it fired only when the id was
-  **asserted** — the unambiguous case — and never when it was **inferred**. Since every fMRIPrep
-  output declares the identical `Name: "fMRIPrep - fMRI PREProcessing workflow"`, indexing shards
-  with no `--dataset-id` inferred one id for all of them and produced exactly the silent
-  misresolution the guard was written to prevent.
-- **`Name` is not an identity.** It is the *tool's* name for every derivative a pipeline writes.
-  Even in the small vendored corpus, four pairs of unrelated datasets share a `Name`
-  (`micr_SEM`, the HED face-processing pair, the Brainstorm epileptogenicity pair, the qMRI VFA
-  pair).
-
-## Decisions
-
-### 1. `dataset_roots` is the registry; `dataset_description.root_uri` is gone
-
-```sql
-CREATE TABLE dataset_roots (dataset_id TEXT, root_uri TEXT, PRIMARY KEY (dataset_id, root_uri));
+```
+ADR: 0005
+Title: A dataset may span several ingest roots
+Status: Provisional
+Type: Design
+Created: 12-Aug-2026
 ```
 
-One row for an ordinary dataset, N for a sharded one. Removing `root_uri` from
-`dataset_description` is the point rather than tidying: leaving it would keep a second, always
-partial answer to "where does this dataset live", which is the column the problem was made of.
+## Abstract
 
-The registry is explicit rather than `SELECT DISTINCT root_uri FROM …` because it is
-authoritative for a root that contributed no rows at all — an ingest that found only tabular
-files, or none.
+A dataset's ingest roots live in their own table, `dataset_roots`, keyed `(dataset_id, root_uri)`,
+and `dataset_description` carries no root. A second root under an existing `dataset_id` is
+additive; where that id was *inferred*, four `dataset_description.json` fields decide whose it is.
 
-### 2. The root's URI is its own identifier
+## Motivation
 
-No short per-root label. A label needs a derivation rule, an escape hatch for when that rule
-collides (two roots whose directories share a basename, `scratch/sub-01/fmriprep` and
-`scratch/sub-02/fmriprep`), and a guarantee it never moves, since it would be a stored key that
-`file_path` resolves through. A URI needs none of that, and DuckDB dictionary-encodes the
-column so repeating it costs a code rather than a path.
+`dataset_id` cannot both name the logical dataset and the tree its files resolve through. A stored
+row reaches an openable file only through `root_uri` plus a root-relative `file_path`, so a root on
+the one-per-dataset `dataset_description` row admits one tree; a second has nowhere to go.
 
-*Rejected:* a `root_id` derived from the root's final path component plus a `--root-id`
-override. It was carried through two drafts before anyone asked what it bought; the answer was
-"an escape hatch for a default we chose", which is not a reason.
+**Subject-sharded pipeline output is one logical dataset with one root per subject** — the normal
+way fMRIPrep and FreeSurfer are run at scale. One `dataset_id` per shard repeats everything
+dataset-scoped: `dataset_description`, `dataset_links`, `dataset_identity`, and `participants`,
+which stops being a list of participants once the same person is listed once per shard.
+`shares_source` fires *between shards of one run*, producing N×(N−1) edges of a dataset with
+itself, burying the fMRIPrep↔MRIQC relation [ADR 0003](0003-associations.md) exists to surface.
 
-### 3. A second root just works — and the identity rule decides when the id was inferred
+A rule admitting second roots cannot key on `Name`. `Name` is the *tool's* name for every derivative
+a pipeline writes — every fMRIPrep output declares `"fMRIPrep - fMRI PREProcessing workflow"` — and
+hand-written datasets collide too: of the 108 top-level `dataset_description.json` files in
+`third_party/bids-examples`, four pairs of distinct datasets share a `Name`. `Name` is also what an
+id is *inferred* from, so the inferred case is the whole of the ambiguity.
 
-`check_dataset_root` is deleted. `resolve_root` runs **after** the `dataset_id` is resolved,
-which is what closes the backwards-guard hole above, and applies:
+A `dataset_description.json` is re-read every run, so first-writer-wins keeps a stale row: a
+description added or corrected since the first index never reaches the catalog.
 
-- **`--dataset-id` asserted** → the user stated the identity. Register the root. If the incoming
-  `dataset_description.json` differs from the stored row, **warn** — under an asserted id a
-  differing `Name` is the strongest available signal that the flag was mistyped.
-- **id inferred**, and already in the catalog under a different root → compare the incoming
-  description to the stored row on **`Name`, `BIDSVersion`, `GeneratedBy`, `SourceDatasets`**.
-  All four equal → merge silently. Otherwise **refuse**, naming both resolutions.
+## Rationale
 
-Shards of one pipeline run carry byte-identical descriptions, so the sharded workflow needs no
-flags at all. Two studies' fMRIPrep output differ in `SourceDatasets` — which is exactly what
-`Name` cannot distinguish — and are caught.
+### On a URI as the root's key
 
-Comparison is on parsed `serde_json::Value`s, not text, so two descriptions that differ only in
-key order still merge. The stored side is compact JSON in a `VARCHAR` column, so a textual
-comparison would refuse valid merges.
+DuckDB dictionary-encodes the column, so repeating one per row costs a code, not a path. Holding
+every shard under one `dataset_id` is what pays: `dataset_relations`'s `from <> to` drops the
+self-pairs, and `participants` dedupes on its `(dataset_id, participant_id)` primary key.
 
-**The limitation, stated plainly.** Inference keys on the *root directory's name* when there is
-no `dataset_description.json`. Per-subject `SUBJECTS_DIR`s that share a name
-(`work/sub-01/freesurfer`, `work/sub-02/freesurfer`) merge with no flags, because neither has a
-description and there is nothing to disagree about. Roots named after their subject
-(`fs/sub-01`, `fs/sub-02`) infer different ids and stay separate — correctly, since nothing
-distinguishes them from two unrelated trees. `--dataset-id` is what joins those.
+### On the four identity fields
 
-### 4. Every root is an identity the dataset *is*
+`SourceDatasets` carries the weight — it is where two studies' fMRIPrep output differ; `GeneratedBy`
+refuses too, since shards processed months apart under different pipeline versions are not
+self-evidently one dataset. `Authors` or `HowToAcknowledge` drifting is untidy, not evidence, so the
+set stops there. Shards of one run carry byte-identical descriptions, so no flags are needed.
 
-`record_links` re-records a `root_uri` identity for **every** row in `dataset_roots`, not just
-the root this run walked. `clear_derived_links` drops all of a dataset's `dataset_identity` rows
-before re-recording, so recording only `self.fs.root()` would make re-indexing shard B silently
-forget shard A's root.
+### On the limit of inference
 
-### 5. A `dataset_description.json` now refreshes on re-index (closes `eh-04`)
+The basename fallback is a real constraint, not an oversight. `SUBJECTS_DIR`s sharing a name
+(`work/sub-01/freesurfer`, `work/sub-02/freesurfer`) merge with no flags, with no descriptions to
+disagree; roots named for their subject (`fs/sub-01`, `fs/sub-02`) infer different ids and stay
+separate, correctly: nothing distinguishes them from unrelated trees. `--dataset-id` joins those.
 
-A dataset's description is re-read every run, so first-writer-wins meant a re-index kept a stale
-row — a description added or corrected since the first index never reached the catalog. A real
-description now upserts (`Schema::insert_or_replace`, a `guard: bool` on the existing
-`build_insert_sql`); the synthesized row for a dataset that has none keeps its `WHERE NOT
-EXISTS` guard so it can never shadow a real one.
+### On re-recording every root
 
-This forced one adjustment: `process_dataset_description` runs for *nested* descriptions under
-`derivatives/` too, which were harmless no-ops under a guarded insert. With `OR REPLACE`, a
-derivative's description would overwrite its parent's, so only the shallowest is written at all.
+`clear_derived_links` drops a dataset's `dataset_identity` rows before `record_links` writes, so
+recording only this run's root would leave a re-indexed shard blind to the roots it did not walk.
 
-### 6. The synthesized `dataset_description` row survives, for a different reason
+### On replacing the description row
 
-It no longer carries the root — that is `dataset_roots`' job — so it holds only `dataset_id`.
-It stays because `lake.datasets()` reads this table and the wide `files` view LEFT JOINs it, so
-without a row an adapter-ingested dataset would be absent from both.
+Because the write replaces rather than defers, only the shallowest description is written: a nested
+one under `derivatives/` would otherwise overwrite the parent's row. The synthesized row exists
+because `lake.datasets()` enumerates this table and the `files` view sources `dataset__*` from it.
 
-## Consequences
+## Specification
 
-- **The sharded workflow needs no flags.** Indexing N per-subject roots with no `--dataset-id`
-  yields one dataset, N roots, and one participants list.
-- **`shares_source` no longer fires between shards.** The `dataset_relations` view's
-  `from <> to` drops the self-pairs once shards share an id, leaving only the real
-  cross-pipeline relation.
-- **`participants` is a list of participants again**, deduping on its primary key.
-- **ADR 0003 §2's invariant survives verbatim** — every table is still keyed by a single
-  `dataset_id`. Roots are additional, never a replacement.
-- **A mistyped `--dataset-id` now merges two datasets** instead of being refused. The warning on
-  a differing description is the mitigation; it is a warning rather than an error because the
-  user asserting an id is a claim bidslake has no standing to overrule.
-- **`(dataset_id, file_path)` is no longer unique** across a dataset's roots. Nothing in this
-  ADR fixes that — every file-keyed table still assumes it. That is the subject of ADR 0006.
-- **A root is registered but not characterized.** `dataset_roots` says a root exists and that
-  paths resolve through it, and says nothing about whether it will still be there tomorrow — so
-  a row here supports no conclusion about what has been produced. ADR 0009 adds the `tenure`
-  column that does.
+### 1. `dataset_roots` is a dataset's registry of ingest roots
+
+```sql
+CREATE TABLE IF NOT EXISTS dataset_roots (dataset_id TEXT, root_uri TEXT,
+    tenure TEXT NOT NULL DEFAULT 'attached' CHECK (tenure IN ('attached','managed')),  -- ADR 0007
+    PRIMARY KEY (dataset_id, root_uri));
+```
+
+`tenure` is [ADR 0007](0007-root-tenure.md)'s, and `dataset_description` has no `root_uri` column.
+
+### 2. A root is identified by its URI
+
+There is no short per-root label and no flag to assign one.
+
+### 3. A file is the triple `(dataset_id, root_uri, file_path)`
+
+`file_path` is relative to the root it was walked from, so `root_uri` + `file_path` reopens it; two
+roots may hold the same path, and `file_id` hashes the triple ([ADR 0006](0006-file-registry.md)).
+
+### 4. Everything dataset-scoped is keyed by a single `dataset_id`
+
+Roots are additional, never a replacement.
+
+### 5. Registering a root runs after the `dataset_id` is resolved, and is additive
+
+`BidsParser::resolve_root` binds this run's root to the resolved id:
+
+- **Already registered** → identity is not in question; re-register, which raises tenure to
+  `managed` if this run asserts it and never lowers it.
+- **`--dataset-id` asserted**, dataset present under a different root → register; if the incoming
+  `dataset_description.json` differs from the stored row, **warn**, naming the fields that disagree.
+- **Id inferred**, dataset present under a different root → compare incoming against stored on
+  **`Name`, `BIDSVersion`, `GeneratedBy`, `SourceDatasets`**. All four equal → merge silently.
+  Otherwise **refuse**, listing the existing roots and both ways out: `--dataset-id <this-id>` to
+  join it, `--dataset-id <other>` to keep it separate.
+
+No `dataset_description.json` → the id is the root basename, or an `s3://` prefix's last component.
+
+### 6. Every root of a dataset is an identity the dataset *is*
+
+`record_links` re-records a `root_uri` identity for **every** row in `dataset_roots`, not only the
+root this run walked — which is what a relative `DatasetLinks` value resolves against. `link init`'s
+backfill, having no run, resolves against the lexicographically first `root_uri`: a relative link
+describes the tree it was written in, and every root of one dataset holds that tree.
+
+### 7. A description refreshes on re-index; a synthesized row never shadows it
+
+A real `dataset_description.json` uses `Schema::insert_or_replace` (`INSERT OR REPLACE`); only the
+**shallowest** in a tree is written. A dataset with none gets a row of only `dataset_id`, carrying
+the `WHERE NOT EXISTS` guard so it never displaces a real one.
+
+## Backwards Compatibility
+
+A catalog built before `dataset_roots` existed has no such table, and a `root_uri` column on
+`dataset_description` nothing reads. `create_tables` adds the table on the next `index` without
+backfilling it, and the Python read path queries it directly, so such a catalog must be re-indexed.
+For a single-root dataset, root-relative and dataset-relative `file_path`s coincide.
+
+## Rejected Ideas
+
+**A `root_id` derived from the root's final path component, with a `--root-id` override.** It buys
+an escape hatch for a default that would not otherwise need one — two roots whose directories share
+a basename, `scratch/sub-01/fmriprep` and `scratch/sub-02/fmriprep` — and adds a stored key that
+`file_path` resolves through and that must therefore never change. A URI needs neither.
+
+**Comparing the two descriptions as text.** The stored side is compact JSON in a `VARCHAR` column,
+so a `SourceDatasets` written with its keys in a different order would count as a mismatch and
+refuse a valid merge; `description_mismatches` parses both sides back to `serde_json::Value` first.
+
+**Deriving the root set with `SELECT DISTINCT root_uri FROM file_registry`.** Silent about a root
+that contributed no rows — an ingest that found nothing, or whose every file an `ignore` rule
+claimed — which is the root whose status a caller cannot otherwise establish.
+
+**Keeping `root_uri` on `dataset_description` too.** One column holds one root, so it is a second,
+always-partial answer to "where does this dataset live" — the ambiguity the registry removes.
+
+**Refusing a second root under an asserted `--dataset-id` whose description disagrees.** A user
+naming the dataset makes a claim the catalog has no standing to overrule, so a mistyped flag merges
+two datasets, and the disagreement is warned about rather than enforced.
+
+## Open Issues
+
+- No verb removes a root from a dataset or splits a merged one. A root registered under the wrong
+  `dataset_id` is separated only by rebuilding the catalog.

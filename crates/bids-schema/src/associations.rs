@@ -7,7 +7,7 @@
 //! builds whatever it needs on top of the returned hits.
 //!
 //! The schema is a **parameter** (`meta_associations`), so bidslake and the validator can pass
-//! different schema.json — though the workspace now unifies on one ([`crate::SCHEMA_JSON`]).
+//! different schema.json, though both take [`crate::SCHEMA_JSON`].
 
 use crate::expression::{EvalContext, do_selectors_select};
 use bids_core::filetree::{BidsFile, FileTree};

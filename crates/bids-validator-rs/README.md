@@ -35,32 +35,15 @@ issue codes. This crate bundles `@bids/schema` **1.2.1** (BIDS 1.11.1) via the s
 reason alone, so a parity run has to state both versions to mean anything.
 
 Issues have been diffed across all 107 `bids-examples` datasets, and every difference has a known
-cause — there are no unexplained discrepancies. The measured match rate, the versions it was
-measured at, and the per-dataset breakdown live in
-**[docs/warning-parity.md](docs/warning-parity.md)**, which is the one place that tracks them.
-The four causes:
+cause — there are no unexplained discrepancies. They reduce to four: two where the reference
+validator is the one that departs from the schema, one where we over-report, and one genuine gap.
 
-1. **Rules gated on `dataset.datatypes` / `dataset.modalities`.** The reference validator declares
-   both fields but never populates them, so the seven schema rules selecting on them are inert
-   there. We populate them and enforce the rules. Reported upstream:
-   [bids-validator#433](https://github.com/bids-standard/bids-validator/issues/433).
-2. **The `deprecated` requirement level.** The vendored `3.0.0-alpha.4` warns about the *absence* of
-   a deprecated field (`AcquisitionDuration`, `ScanDate`); we follow the schema and stay silent. This
-   is a regression on the 3.0 pre-release line — stable `2.4.1` agrees with us, and it is already
-   being fixed by [bids-validator#436](https://github.com/bids-standard/bids-validator/pull/436).
-3. **`MISSING_SESSION`.** A message-only schema rule the reference validator never fires. We
-   hand-implement the legacy heuristic, and over-report on heterogeneous session layouts.
-4. **TSV value-signature checks** (`TSV_COLUMN_TYPE_REDEFINED`, `TSV_PSEUDO_AGE_DEPRECATED`) are
-   not implemented here.
-
-Cause 1 is deliberate — we follow the schema and the reference validator does not. Cause 2 is a
-pre-release regression being fixed upstream. Cause 3 is the reverse (we over-report). Cause 4 is a
-genuine gap.
+**[docs/warning-parity.md](docs/warning-parity.md)** is the one place that tracks them: the
+measured match rate and the versions it was measured at, the per-dataset breakdown, the mechanism
+behind each cause with the source lines in both validators, and the upstream issue status.
 
 The diff is not part of `cargo test`, since it would make `deno` a test dependency;
-`tests/warning_parity.rs` asserts the JSON shape in pure Rust instead. The mechanism behind each
-difference, the exact source lines in both validators, and the upstream status are in
-**[docs/warning-parity.md](docs/warning-parity.md)**.
+`tests/warning_parity.rs` asserts the JSON shape in pure Rust instead.
 
 ### Schema expression conformance
 

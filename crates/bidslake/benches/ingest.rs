@@ -1,3 +1,5 @@
+#![allow(missing_docs)] // `criterion_main!` generates an undocumented `main`.
+
 //! Ingestion throughput benchmark.
 //!
 //! The `ingest` group ingests a fixed subset of the `bids-examples` corpus into

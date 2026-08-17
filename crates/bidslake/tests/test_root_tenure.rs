@@ -1,5 +1,5 @@
 //! Root tenure: what was promised about a root, and so what the catalog may conclude
-//! (docs/adr/0009).
+//! (docs/adr/0007).
 //!
 //! The load-bearing property, and the one easy to regress: `--managed` is an assertion that a
 //! later plain re-index must not silently withdraw, since demoting a root quietly revokes the

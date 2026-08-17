@@ -1,3 +1,5 @@
+//! `n/a` handling when `participants.tsv` is ingested.
+
 use bidslake::bids::BidsParser;
 use bidslake::db::BidsDb;
 use bidslake::fs::LocalFileSystem;

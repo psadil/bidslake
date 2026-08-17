@@ -10,13 +10,17 @@ class Relation(enum.StrEnum):
 
     Deliberately not "sibling" — in DataLad a *sibling* is a remote/clone of the *same*
     dataset, whereas these relate *different* datasets by shared provenance.
+
+    Attributes:
+        SHARES_SOURCE: Two datasets are co-derivatives of one source (they declare the same
+            `SourceDatasets`). The common case, and sound even when the shared source
+            dataset is not itself in the catalog.
+        DERIVED_FROM: This dataset was derived from another dataset that is present in the
+            catalog.
+        SOURCE_OF: The inverse of `DERIVED_FROM`: another present dataset was derived from
+            this one.
     """
 
-    #: Two datasets are co-derivatives of one source (they declare the same
-    #: ``SourceDatasets``). The common case, and sound even when the shared source
-    #: dataset is not itself in the catalog.
     SHARES_SOURCE = "shares_source"
-    #: This dataset was derived from another dataset that is present in the catalog.
     DERIVED_FROM = "derived_from"
-    #: The inverse of ``DERIVED_FROM``: another present dataset was derived from this one.
     SOURCE_OF = "source_of"

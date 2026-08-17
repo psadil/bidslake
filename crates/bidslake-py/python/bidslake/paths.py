@@ -1,10 +1,10 @@
 """Resolving dataset-relative file paths to openable handles.
 
-``root_uri`` (one row per ingest root in ``dataset_roots`` — a dataset may have
-several; see ``docs/adr/0005``) is ``file:///abs/path`` for a locally-ingested
-dataset or ``s3://bucket/prefix`` for an S3 one. The join itself is done in Rust
-(``_bidslake.resolve_uri``) so it matches exactly how the ingester formats those
-URIs; this module wraps the result in a :class:`upath.UPath` so callers get one
+`root_uri` (one row per ingest root in `dataset_roots` — a dataset may have
+several; see `docs/adr/0005`) is `file:///abs/path` for a locally-ingested
+dataset or `s3://bucket/prefix` for an S3 one. The join itself is done in Rust
+(`_bidslake.resolve_uri`) so it matches exactly how the ingester formats those
+URIs; this module wraps the result in a `upath.UPath` so callers get one
 handle that works for local and remote alike.
 """
 
@@ -23,19 +23,19 @@ class RemotePathError(RuntimeError):
 def to_uri(location: str | os.PathLike[str]) -> str:
     """Normalize a filesystem path or URI to a URI (no trailing slash).
 
-    A value with a scheme (``file://``, ``s3://``) is returned as-is; a bare
-    filesystem path becomes an absolute ``file://`` URI. Used to rebase
-    ``root_uri`` when a dataset has moved (``open(..., base_dir=/root_override=)``).
+    Used to rebase `root_uri` when a dataset has moved (`open(..., base_dir=/root_override=)`).
+    Also the write direction of `to_local_path`, and the thing to reach for when a query must
+    be scoped to one tree — `WHERE root_uri = to_uri(dst)`. Scoping matters: a catalog holds
+    many roots, and a completion query that names only a `dataset_id` answers about whichever
+    of them happens to be indexed rather than about the directory the caller has in mind
+    (`docs/adr/0007`).
 
-    Also the write direction of :func:`to_local_path`, and the thing to reach for when a
-    query must be scoped to one tree — ``WHERE root_uri = to_uri(dst)``. Scoping matters:
-    a catalog holds many roots, and a completion query that names only a ``dataset_id``
-    answers about whichever of them happens to be indexed rather than about the directory
-    the caller has in mind (``docs/adr/0009``).
-
-    Symlinks are resolved, matching how the ingester canonicalizes a root before recording
-    it — on macOS ``/tmp`` is ``/private/tmp``, so the two spellings are not
-    interchangeable and the unresolved one matches no row at all.
+    Args:
+        location: A value with a scheme (`file://`, `s3://`) is returned as-is; a bare
+            filesystem path becomes an absolute `file://` URI, with symlinks resolved to
+            match how the ingester canonicalizes a root before recording it. On macOS `/tmp`
+            is `/private/tmp`, so the two spellings are not interchangeable and the
+            unresolved one matches no row at all.
     """
     text = os.fspath(location)
     if "://" in text:
@@ -44,19 +44,21 @@ def to_uri(location: str | os.PathLike[str]) -> str:
 
 
 def to_upath(uri: str) -> UPath:
-    """A single openable/globbable handle for ``uri`` (local or ``s3://``)."""
+    """A single openable/globbable handle for `uri` (local or `s3://`)."""
     return UPath(uri)
 
 
 def to_local_path(uri: str | UPath) -> Path:
-    """The on-disk :class:`~pathlib.Path` for a ``file://`` URI.
+    """The on-disk `pathlib.Path` for a `file://` URI.
 
-    Raises :class:`RemotePathError` for any non-local scheme.
+    Args:
+        uri: Accepts a `upath.UPath` as well as a string, because that is what
+            `BidsLake.resolve` and `sibling_path` hand back and `str()` of one is the URI —
+            so requiring the string turned every call site into
+            `to_local_path(str(lake.resolve(...)))`.
 
-    A :class:`~upath.UPath` is accepted as well as a string, because that is what
-    :meth:`BidsLake.resolve` and :func:`sibling_path` hand back and ``str()`` of one is
-    the URI — so requiring the string turned every call site into
-    ``to_local_path(str(lake.resolve(...)))``.
+    Raises:
+        RemotePathError: For any non-local scheme.
     """
     text = str(uri)
     if not text.startswith("file://"):

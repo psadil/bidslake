@@ -55,8 +55,31 @@ impl IdentityKind {
 /// views match on `value`, never `base`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
+    /// The comparable form, stored in `dataset_links.identity` and `dataset_identity.identity`.
+    /// String equality on this column is the *entire* linking mechanism (ADR 0003): the
+    /// resolver views join on it, so two datasets are co-derivatives exactly when their
+    /// declarations reduce to the same `value` and are unrelated otherwise.
+    ///
+    /// Always carries the kind's marker — `doi:`, `dataset:`, `file://`, `s3://`, the URL
+    /// scheme, or `opaque:` — so a reference of one kind can never collide with the same text
+    /// read as another. Re-canonicalizing one is a fixed point for every kind but
+    /// [`IdentityKind::Opaque`], where the prefix is re-applied and the kind flips to
+    /// [`IdentityKind::Dataset`]; a stored `identity` is a result, not a reference to feed back
+    /// in, and no call site does.
     pub value: String,
+    /// Which branch of [`canonicalize`] recognized the reference, stored in
+    /// `dataset_links.identity_kind`. Its use is triage, not matching: an [`IdentityKind::Doi`]
+    /// link means the same thing on any machine, while an [`IdentityKind::File`] one is a path
+    /// on whichever host ran the ingest and stops resolving the moment the catalog moves.
     pub kind: IdentityKind,
+    /// `value` with a trailing OpenNeuro-style `.v<digits>(.<digits>)*` removed, stored in
+    /// `dataset_links.identity_base`. Equal to `value` for every kind but [`IdentityKind::Doi`],
+    /// which is the only one that versions this way.
+    ///
+    /// Read by nothing that links: `bidslake link list` uses it to *report* two datasets whose
+    /// DOIs differ only in version, precisely because the views will not join them. Two
+    /// versions of one dataset are deliberately different identities; `--source-dataset` is how
+    /// a user overrides that.
     pub base: String,
 }
 

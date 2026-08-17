@@ -372,6 +372,19 @@ impl FileTree {
     }
 }
 
+/// Every [`BidsFile`] in a tree, depth-first: the files a directory holds directly, then
+/// each subdirectory in turn (see [`FileTree::walk_files`]).
+///
+/// The order is deterministic and both constructors make it alphabetical —
+/// [`read_file_tree`] sorts the walk by filename and [`FileTree::from_paths`] sorts each
+/// directory's files — which is what makes "the first match wins" resolutions like
+/// [`find_associated_file`] repeatable rather than dependent on `readdir` order.
+///
+/// In a tree from [`read_file_tree`], a pseudo-file directory (`.ds/`, `.ome.zarr/`; see
+/// [`is_pseudo_file`]) arrives here as a single file and its contents never do — so this
+/// yields the dataset's *entries*, which is not the same set as its POSIX files.
+///
+/// [`find_associated_file`]: crate::inheritance::find_associated_file
 #[derive(Debug)]
 pub struct WalkFiles<'a> {
     stack: Vec<&'a FileTree>,
@@ -400,6 +413,11 @@ impl<'a> Iterator for WalkFiles<'a> {
     }
 }
 
+/// Every directory node in a tree, depth-first (see [`FileTree::walk_directories`]).
+///
+/// **Includes the node it was started from.** `tree.walk_directories().count()` on a dataset
+/// root is therefore one more than the number of subdirectories it contains, and an empty tree
+/// still yields one item rather than none.
 #[derive(Debug)]
 pub struct WalkDirectories<'a> {
     stack: Vec<&'a FileTree>,

@@ -134,7 +134,9 @@ def test_an_id_binds_through_a_sqlalchemy_statement(lake, one_file):
 
 def test_the_id_is_stable_across_two_reads(lake):
     """It is a hash of (dataset_id, root_uri, file_path), so it cannot drift within a run.
-    The two reads are the claim, so the pair of calls is one Act."""
+
+    The two reads are the claim, so the pair of calls is one Act.
+    """
     a = lake.sql("SELECT file_id FROM all_files ORDER BY file_path")["file_id"].to_list()
     b = lake.sql("SELECT file_id FROM all_files ORDER BY file_path")["file_id"].to_list()
 

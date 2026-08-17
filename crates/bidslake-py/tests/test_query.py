@@ -55,8 +55,11 @@ def bold_with_anat(lake):
 
 
 def test_a_sibling_matches_on_less_than_the_unit_key(bold_with_anat):
-    """What `get()` cannot do — the anatomical is not found by the run's entities, it is
-    found by a *subset* of them, once per run, in the same query."""
+    """What `get()` cannot do.
+
+    The anatomical is not found by the run's entities, it is found by a *subset* of them,
+    once per run, in the same query.
+    """
     assert bold_with_anat["anat__n"].to_list() == [1, 1]
 
 
@@ -137,8 +140,7 @@ def sessionless_units(lake):
 
 
 def test_the_join_is_null_safe(sessionless_units):
-    """`==` would drop every row — the failure mode that makes a sessionless dataset look
-    empty."""
+    """`==` would drop every row — the failure mode that makes a sessionless dataset empty."""
     height = sessionless_units.height
 
     assert sessionless_units["mine__n"].to_list() == [1] * height
@@ -180,8 +182,11 @@ def test_kind_data_is_the_default_and_is_overridable(sibling_by_kind):
 
 
 def test_the_matched_kind_is_the_one_asked_for(sibling_by_kind):
-    """Counting one is not enough on its own — it would also count one if the default had
-    matched the sidecar and the override the image."""
+    """Counting one is not enough on its own.
+
+    It would also count one if the default had matched the sidecar and the override the
+    image.
+    """
     df, extension = sibling_by_kind
 
     assert {p.endswith(extension) for p in df["f__file_path"]} == {True}
@@ -189,8 +194,10 @@ def test_the_matched_kind_is_the_one_asked_for(sibling_by_kind):
 
 @pytest.mark.parametrize(("run", "expected"), [(None, [1, 1]), ("01", [0, 0])], ids=["null", "set"])
 def test_none_in_where_means_is_null(lake, run, expected):
-    """How a native-space image is separated from its `space-*` resamplings. Here the
-    same shape: the session's T1w carries no `run`, and the BOLD beside it does."""
+    """How a native-space image is separated from its `space-*` resamplings.
+
+    Here the same shape: the session's T1w carries no `run`, and the BOLD beside it does.
+    """
     df = _units(lake, ("f", ("sub", "ses"), {"suffix": "T1w", "run": run}, None), **BOLD)
 
     assert df["f__n"].to_list() == expected
@@ -243,14 +250,19 @@ def via_undeclared(lake):
 
 
 def test_via_finds_nothing_when_the_link_is_not_declared_here(via_undeclared):
-    """A link declared in a *neighbouring* dataset is deliberately not in scope: the name
-    is resolved in the anchor's dataset, which is what BIDS `DatasetLinks` means."""
+    """A link declared in a *neighbouring* dataset is deliberately not in scope.
+
+    The name is resolved in the anchor's dataset, which is what BIDS `DatasetLinks` means.
+    """
     assert via_undeclared["far__n"].to_list() == [0, 0]
 
 
 def test_many_siblings_are_still_one_query(lake):
-    """The reason this is a lateral rather than a loop: cost scales with roles, not with
-    roles x units. Eight of them still compile to a single statement."""
+    """The reason this is a lateral rather than a loop.
+
+    Cost scales with roles, not with roles x units. Eight of them still compile to a single
+    statement.
+    """
     roles = [(f"r{i}", ("sub", "ses"), {"suffix": "T1w"}, None) for i in range(8)]
 
     df = _units(lake, *roles, **BOLD)
@@ -303,8 +315,10 @@ def test_sibling_path_agrees_with_the_long_form_it_replaces(lake, unit_row):
 
 
 def test_to_local_path_takes_a_upath_as_well_as_a_str(lake, unit_row):
-    """So a call site is not `to_local_path(str(lake.resolve(...)))`. That the two spellings
-    agree is the claim, so the pair of calls is one Act."""
+    """So a call site is not `to_local_path(str(lake.resolve(...)))`.
+
+    That the two spellings agree is the claim, so the pair of calls is one Act.
+    """
     p = bidslake.sibling_path(lake, unit_row, "anat")
 
     assert bidslake.to_local_path(p) == bidslake.to_local_path(str(p))
@@ -336,8 +350,10 @@ def mixed_row(lake):
     ids=["resolved", "missing", "ambiguous", "all"],
 )
 def test_unresolved_reports_only_the_siblings_that_are_not_exactly_one(mixed_row, names, expected):
-    """Empty when every role resolved; otherwise the count, which separates the two
-    failures — 0 is a subject to skip, 2+ is a query to fix."""
+    """Empty when every role resolved; otherwise the count.
+
+    The count separates the two failures — 0 is a subject to skip, 2+ is a query to fix.
+    """
     assert bidslake.unresolved(mixed_row, names) == expected
 
 

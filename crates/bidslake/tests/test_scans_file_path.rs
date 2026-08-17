@@ -1,3 +1,5 @@
+//! The `file_path` recorded for rows sourced from `scans.tsv`.
+
 use anyhow::Result;
 use bidslake::{bids::BidsParser, db::BidsDb, fs::LocalFileSystem, schema::Schema};
 use rstest::rstest;

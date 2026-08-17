@@ -1,3 +1,5 @@
+//! Ingestion of BIDS inheritance: a sidecar at a higher level applies to the files below it.
+
 use anyhow::Result;
 use bidslake::{bids::BidsParser, db::BidsDb, fs::LocalFileSystem, schema::Schema};
 use tempfile::TempDir;

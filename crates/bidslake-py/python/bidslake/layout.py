@@ -26,10 +26,19 @@ from .schema._generated import SCHEMA_VERSION, GetFilters
 
 
 class Table:
-    """A queryable view of one database table (or a derived SQL query, like the
-    wide ``files`` view), materializable as Polars/Arrow."""
+    """A queryable view of one database table, materializable as Polars/Arrow.
+
+    The view may instead be over a derived SQL query, as the wide `files` view is.
+    """
 
     def __init__(self, lake: BidsLake, name: str, *, sql: str | None = None) -> None:
+        """Bind a table name to the catalog that will run the query.
+
+        Args:
+            lake: The opened catalog the rows are read from.
+            name: The table or view name, which is also what `repr` shows.
+            sql: A `SELECT` to read instead of the named table, for a derived view.
+        """
         self._lake = lake
         self._name = name
         self._sql = sql
@@ -42,24 +51,27 @@ class Table:
         return self._lake._query(self._base_sql(), [])
 
     def lazy(self) -> LazyFrame:
-        """A Polars LazyFrame over the table, backed by a Polars IO source that
-        pushes column projection into DuckDB and applies predicates via Polars
-        (see ``_lazy``). Projection pushdown is the win for wide tables."""
+        """A Polars LazyFrame over the table.
+
+        Backed by a Polars IO source that pushes column projection into DuckDB and applies
+        predicates via Polars (see `_lazy`). Projection pushdown is the win for wide tables.
+        """
         return build_lazy(self._lake, self._base_sql())
 
     def arrow(self) -> Any:
-        """The table as a ``pyarrow.Table`` (requires pyarrow)."""
+        """The table as a `pyarrow.Table` (requires pyarrow)."""
         return self.pl().to_arrow()
 
     def __repr__(self) -> str:
+        """The table's name, as `Table('scans')`."""
         return f"Table({self._name!r})"
 
 
 class BidsLake:
     """An opened bidslake database.
 
-    Exposes each table as a :class:`Table` and the headline :meth:`get` iterator
-    that yields :class:`BidsFile` handles for files matching BIDS-concept filters.
+    Exposes each table as a `Table` and the headline `get` iterator that yields `BidsFile`
+    handles for files matching BIDS-concept filters.
     """
 
     def __init__(
@@ -70,6 +82,18 @@ class BidsLake:
         base_dir: str | os.PathLike[str] | None = None,
         root_override: Mapping[str, str | os.PathLike[str]] | None = None,
     ) -> None:
+        """Open the catalog at `path`.
+
+        Args:
+            path: The DuckDB database to open.
+            read_only: Open without taking DuckDB's write lock, which is the default; a
+                writable handle holds that lock until `close`.
+            base_dir: Rebase every root under this parent, keeping the root's own directory
+                name.
+            root_override: Redirect one root, keyed by its `root_uri`, or a whole dataset,
+                keyed by `dataset_id`. A per-root entry wins over a per-dataset one, and
+                either wins over `base_dir`.
+        """
         self._lake = _bidslake.PyLake(str(path), read_only)
         self._path = str(path)
         self._col_cache: dict[str, dict[str, str]] = {}
@@ -83,15 +107,20 @@ class BidsLake:
     # -- lifecycle ---------------------------------------------------------
 
     def close(self) -> None:
-        """Close the underlying DuckDB connection, releasing its file handle and
-        (for a ``read_only=False`` handle) its write lock, without waiting for
-        garbage collection. Idempotent; any later query raises ``RuntimeError``."""
+        """Close the underlying DuckDB connection.
+
+        Releases its file handle and — for a `read_only=False` handle — its write lock,
+        without waiting for garbage collection. Idempotent; any later query raises
+        `RuntimeError`.
+        """
         self._lake.close()
 
     def __enter__(self) -> BidsLake:
+        """The lake itself, so `with BidsLake(path) as lake` binds the open handle."""
         return self
 
     def __exit__(self, *exc: object) -> None:
+        """Close on the way out, whether or not the block raised."""
         self.close()
 
     # -- table access ------------------------------------------------------
@@ -101,48 +130,80 @@ class BidsLake:
         """One row per file the walk saw — every kind, with its BIDS concepts.
 
         The dataset's manifest: data files, sidecars, tabular files, gradients, and the
-        documentation a dataset ships. Every file-keyed table joins this on ``file_id``.
+        documentation a dataset ships. Every file-keyed table joins this on `file_id`.
         """
         return Table(self, ALL_FILES)
 
     @property
     def scans(self) -> Table:
-        """The BIDS ``scans.tsv`` table: acquisition metadata per data file.
+        """The BIDS `scans.tsv` table: acquisition metadata per data file.
 
-        Not the file registry — that is :attr:`all_files`. Keyed by ``file_id``, so join it
-        to :attr:`all_files` to see which file a row is about.
+        Not the file registry — that is `all_files`. Keyed by `file_id`, so join it to
+        `all_files` to see which file a row is about.
         """
         return Table(self, "scans")
 
     @property
     def sidecars(self) -> Table:
+        """The JSON sidecar fields of each data file, with inheritance already resolved.
+
+        Keyed by `file_id`: one row per described file, holding the nearest-wins merge of
+        every sidecar that applies to it, so an inherited `task-*_bold.json` costs no second
+        lookup. Schema fields are columns under their BIDS names; anything else is JSON in
+        `other_data`. `BidsFile.metadata` is the same content for a single file.
+        """
         return Table(self, "sidecars")
 
     @property
     def participants(self) -> Table:
+        """The BIDS `participants.tsv` table: one row per person per dataset.
+
+        Keyed by `(dataset_id, participant_id)` rather than by file, so a dataset spread over
+        several ingest roots (docs/adr/0005) still lists each person once. `participant_id`
+        carries the `sub-` prefix, as it does in the TSV. Declared columns (`age`, `sex`, …)
+        are typed; anything else is JSON in `other_data`.
+        """
         return Table(self, "participants")
 
     @property
     def sessions(self) -> Table:
+        """The BIDS `sessions.tsv` table: one row per session of one participant.
+
+        Keyed by `(dataset_id, participant_id, session_id)` — entities the file states
+        outright, not a `file_id` (docs/adr/0003). Declared columns (`acq_time`, …) are
+        typed; anything else is JSON in `other_data`.
+        """
         return Table(self, "sessions")
 
     @property
     def events(self) -> Table:
+        """Every task-event row in the catalog, as it is stored.
+
+        Keyed by the `file_id` of the `events.tsv` itself, not of the run it describes: an
+        inherited events file is stored once and pointed at each of its runs through
+        `file_associations` (docs/adr/0003). `BidsFile.get_events` is that join for one data
+        file, ordered by `onset`.
+        """
         return Table(self, "events")
 
     @property
     def files(self) -> Table:
         """One row per data file, widened with sidecar/participant/dataset columns.
 
-        Hides the joins (sidecars and scans by ``file_id``; files↔participants by
-        ``sub``/path-prefix). Joined-table columns are namespaced
-        ``sidecar__*``/``participant__*``/``dataset__*``/``scan__*`` (BIDS's own ``__``
-        convention) so they never collide with the registry's own columns.
+        Hides the joins (sidecars and scans by `file_id`; files↔participants by
+        `sub`/path-prefix). Joined-table columns are namespaced
+        `sidecar__*`/`participant__*`/`dataset__*`/`scan__*` (BIDS's own `__` convention) so
+        they never collide with the registry's own columns.
         """
         return Table(self, "files", sql=self._files_sql())
 
     def table(self, name: str) -> Table:
-        """A :class:`Table` for any table in the database (validated)."""
+        """A `Table` for any table in the database (validated).
+
+        Raises:
+            KeyError: If the database holds no table of that name; the message lists the
+                ones it does.
+        """
         if name not in self.tables():
             raise KeyError(f"no table {name!r}; available: {sorted(self.tables())}")
         return Table(self, name)
@@ -152,66 +213,73 @@ class BidsLake:
         return self._lake.list_tables()
 
     def resolve(self, dataset_id: str, file_path: str, root_uri: str | None = None) -> UPath:
-        """One handle that opens the file a registry row names.
+        r"""One handle that opens the file a registry row names.
 
-        The same resolution :attr:`BidsFile.path` uses — honoring ``base_dir`` and
-        ``root_override`` — but for any row in any table, not just ``all_files``.
+        The same resolution `BidsFile.path` uses — honoring `base_dir` and `root_override` —
+        but for any row in any table, not just `all_files`.
 
-        ``root_uri`` is the root the file was walked from. It is optional only because a
-        single-root dataset has nothing to disambiguate; pass it (every file-keyed row
-        can reach it through ``file_registry``) for a dataset that spans several roots,
-        which is what a study processed one subject at a time falls into (docs/adr/0005).
-
-        Its main use is reading what the catalog deliberately did not store. A table
-        whose ingestion policy is ``undeclared: catalog`` keeps only the columns its
-        schema declares; the file on disk stays the record of the rest, and the file
-        registry is the index of those files::
+        Its main use is reading what the catalog deliberately did not store. A table whose
+        ingestion policy is `undeclared: catalog` keeps only the columns its schema declares;
+        the file on disk stays the record of the rest, and the file registry is the index of
+        those files:
 
             row = (lake.all_files.pl()
                    .filter(pl.col("file_path").str.contains("confounds.tsv"))
                    .row(0, named=True))
             path = lake.resolve(row["dataset_id"], row["file_path"], row["root_uri"])
-            full = pl.read_csv(path.open("rb"), separator="\\t", null_values="n/a")
+            full = pl.read_csv(path.open("rb"), separator="\t", null_values="n/a")
             full.select("^a_comp_cor_.*$")   # the columns the catalog did not store
 
-        Read through ``.open()`` rather than ``str(path)``: a :class:`UPath` stringifies
-        back to a URI (scheme and all), and it is what keeps the recipe working for a
-        remote dataset.
-
         To learn which names those are without touching disk, read
-        ``tabular_undeclared_columns``.
+        `tabular_undeclared_columns`.
+
+        Args:
+            dataset_id: The dataset the row belongs to.
+            file_path: The row's path, relative to the root it was walked from.
+            root_uri: The root the file was walked from. Optional only because a single-root
+                dataset has nothing to disambiguate; pass it (every file-keyed row can reach
+                it through `file_registry`) for a dataset that spans several roots, which is
+                what a study processed one subject at a time falls into (docs/adr/0005).
+
+        Returns:
+            A `upath.UPath`. Read through its `.open()` rather than `str(path)`: a `UPath`
+            stringifies back to a URI, scheme and all, and going through it is what keeps
+            the recipe above working for a remote dataset.
         """
         return to_upath(self._resolve(dataset_id, root_uri, file_path))
 
     # -- cross-dataset links (docs/adr/0003) -------------------------------
 
     def datasets(self) -> DataFrame:
-        """One row per dataset in the catalog (the ``dataset_description`` table)."""
+        """One row per dataset in the catalog (the `dataset_description` table)."""
         return self._query("SELECT * FROM dataset_description", [])
 
     def roots(self, dataset_id: str | None = None) -> DataFrame:
-        """The ingest roots in this catalog: ``(dataset_id, root_uri, tenure)``.
+        """The ingest roots in this catalog: `(dataset_id, root_uri, tenure)`.
 
-        A dataset may have several (``docs/adr/0005``), so ``root_uri`` is the only thing
-        that says *which tree* a row is about — and ``file_path`` is meaningless without it.
+        A dataset may have several (`docs/adr/0005`), so `root_uri` is the only thing that
+        says *which tree* a row is about — and `file_path` is meaningless without it.
 
-        ``tenure`` says what may be concluded from those rows (``docs/adr/0009``).
-        ``attached`` means somebody else writes there and the catalog records what it saw
-        last time it looked; ``managed`` means bidslake owns the storage, so its rows are
-        current by construction. The distinction matters most to anything deciding whether
-        work still needs doing: a catalog is sound for *finding* work in either tier, and for
-        *skipping* it only once an attached root's rows have been confirmed — by ``bidslake
-        verify``, or by checking the files.
+        `tenure` says what may be concluded from those rows (`docs/adr/0007`). `attached`
+        means somebody else writes there and the catalog records what it saw last time it
+        looked; `managed` means bidslake owns the storage, so its rows are current by
+        construction. The distinction matters most to anything deciding whether work still
+        needs doing: a catalog is sound for *finding* work in either tier, and for *skipping*
+        it only once an attached root's rows have been confirmed — by `bidslake verify`, or
+        by checking the files.
 
-        Pair with :func:`~bidslake.to_uri` to scope a query to one tree::
+        Pair with `bidslake.to_uri` to scope a query to one tree:
 
             lake.sql("SELECT ... WHERE root_uri = ?", [bidslake.to_uri(out_dir)])
 
-        A catalog written before ``tenure`` existed has no such column, and this reads
-        ``attached`` for it rather than failing. That is not leniency for its own sake: the
-        write side backfills the same value (``ALTER TABLE … DEFAULT 'attached'``), but only
-        ``index`` runs DDL, and this package opens read-only — so a reader that insisted on
-        the column would simply be unable to open an older catalog at all.
+        A catalog written before `tenure` existed has no such column, and this reads
+        `attached` for it rather than failing. That is not leniency for its own sake: the
+        write side backfills the same value (`ALTER TABLE … DEFAULT 'attached'`), but only
+        `index` runs DDL, and this package opens read-only — so a reader that insisted on the
+        column would simply be unable to open an older catalog at all.
+
+        Args:
+            dataset_id: One dataset's roots; `None` for every dataset's.
         """
         # Selected as a literal when absent, so the shape of the frame does not depend on how
         # old the catalog is; a caller can always read `tenure`.
@@ -222,10 +290,10 @@ class BidsLake:
         return self._query(f"{sql} WHERE dataset_id = ? ORDER BY root_uri", [dataset_id])
 
     def _has_column(self, table: str, column: str) -> bool:
-        """Does ``table`` carry ``column`` in *this* catalog?
+        """Does `table` carry `column` in *this* catalog?
 
         Catalogs outlive the schema that built them, and a column added to an existing table
-        only reaches an old file through ``index``'s DDL. Read paths therefore cannot assume
+        only reaches an old file through `index`'s DDL. Read paths therefore cannot assume
         the current shape — asking is cheaper than the alternative, which is a `Binder Error`
         surfaced to someone whose only mistake was not re-indexing.
         """
@@ -238,9 +306,9 @@ class BidsLake:
     def dataset_relations(self) -> DataFrame:
         """The resolved dataset-to-dataset relations.
 
-        Columns ``(from_dataset_id, to_dataset_id, relation, via_identity)``, where
-        ``relation`` is one of :class:`Relation`. Resolved at query time from each
-        dataset's declared ``SourceDatasets`` — order of ingest does not matter.
+        Columns `(from_dataset_id, to_dataset_id, relation, via_identity)`, where `relation`
+        is one of `Relation`. Resolved at query time from each dataset's declared
+        `SourceDatasets` — order of ingest does not matter.
         """
         self._require_relations()
         return self._query("SELECT * FROM dataset_relations", [])
@@ -248,15 +316,19 @@ class BidsLake:
     def related_datasets(
         self, dataset_id: str, relation: Relation | str | None = None
     ) -> list[str]:
-        """The dataset ids related to ``dataset_id`` by explicit provenance.
+        """The dataset ids related to `dataset_id` by explicit provenance.
 
-        ``relation`` optionally filters to one kind (e.g. :attr:`Relation.SHARES_SOURCE`).
         A shared-source link guarantees a shared subject/entity namespace, so a caller can
         then *soundly* match files across the boundary — bidslake resolves the dataset
-        relation; the caller does the entity match::
+        relation; the caller does the entity match:
 
             for other in lake.related_datasets(fp_id, relation=Relation.SHARES_SOURCE):
                 lake.get(dataset_id=other, sub=f.sub, ses=f.ses, task=f.task, run=f.run)
+
+        Args:
+            dataset_id: The dataset the links start from.
+            relation: One kind of link to filter to, e.g. `Relation.SHARES_SOURCE`; `None`
+                returns every related dataset.
         """
         self._require_relations()
         sql = "SELECT DISTINCT to_dataset_id FROM dataset_relations WHERE from_dataset_id = ?"
@@ -279,40 +351,46 @@ class BidsLake:
 
     @property
     def overlays(self) -> list[tuple[int, str, str]]:
-        """The schema overlays applied when this database was indexed, as
-        ``(index, source, sha256)`` in application order — empty if none.
+        """The schema overlays applied when this database was indexed.
 
-        Augmented columns and tables are queryable with no extra step (``get`` and
-        the table accessors validate against the live database), so this is for
-        provenance/introspection. For *static* typing of augmented columns, generate
-        a project-local module with ``python -m bidslake.stubgen``.
+        `(index, source, sha256)` in application order — empty if none. Augmented columns and
+        tables are queryable with no extra step (`get` and the table accessors validate
+        against the live database), so this is for provenance/introspection. For *static*
+        typing of augmented columns, generate a project-local module with
+        `python -m bidslake.stubgen`.
         """
         return self._lake.overlays()
 
     @property
     def term_maps(self) -> list[tuple[int, str, str]]:
-        """The BEP-043 term maps applied when this database was indexed, as
-        ``(index, source, sha256)`` in application order — empty if none.
+        """The BEP-043 term maps applied when this database was indexed.
 
-        An adapter (``--adapter freesurfer``) projects a standardized *non-BIDS* dataset
-        onto BIDS concepts via a term map, declares its tables via a BIDS overlay (see
-        :attr:`overlays`), and its read/catalog policy via an ingestion schema (see
-        :attr:`ingestion`). The resulting tables are queryable with no extra step
-        (``lake.table("freesurfer_aparc")``); this is for provenance/introspection.
+        `(index, source, sha256)` in application order — empty if none. An adapter
+        (`--adapter freesurfer`) projects a standardized *non-BIDS* dataset onto BIDS
+        concepts via a term map, declares its tables via a BIDS overlay (see `overlays`), and
+        its read/catalog policy via an ingestion schema (see `ingestion`). The resulting
+        tables are queryable with no extra step (`lake.table("freesurfer_aparc")`); this is
+        for provenance/introspection.
         """
         return self._lake.term_maps()
 
     @property
     def ingestion(self) -> list[tuple[int, str, str]]:
-        """The ingestion schemas applied when this database was indexed, as
-        ``(index, source, sha256)`` in application order — empty if none.
+        """The ingestion schemas applied when this database was indexed.
+
+        `(index, source, sha256)` in application order — empty if none.
         """
         return self._lake.ingestion()
 
     def effective_schema(self) -> dict[str, Any] | None:
-        """The full effective (base + overlays) BIDS schema stamped into the
-        database, or ``None`` for a database that predates the stamp. Every database
-        embeds its schema, so this recovers exactly what the catalog was built from."""
+        """The full effective (base + overlays) BIDS schema stamped into the database.
+
+        Every database embeds its schema, so this recovers exactly what the catalog was built
+        from.
+
+        Returns:
+            The schema as parsed JSON, or `None` for a database that predates the stamp.
+        """
         raw = self._lake.effective_schema()
         return json.loads(raw) if raw is not None else None
 
@@ -324,27 +402,33 @@ class BidsLake:
         table: str = ALL_FILES,
         **filters: Unpack[GetFilters],
     ) -> Iterator[BidsFile]:
-        """Yield :class:`BidsFile` for rows of ``table`` matching ``filters``.
+        """Yield `BidsFile` for rows of `table` matching `filters`.
 
-        Each keyword is a column (BIDS entity, ``datatype``/``suffix``/
-        ``extension``/``modality``, or ``dataset_id``). A scalar matches by
-        equality, a sequence by ``IN (...)``, and ``None`` by ``IS NULL`` (so
-        ``ses=None`` selects sessionless files). With no filters, iterates the
-        whole table across every dataset in the database.
-
-        **Every file the walk saw**, not only the imaging ones: a `*_bold.nii.gz` and
-        the `*_bold.json` beside it are both rows here. Narrow with ``kind="data"``
-        when you mean the primary data files, or with ``extension`` when you mean one
-        format. This used to default to the data files and no longer does — there is
-        one registry, and which slice of it you want is yours to say::
+        **Every file the walk saw**, not only the imaging ones: a `*_bold.nii.gz` and the
+        `*_bold.json` beside it are both rows here. Narrow with `kind="data"` when you mean
+        the primary data files, or with `extension` when you mean one format. There is one
+        registry, and which slice of it you want is yours to say:
 
             lake.get(task="rest", suffix="bold", kind="data")
             lake.get(task="rest", suffix="bold", extension=".nii.gz")
 
-        Note: the result set is materialized in full (the Arrow-IPC buffer is read
-        into a Polars frame) before any row is yielded, so peak memory is the whole
-        result set — the generator form is for ergonomics, not streaming. Genuine
-        streaming awaits the PyCapsule bridge (see ``src/lib.rs``).
+        Args:
+            table: The table to iterate; the whole file registry by default.
+            **filters: One keyword per column (BIDS entity, `datatype`/`suffix`/`extension`/
+                `modality`, or `dataset_id`). A scalar matches by equality, a sequence by
+                `IN (...)`, and `None` by `IS NULL` — so `ses=None` selects sessionless
+                files. With no filters, iterates the whole table across every dataset in the
+                database.
+
+        Yields:
+            One `BidsFile` per matching row, carrying the row's BIDS concepts and a path
+            already resolved through `base_dir`/`root_override`.
+
+        Note:
+            The result set is materialized in full (the Arrow-IPC buffer is read into a
+            Polars frame) before any row is yielded, so peak memory is the whole result set —
+            the generator form is for ergonomics, not streaming. Genuine streaming awaits the
+            PyCapsule bridge (see `src/lib.rs`).
         """
         where, params = self._compile_filters(table, filters)
         sql = f"SELECT * FROM {self._relation(table)}"
@@ -369,9 +453,9 @@ class BidsLake:
     ) -> DataFrame:
         """Run a query and return the result as Polars.
 
-        Three forms. A plain SQL string with optional positional ``params``; a PEP 750
-        t-string, whose interpolations are lowered to DuckDB bind parameters — never
-        string-concatenated — so values can't inject SQL; or a SQLAlchemy statement::
+        The two non-string forms are lowered here and executed by the same Rust engine as a
+        plain string, so a query built either way opens no second connection and comes back
+        over the same Arrow bridge:
 
             lake.sql(t"SELECT * FROM all_files WHERE suffix = {suffix}")
 
@@ -383,11 +467,18 @@ class BidsLake:
                 .where(AllFiles.task == "rest", AllFiles.kind == "data")
             )
 
-        The statement is *compiled* here and executed by the same Rust engine as the
-        other two forms, so a query built this way opens no second connection and comes
-        back over the same Arrow bridge. That is the whole reason SQLAlchemy is a
-        dependency: it is the query builder :meth:`get` deliberately is not — joins,
-        `OR`, comparisons, subqueries — with none of its session or engine machinery.
+        That the statement is *compiled* here rather than executed is the whole reason
+        SQLAlchemy is a dependency: it is the query builder `get` deliberately is not —
+        joins, `OR`, comparisons, subqueries — with none of its session or engine machinery.
+
+        Args:
+            query: A plain SQL string; a PEP 750 t-string, whose interpolations are lowered
+                to DuckDB bind parameters — never string-concatenated — so values can't
+                inject SQL; or a SQLAlchemy statement.
+            params: Positional bind parameters, for the plain-string form.
+
+        Returns:
+            The whole result set as a Polars DataFrame.
         """
         if isinstance(query, ClauseElement):
             return self._query(*compile_statement(query))
@@ -404,7 +495,7 @@ class BidsLake:
         return self._query(query, list(params) if params else [])
 
     def columns(self, table: str) -> dict[str, str]:
-        """The ``{column_name: duckdb_type}`` mapping of ``table``."""
+        """The `{column_name: duckdb_type}` mapping of `table`."""
         return dict(self._columns(table))
 
     # -- internals ---------------------------------------------------------
@@ -415,8 +506,8 @@ class BidsLake:
     def _columns(self, table: str) -> dict[str, str]:
         cached = self._col_cache.get(table)
         if cached is None:
-            # A synthetic relation has no columns of its own,
-            # so it has no columns of its own to introspect — it has exactly the view's.
+            # A synthetic relation has no columns of its own to introspect — it has
+            # exactly the view's.
             cols = self._lake.columns(table)
             if not cols:
                 raise KeyError(f"no table {table!r}; available: {sorted(self.tables())}")
@@ -445,11 +536,11 @@ class BidsLake:
         )
 
     def _filter_columns(self, table: str) -> dict[str, str]:
-        """Every column a query against `table` may name — its own, plus the registry's
-        for a file-keyed one, which :meth:`_relation` reaches by joining `file_id`.
+        """Every column a query against `table` may name.
 
-        Kept apart from :meth:`columns`, which stays a faithful report of what the
-        database holds.
+        Its own, plus the registry's for a file-keyed one, which `_relation` reaches by
+        joining `file_id`. Kept apart from `columns`, which stays a faithful report of what
+        the database holds.
         """
         own = self._columns(table)
         if table == ALL_FILES or "file_id" not in own:
@@ -486,13 +577,17 @@ class BidsLake:
         return _bidslake.resolve_uri(root, file_path)
 
     def _effective_root(self, dataset_id: str, root_uri: str | None) -> str | None:
-        """The root URI to resolve a file against, honoring any `root_override` or
-        `base_dir` (which rebases under a new parent, keeping the directory name).
+        """The root URI to resolve a file against, honoring `root_override` and `base_dir`.
 
-        `root_uri` is the file's own — a dataset may have several (docs/adr/0005), and
-        which one a file belongs to is a property of the file, so it travels with the row
-        rather than being looked up per dataset. `None` for a caller that has only a
-        dataset, which then resolves only if that dataset has exactly one root.
+        `base_dir` rebases under a new parent, keeping the directory name.
+
+        Args:
+            dataset_id: The dataset the file belongs to.
+            root_uri: The file's own root — a dataset may have several (docs/adr/0005), and
+                which one a file belongs to is a property of the file, so it travels with
+                the row rather than being looked up per dataset. `None` for a caller that
+                has only a dataset, which then resolves only if that dataset has exactly
+                one root.
         """
         if root_uri is None:
             roots = self._original_roots().get(dataset_id, [])
@@ -544,9 +639,8 @@ class BidsLake:
         other = row.get("other_data")
         if other:
             meta.update(json.loads(other))
-        # `file_id` is the join key, not a metadata field. It replaced the
-        # `(dataset_id, file_path)` pair this skipped before (docs/adr/0006); leaving the old
-        # names here let the key itself through as a `Decimal` beside `RepetitionTime`.
+        # `file_id` is the join key, not a metadata field (docs/adr/0006): skipping it is what
+        # keeps the key itself out of the returned mapping, beside `RepetitionTime`.
         for key, value in row.items():
             if key in ("file_id", "other_data"):
                 continue
@@ -563,15 +657,21 @@ class BidsLake:
     ) -> DataFrame:
         """Rows of the file that *describes* `file_id`, reached through `file_associations`.
 
-        The one shape every such relation takes (docs/adr/0007): the rows are stored once,
+        The one shape every such relation takes (docs/adr/0003): the rows are stored once,
         keyed by the describing file, and the edge says which data files they are about. An
         inherited describing file — ds114's root `task-*_events.tsv` over 20 BOLD runs, or
         its `dwi.bval` over 20 images — is one stored copy and N edges, so this is a lookup
         rather than a scan over duplicated rows.
 
-        `association_type` names the table by default: a schema-declared edge is named for
-        the table it feeds (`events`), and an overlay-declared one is namespaced to it
-        (`fmriprep_confounds`), so the map is the identity in both cases.
+        Args:
+            file_id: The described file, whose edges are followed.
+            association_type: The edge kind, which names the table by default: a
+                schema-declared edge is named for the table it feeds (`events`), and an
+                overlay-declared one is namespaced to it (`fmriprep_confounds`), so the map
+                is the identity in both cases.
+            table: The table to read the rows from, when it is not the one
+                `association_type` names.
+            order_by: A column of that table to order the rows by.
         """
         tbl = table or association_type
         if tbl not in self.tables():
@@ -673,4 +773,5 @@ class BidsLake:
             )
 
     def __repr__(self) -> str:
+        """The database it was opened from, as `BidsLake('study.duckdb')`."""
         return f"BidsLake({self._path!r})"

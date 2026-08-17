@@ -17,6 +17,8 @@
 //! - Mechanisms for using different versions of schema
 //! - Benchmarking against typescript validation (and python-based validation)
 
+#![allow(missing_docs)] // Backlog: 287 undocumented public items. Clearing this and
+// deleting this line is a task of its own; see the workspace `[workspace.lints]` note.
 pub mod associations;
 pub mod config;
 pub mod context;
