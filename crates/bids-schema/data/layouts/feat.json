@@ -96,7 +96,10 @@
         "datatype": "func",
         "suffix": "classification"
       },
-      "Description": "FIX's automatic signal/noise labelling, for one training set and threshold."
+      "Entities": {
+        "desc": "auto"
+      },
+      "Description": "FIX's automatic signal/noise labelling, for one training set and threshold. Neither becomes an entity: `training` is a model filename, and 7 of the 9 models FSL ships spell it with an underscore (`HCP25_hp2000`, `WhII_MB6`), which no BIDS label may carry. `desc-auto` says what BIDS can — that a classifier and not a person produced this."
     },
     "classification_by_rater": {
       "Template": "fix4melview_{training}_thr{threshold}_{rater}.txt",
@@ -104,7 +107,10 @@
         "datatype": "func",
         "suffix": "classification"
       },
-      "Description": "A hand-edited labelling. Distinguished from the automatic one only by the trailing rater, which is why `rater` is an entity rather than part of `desc`."
+      "Entities": {
+        "desc": "manual"
+      },
+      "Description": "A hand-edited labelling, distinguished from the automatic one only by the trailing rater. `desc-manual` separates the two in the index, so its absence is what marks a unit as not yet reviewed; the rater's own label stays in the filename, BIDS having no entity for it. FIX names no such file itself — `fix -a` takes any filename — so the trailing rater is this layout's convention, not FSL's."
     },
     "example_func": {
       "Template": "reg/example_func.nii.gz",
@@ -112,7 +118,10 @@
         "datatype": "func",
         "suffix": "boldref"
       },
-      "Description": "A single reference volume in the run's own space (the temporal mean)."
+      "Entities": {
+        "desc": "exfunc"
+      },
+      "Description": "The run's registration reference: one volume of the unprocessed 4D data (FEAT takes the middle one), not the temporal mean. `desc-exfunc` is the same name the transform roles use for it in `from`/`to`."
     },
     "highres": {
       "Template": "reg/highres.nii.gz",
@@ -120,7 +129,10 @@
         "datatype": "anat",
         "suffix": "T1w"
       },
-      "Description": "The participant's T1w, in FEAT's naming."
+      "Entities": {
+        "desc": "brain"
+      },
+      "Description": "The participant's structural, brain-extracted, in FEAT's naming. `desc-brain` is the contrast FSL itself encodes here, leaving `desc-head` for `highres_head`."
     },
     "standard": {
       "Template": "reg/standard.nii.gz",
@@ -275,6 +287,14 @@
         "training": "Standard",
         "threshold": "20",
         "rater": "ab"
+      }
+    },
+    {
+      "Root": "sub-03_task-rest_run-02_desc-preproc_bold",
+      "Bindings": {
+        "training": "HCP25_hp2000",
+        "threshold": "10",
+        "rater": "cd"
       }
     }
   ]

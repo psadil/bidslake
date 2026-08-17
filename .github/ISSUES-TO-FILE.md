@@ -111,15 +111,6 @@ direction against the read side at load time, and the round-trip check does the 
 overlays under `crates/bids-schema/data/overlays/` to name their vocabulary from, and no term map yet.
 ADR 0002 (`docs/adr/0002-adapters-and-layouts.md`) records the gap.
 
-## Give the four under-specified `feat` roles their `Entities`
-
-Of the 23 roles in `crates/bids-schema/data/layouts/feat.json`, four declare no `Entities`:
-`highres`, `example_func`, `classification` and `classification_by_rater`. Add them to the layout and
-to `crates/bids-schema/data/term-maps/feat.json` in one change — the round trip checks each against
-the other — so a written FEAT tree is better classified when it is re-indexed. This does not make
-roles usable as source selectors, which is a structural limit rather than a gap
-(`docs/adr/0002-adapters-and-layouts.md`).
-
 ## Give ADR 0002's ingest percentages a corpus and a date
 
 The two percentages in `docs/adr/0002-adapters-and-layouts.md`'s Rationale name only the query

@@ -39,6 +39,10 @@ fn write_feat_tree(root: &Path) {
         ("mc/prefiltered_func_data_mcf.par", b"0 0 0 0 0 0\n"),
         ("fix4melview_UKBiobank_thr1.txt", b"1, Signal\n"),
         ("fix4melview_UKBiobank_thr1_psadil.txt", b"1, Signal\n"),
+        // A second automatic labelling, from a training set whose name carries an
+        // underscore. 7 of the 9 models FSL ships are spelled this way, so this is the
+        // common case rather than the exotic one.
+        ("fix4melview_HCP25_hp2000_thr10.txt", b"1, Signal\n"),
         ("reg/example_func.nii.gz", b"nii"),
         ("reg/highres.nii.gz", b"nii"),
         ("reg/standard.nii.gz", b"nii"),
@@ -77,9 +81,13 @@ fn write_feat_tree(root: &Path) {
 #[case("timeseries", "motion", 1)]
 #[case("components", "IC", 1)]
 #[case("components", "oIC", 1)]
-#[case("boldref", "preproc", 1)]
+#[case("boldref", "exfunc", 1)]
 #[case("dseg", "pveseg", 1)]
 #[case("T1w", "standard", 1)]
+#[case("T1w", "brain", 1)]
+// Two automatic labellings (one per training set), one hand-edited.
+#[case("classification", "auto", 2)]
+#[case("classification", "manual", 1)]
 #[tokio::test]
 async fn feat_roles_are_projected_onto_bids_concepts(
     #[case] suffix: &str,
@@ -171,35 +179,53 @@ async fn registration_transforms_carry_from_and_to(
     Ok(())
 }
 
-/// A hand-edited classification is the scientifically valuable artifact in this tree, and
-/// it differs from the automatic one only by a trailing `_<rater>` — so `rater` is what
-/// separates them, and its absence is what marks a unit as not yet reviewed.
+/// A hand-edited classification is the scientifically valuable artifact in this tree, and it
+/// differs from the automatic one only by a trailing `_<rater>`. BIDS has no entity for a
+/// rater, so the distinction lands in `desc` instead: `desc-manual` is a reviewed unit, and
+/// its absence is what marks one as not yet reviewed. That is a closed two-value vocabulary,
+/// so the query needs no advance knowledge of the site's rater labels.
 #[tokio::test]
-async fn rater_separates_hand_classification_from_automatic() -> anyhow::Result<()> {
+async fn desc_separates_hand_classification_from_automatic() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     write_feat_tree(dir.path());
     let db = ingest_with_adapters(dir.path(), &["feat"]).await?;
 
+    let reviewed: i64 = db.conn.query_row(
+        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND suffix = 'classification' \
+         AND \"desc\" = 'manual'",
+        [],
+        |r| r.get(0),
+    )?;
     let automatic: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND suffix = 'classification' AND rater IS NULL",
+        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND suffix = 'classification' \
+         AND \"desc\" = 'auto'",
         [],
         |r| r.get(0),
     )?;
-    let by_hand: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND suffix = 'classification' AND rater = 'psadil'",
-        [],
-        |r| r.get(0),
-    )?;
-    assert_eq!((automatic, by_hand), (1, 1));
 
-    // The training set the classifier used lands in `desc`, so runs classified with
-    // different training data stay distinguishable.
-    let desc: String = db.conn.query_row(
-        "SELECT DISTINCT \"desc\" FROM all_files WHERE kind = 'data' AND suffix = 'classification'",
+    assert_eq!((reviewed, automatic), (1, 2));
+    Ok(())
+}
+
+/// The training set and the threshold stay in the filename and reach no entity, because
+/// neither can be one: a BIDS label is alphanumeric, and 7 of the 9 models FSL ships spell
+/// their name with an underscore. Matching the model name *without* capturing it is what
+/// makes those seven classify — bound to `desc`, the alphanumeric capture matched none of
+/// them, so the common case was the unrecognized one.
+#[tokio::test]
+async fn an_underscored_training_set_still_classifies() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_feat_tree(dir.path());
+    let db = ingest_with_adapters(dir.path(), &["feat"]).await?;
+
+    let got: i64 = db.conn.query_row(
+        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND suffix = 'classification' \
+         AND \"desc\" = 'auto' AND file_path LIKE '%/fix4melview_HCP25_hp2000_thr10.txt'",
         [],
         |r| r.get(0),
     )?;
-    assert_eq!(desc, "UKBiobank");
+
+    assert_eq!(got, 1);
     Ok(())
 }
 

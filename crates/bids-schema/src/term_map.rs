@@ -427,6 +427,10 @@ mod tests {
         bundled_term_map("freesurfer").expect("bundled")
     }
 
+    fn feat() -> TermMap {
+        bundled_term_map("feat").expect("bundled")
+    }
+
     proptest! {
         /// Every concept a path actually projects is one the map said it could project.
         ///
@@ -767,6 +771,27 @@ mod tests {
                 .iter()
                 .map(|s| s.to_string())
                 .collect();
+        assert_eq!(got, want);
+    }
+
+    /// `feat`'s counterpart, pinned because this map is the one whose tree names things BIDS
+    /// has no word for. Every member here is an entity BIDS or the derivative ecosystem
+    /// already uses, which is why `overlays/feat.json` declares only `from`/`to`/`mode`.
+    ///
+    /// The set is where an invented entity would first show: a capture group named for a FIX
+    /// rater or training set widens it, earns a `COALESCE` on every `all_files` read, and then
+    /// resolves against a column no schema emits — so the value reads NULL with nothing
+    /// logged. FSL's own names for those two are not BIDS labels anyway (`HCP25_hp2000`), so
+    /// they stay in the filename and `desc` carries `auto`/`manual` instead.
+    #[test]
+    fn feat_projects_only_entities_bids_already_has() {
+        let got = feat().projectable_concepts();
+        let want: std::collections::BTreeSet<String> = [
+            "datatype", "desc", "from", "mode", "run", "seg", "ses", "sub", "suffix", "task", "to",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
         assert_eq!(got, want);
     }
 }

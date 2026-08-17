@@ -97,14 +97,20 @@
       }
     },
     {
-      "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/fix4melview_(?P<desc>[0-9A-Za-z]+)_thr[0-9]+_(?P<rater>[0-9A-Za-z]+)\\.txt",
+      "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/fix4melview_[^/]+_thr[0-9]+_[0-9A-Za-z]+\\.txt",
+      "Entities": {
+        "desc": "manual"
+      },
       "Concepts": {
         "datatype": "func",
         "suffix": "classification"
       }
     },
     {
-      "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/fix4melview_(?P<desc>[0-9A-Za-z]+)_thr[0-9]+\\.txt",
+      "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/fix4melview_[^/]+_thr[0-9]+\\.txt",
+      "Entities": {
+        "desc": "auto"
+      },
       "Concepts": {
         "datatype": "func",
         "suffix": "classification"
@@ -112,6 +118,9 @@
     },
     {
       "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/reg/example_func\\.nii\\.gz",
+      "Entities": {
+        "desc": "exfunc"
+      },
       "Concepts": {
         "datatype": "func",
         "suffix": "boldref"
@@ -119,6 +128,9 @@
     },
     {
       "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/reg/highres\\.nii\\.gz",
+      "Entities": {
+        "desc": "brain"
+      },
       "Concepts": {
         "datatype": "anat",
         "suffix": "T1w"

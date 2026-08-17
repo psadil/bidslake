@@ -21,13 +21,6 @@
         "description": "The interpretation of a transform file (e.g. `mode-image`). Only applicable to derivative data.\n",
         "type": "string",
         "format": "label"
-      },
-      "rater": {
-        "name": "rater",
-        "display_name": "Rater",
-        "description": "The person or procedure that produced a manual annotation (e.g. `rater-01`). Distinguishes a hand-edited artifact from the automatic one it was derived from.\n",
-        "type": "string",
-        "format": "label"
       }
     },
     "suffixes": {

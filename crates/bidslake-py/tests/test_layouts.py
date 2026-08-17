@@ -134,16 +134,23 @@ def test_mkdir_does_not_create_the_file(mkdir_target: Path) -> None:
 # -- the round trip ----------------------------------------------------------
 #
 # `desc` is worth reading carefully. Where a role's mapping sets it, the projection wins.
-# Where it does not (`highres`, `wmparc` -- identified by `suffix` and `seg` instead), the
-# concept column falls back to the path regex, which finds `desc-preproc` in the *unit
-# directory* name. That is the input BOLD's desc, and inheriting it is a true statement
-# about which run the tree was built from.
+# Where it does not -- `wmparc`, identified by `suffix` and `seg` instead, and now the only
+# role in this table like that -- the concept column falls back to the path regex, which
+# finds `desc-preproc` in the *unit directory* name. That is the input BOLD's desc, and
+# inheriting it is a true statement about which run the tree was built from.
+#
+# The two `classification` roles are here because they are the pair `desc` has to separate:
+# BIDS has no entity for a rater, so `auto` and `manual` are what distinguish FIX's own
+# labelling from a hand-edited one once the tree is re-indexed.
 
 ROUND_TRIP = {
     "filtered_func_clean": ("func", "bold", "clean"),
     "mask": ("func", "mask", "brain"),
     "melodic_mix": ("func", "mixing", "MELODIC"),
-    "highres": ("anat", "T1w", "preproc"),
+    "highres": ("anat", "T1w", "brain"),
+    "example_func": ("func", "boldref", "exfunc"),
+    "classification": ("func", "classification", "auto"),
+    "classification_by_rater": ("func", "classification", "manual"),
     "wmparc": ("anat", "dseg", "preproc"),
 }
 
@@ -161,7 +168,9 @@ def indexed_feat_tree(
     """
     base = tmp_path_factory.mktemp("roundtrip")
     root = base / "out"
-    at = feat.under(root / UNIT)
+    # Bound, so the two `classification` roles render: their placeholders are the pipeline's
+    # configuration, and a role nothing has bound raises rather than guessing.
+    at = feat.under(root / UNIT, training="UKBiobank", threshold="1", rater="psadil")
     for role in ROUND_TRIP:
         at.mkdir(role).write_bytes(b"x")
 

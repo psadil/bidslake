@@ -323,9 +323,9 @@ one whose roles agree with the term map that will later recognize their output.
 
 That check has a consequence worth knowing before you reach for a role as a query filter. A
 role's `Concepts`/`Entities` describe the file **at its destination**, not the file that will be
-copied or computed into the slot, and they are routinely narrower than a source-side query needs
-— several `feat` roles declare no entities at all. Adding source-side entities to a role makes it
-fail the round trip, by design.
+copied or computed into the slot. `feat`'s `highres` role declares `desc-brain`, which is what
+FEAT's own copy is; the entity that would *select* an fMRIPrep T1w to fill that slot is
+`desc-preproc`, and declaring that instead makes the role fail the round trip, by design.
 
 ## Design
 

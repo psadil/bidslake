@@ -82,7 +82,8 @@ files are identified purely by position (`reg/highres.nii.gz`,
 `filtered_func_data.ica/melodic_mix`) inside a directory named after the BIDS stem of the run it
 was built from, so the unit's entities come from the directory and each file's role from the
 projection — and FSL's `<from>2<to>` transform naming maps directly onto the `from`/`to`/`mode`
-entities BIDS derivatives already use, so the overlay layer needs to invent little. The tree is
+entities BIDS derivatives already use, so the overlay layer invents no entity at all: it declares
+those three, and every other concept this tree projects is one base BIDS already has. The tree is
 mostly intermediates — a FIX run leaves roughly 230 of them in `fix/` alone — so the ingestion
 fragment's main job is `ignore`, discriminating *within* a directory, since `mc/` and
 `filtered_func_data.ica/` each hold one keeper amongst the noise. Measured on a real 27-unit tree:
@@ -118,17 +119,43 @@ A role's `Concepts` and `Entities` describe the file *once it sits at the role's
 cannot double as a catalog query for the file that will be copied or computed into that slot. The
 bundled `feat` pair is the evidence:
 
-- the term map's mapping for `reg/highres.nii.gz` declares `{datatype: anat, suffix: T1w}` and no
-  entities at all. Adding `desc: preproc` to the `highres` role — the entity that would actually
-  select fMRIPrep's T1w — makes `classify(render("highres"))` disagree with the declaration, and the
-  layout fails to load;
+- the `highres` role and its mapping declare `desc: brain` — FEAT's copy is the brain-extracted
+  structural. `desc: preproc` is the entity that would actually *select* fMRIPrep's T1w to fill it,
+  and declaring that instead makes `classify(render("highres"))` disagree with the declaration, so
+  the layout fails to load (`layout.rs`'s
+  `a_declared_entity_the_projection_contradicts_is_rejected`);
 - `filtered_func` declares `desc: filtered`, which is what FEAT's own output is, and is *filled*
   from fMRIPrep's `desc-preproc` BOLD. Both are correct; they describe different files;
-- `highres` and `example_func` declare no `Entities`, so as filters they would match every `space-*`
-  resampling of the same image — ambiguous on every unit.
+- `example_func` declares `desc: exfunc`, the label the six transform roles already give this
+  image's space. As a *filter* it selects nothing: the file that fills it is derived, not fetched —
+  FEAT takes the halfway volume of the input run with `fslroi`.
 
 This is a real constraint, not an oversight to be fixed by enriching the documents: a role and its
 mapping gaining entities together moves the destination description, never supplies the source one.
+Enriching them is worth doing on its own terms — every role now declares what it becomes, so a tree
+this layout wrote is classified by what each file *is* rather than inheriting the unit directory's
+`desc-preproc` — and it moved nothing about the source problem.
+
+### On what a FEAT filename can become
+
+The write direction can name more than the read direction can carry, and FIX is where the two come
+apart. `fix4melview_{training}_thr{threshold}_{rater}.txt` carries three variables and BIDS has an
+entity for none of them: none means "training set", none means "threshold", none means "rater". One
+is worse than homeless. A BIDS label is alphanumeric, and `training` is a model *filename* — 7 of
+the 9 models FSL ships spell theirs with an underscore (`HCP25_hp2000`, `WhII_MB6`,
+`HCP_Style_Single_Multirun_Dedrift`) — so no entity, invented or otherwise, could hold it verbatim.
+
+So the layout binds all three as `Template` placeholders, which is what a pipeline needs to *write*
+the file, and the term map projects a `desc` of `auto` or `manual`, which is what a query needs to
+*find* it: the automatic/hand-edited split is the one distinction here that is closed, two-valued,
+and answerable without knowing a site's rater labels. The other two stay in the filename, and the
+role `Description`s say so.
+
+Binding `desc` to the training set instead, which is what the mapping did first, cost more than it
+bought: the alphanumeric capture it needed matched none of those seven models, so the *common* FIX
+output was the one that classified as nothing at all. Widening the token and not capturing it is what
+fixed that. The price is a real one — two thresholds of one training set, or two raters of one unit,
+now differ only by `file_path` — and it is the price of a concept space no wider than BIDS.
 
 ### On filling a role
 
@@ -358,6 +385,21 @@ sources*.
 
 **A `(destination, source)` staging plan.** It is the wrong abstraction for filling a tree: 4 of 15
 roles on a MELODIC/FIX pipeline are a copy.
+
+**An overlay-declared entity for FIX's rater, training set, or threshold.** An overlay may extend the
+BIDS vocabulary ([ADR 0001](0001-schema-augmentation-overlays.md)), and `rater` was declared that way
+at first, so this is a removal and not a road not taken. An entity BIDS does not have widens a
+catalog's concept space past BIDS and earns a per-read `COALESCE` on a column only that overlay's
+schema emits — for a training set no label could hold anyway, and for two discriminators whose one
+queryable distinction fits in `desc` (*On what a FEAT filename can become*). What the overlays do keep
+declaring is suffixes, extensions and columns — vocabulary for a file's *shape*, each already current
+in the derivative ecosystem (`xfm`, `boldref`, `mixing`, `timeseries`).
+
+**`{name}` placeholders inside a role's `Entities`, interpolated from `Bindings` at load time.** Five
+lines in `validate_round_trip`, and the round trip would then check `desc == {training}` under each
+example. With `desc` carrying a literal there is nothing varying left for the two `classification`
+roles to declare, so it would be a mechanism with no caller; the training-set capture that seemed to
+need it is rejected above.
 
 ## Open Issues
 

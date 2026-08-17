@@ -560,6 +560,36 @@ mod tests {
         assert!(msg.contains("must agree"), "{msg}");
     }
 
+    /// The entity half of the same check, and the case ADR 0002 argues the destination/source
+    /// distinction from: `desc-preproc` is the entity that would *select* fMRIPrep's T1w, and
+    /// declaring it on the role FEAT writes its own copy to makes the two directions disagree.
+    /// The role and its mapping can gain entities together — they now declare `desc-brain` —
+    /// but that moves the destination's description; it never supplies the source's.
+    #[test]
+    fn a_declared_entity_the_projection_contradicts_is_rejected() {
+        let raw = r#"{
+            "LayoutVersion": "0.1.0",
+            "TermMap": "feat",
+            "Roles": {
+                "highres": {
+                    "Template": "reg/highres.nii.gz",
+                    "Concepts": { "datatype": "anat", "suffix": "T1w" },
+                    "Entities": { "desc": "preproc" }
+                }
+            },
+            "Examples": [{ "Root": "sub-01_ses-V1_task-rest_run-01_desc-preproc_bold" }]
+        }"#;
+
+        let err = load_layout_str(raw, "<test>").expect_err("must reject");
+
+        // The concepts agree, so only the entity comparison can be what rejected this.
+        assert!(
+            matches!(&err, LayoutError::RoundTrip { role, detail, .. }
+                     if role == "highres" && detail.contains(r#"desc=Some("brain"), not "preproc""#)),
+            "{err:?}"
+        );
+    }
+
     /// A role the term map does not recognize at all is the other half of the same check:
     /// the layout would write a file nothing can read back.
     #[test]
