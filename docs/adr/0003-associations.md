@@ -287,11 +287,11 @@ text and `--source-dataset <id>` breaks with it.
   creates the tables and views and backfills them, and the Python reader raises with that
   instruction rather than a binder error when `dataset_relations` is absent. Adding a source or
   link target later needs none either — the edge appears on the next query.
-- **`diffusion` is a view, and DuckDB cannot replace a table with a same-named view** — `CREATE OR
-  REPLACE VIEW` over a table errors, `CREATE VIEW IF NOT EXISTS` silently no-ops. A catalog whose
-  `diffusion` is a table must be rebuilt into a new file. Relatedly, `COPY FROM DATABASE (SCHEMA)`
-  must emit views in dependency order, since `diffusion` selects from two generated views;
-  `test_compact.rs` pins it.
+- **`diffusion` is a view, and a shipped table's name is frozen** — DuckDB refuses to replace a
+  table with a same-named view ([ADR 0006](0006-file-registry.md)), so a catalog whose `diffusion`
+  is a table must be rebuilt into a new file. Relatedly, `COPY FROM DATABASE (SCHEMA)` must emit
+  views in dependency order, since `diffusion` selects from two generated views; `test_compact.rs`
+  pins it.
 
 ## Rejected Ideas
 

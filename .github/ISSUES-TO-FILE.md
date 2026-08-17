@@ -120,14 +120,6 @@ the other — so a written FEAT tree is better classified when it is re-indexed.
 roles usable as source selectors, which is a structural limit rather than a gap
 (`docs/adr/0002-adapters-and-layouts.md`).
 
-## Collapse the DuckDB table-vs-view constraint into one record
-
-The constraint that a shipped table's name is effectively frozen — `CREATE OR REPLACE VIEW` errors
-against an existing table and `CREATE TABLE IF NOT EXISTS` silently no-ops — is stated in full in
-both `docs/adr/0003-associations.md` and `docs/adr/0006-file-registry.md`. ADR 0006 owns it: it is
-a property of the registry's shape. Cut the copy in 0003 to a clause plus a link, per the
-own-it-or-link-it rule the documentation set otherwise follows.
-
 ## Give ADR 0002's ingest percentages a corpus and a date
 
 The two percentages in `docs/adr/0002-adapters-and-layouts.md`'s Rationale name only the query
