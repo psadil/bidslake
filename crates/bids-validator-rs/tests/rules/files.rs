@@ -125,3 +125,111 @@ async fn the_same_files_are_unincluded_with_no_adapter_configured() {
         .any(|i| i.code == "NOT_INCLUDED" && i.location == "/sub-01_ses-V1/stats/aseg.stats");
     assert!(reported, "issues: {:#?}", issues.issues);
 }
+
+/// The `extensions` array on a file rule was parsed and never read, so a rule was chosen by its
+/// suffix alone and every rule sharing a suffix list scored identically. BEP-011 makes that
+/// concrete: `thickness` belongs to a `.shape.gii` rule that requires `hemi` and a `.dscalar.nii`
+/// rule that does not, so without this check a GIFTI file was judged against whichever rule the
+/// walk reached first and the requirement never bit.
+#[tokio::test]
+async fn a_surface_map_missing_its_hemisphere_is_reported() {
+    let tmp = tempdir();
+    fs::write(
+        tmp.join("dataset_description.json"),
+        r#"{"Name": "d", "BIDSVersion": "1.11.1", "DatasetType": "derivative",
+            "GeneratedBy": [{"Name": "x"}]}"#,
+    )
+    .unwrap();
+    let anat = tmp.join("sub-01/anat");
+    fs::create_dir_all(&anat).unwrap();
+    fs::write(anat.join("sub-01_thickness.shape.gii"), [0u8; 8]).unwrap();
+
+    let issues = bids_validator_rs::validator::validate(
+        &tmp,
+        &bids_validator_rs::schema::BidsSchema::bundled().unwrap(),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let reported: Vec<&str> = issues
+        .issues
+        .iter()
+        .filter(|i| i.sub_code.as_deref() == Some("hemisphere"))
+        .map(|i| i.location.as_str())
+        .collect();
+
+    assert_eq!(reported, ["/sub-01/anat/sub-01_thickness.shape.gii"]);
+}
+
+/// The other side, and the reason the extension check has to participate in the pick rather than
+/// simply veto: the CIFTI form of the same measure carries no hemisphere, legitimately. If the
+/// GIFTI rule won here the file would be told to add an entity BIDS does not want on it.
+#[tokio::test]
+async fn the_cifti_form_of_the_same_measure_needs_no_hemisphere() {
+    let tmp = tempdir();
+    fs::write(
+        tmp.join("dataset_description.json"),
+        r#"{"Name": "d", "BIDSVersion": "1.11.1", "DatasetType": "derivative",
+            "GeneratedBy": [{"Name": "x"}]}"#,
+    )
+    .unwrap();
+    let anat = tmp.join("sub-01/anat");
+    fs::create_dir_all(&anat).unwrap();
+    fs::write(
+        anat.join("sub-01_space-fsLR_thickness.dscalar.nii"),
+        [0u8; 8],
+    )
+    .unwrap();
+
+    let issues = bids_validator_rs::validator::validate(
+        &tmp,
+        &bids_validator_rs::schema::BidsSchema::bundled().unwrap(),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let reported: Vec<&str> = issues
+        .issues
+        .iter()
+        .filter(|i| i.code == "EXTENSION_MISMATCH" || i.sub_code.as_deref() == Some("hemisphere"))
+        .map(|i| i.code.as_str())
+        .collect();
+
+    assert!(reported.is_empty(), "reported: {reported:?}");
+}
+
+/// A pseudo-file's extension is declared with a trailing slash because it names a directory
+/// (`.ds/`, `.mefd/`, `.ome.zarr/`) while the parsed extension of the path has none. Comparing the
+/// two spellings literally reported every CTF, MEF3 and OME-Zarr recording in `bids-examples` as
+/// a mismatched extension — five integration tests caught it, and this is the unit-level guard.
+#[tokio::test]
+async fn a_pseudo_file_directory_is_not_an_extension_mismatch() {
+    let tmp = tempdir();
+    fs::write(
+        tmp.join("dataset_description.json"),
+        r#"{"Name": "ctf", "BIDSVersion": "1.11.1"}"#,
+    )
+    .unwrap();
+    let meg = tmp.join("sub-01/meg/sub-01_task-rest_meg.ds");
+    fs::create_dir_all(&meg).unwrap();
+    fs::write(meg.join("sub-01_task-rest_meg.res4"), [0u8; 8]).unwrap();
+
+    let issues = bids_validator_rs::validator::validate(
+        &tmp,
+        &bids_validator_rs::schema::BidsSchema::bundled().unwrap(),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let reported: Vec<&str> = issues
+        .issues
+        .iter()
+        .filter(|i| i.code == "EXTENSION_MISMATCH")
+        .map(|i| i.location.as_str())
+        .collect();
+
+    assert!(reported.is_empty(), "reported: {reported:?}");
+}

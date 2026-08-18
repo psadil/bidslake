@@ -217,6 +217,24 @@ implicit. The bar is not the kind of term — it is whether the term is bidslake
 entity for FIX's training set is refused because BIDS has no such concept and is not getting one;
 BEP-011's suffixes are adopted, unchanged, because BIDS is adopting them.
 
+Declaring `rules.files` surfaced that the validator was choosing rules on incomplete evidence.
+`SuffixRule::match_context` identifies a rule by suffix alone — faithfully, since the reference
+validator does the same — and the downstream checks are what narrow it. Only the entity check
+existed: `extensions` was parsed onto the rule struct and never read, and there was no
+`EXTENSION_MISMATCH`. That is invisible while every suffix belongs to one rule, and wrong as soon
+as one does not. BEP-011 gives `thickness` a `.shape.gii` rule requiring `hemisphere` and a
+`.dscalar.nii` rule that does not; with nothing distinguishing them, both scored zero and a GIFTI
+file was judged against whichever the walk reached first.
+
+So the extension check was added, mirroring the reference validator's `extensionMismatch`, and the
+best-rule pick is now ranked by *(does the file's extension fit, how many errors)* rather than by
+error count alone — a rule that does not permit the file's extension is not the rule the file was
+written against, so it loses to one that does even when it would have had less to say. Two schema
+spellings need honouring that a literal membership test misses: `.*` (`objects.extensions.Any`,
+"any extension is allowed"), and the trailing slash on a pseudo-file extension (`.ds/`,
+`.ome.zarr/`), which names a directory while the parsed extension of the path has none. Missing
+the second reported every CTF and OME-Zarr recording in `bids-examples` as a mismatch.
+
 `bep011.json` is the first overlay to declare `rules.files`, which has a consequence worth stating:
 `bids-validator-rs` reads `bids_schema::SCHEMA_JSON` directly and shares no schema loading with the
 indexer, so the merge happens in `BidsSchema::bundled()` as well as `Schema::load_full`. Both, or
@@ -468,11 +486,7 @@ need it is rejected above.
 - `feat` and `freesurfer` are the only layouts. fMRIPrep, MRIQC and QSIPrep have read-side
   artifacts but no write direction, so code producing files in their conventions still hardcodes
   paths.
-- **A mirrored `rules.files` group cannot enforce its entities.** `SuffixRule::match_context`
-  identifies a rule by suffix alone and never reads `extensions`, so BEP-011's GIFTI rule and its
-  CIFTI twin always co-match, and `check_file_rules` keeps whichever produced fewest errors — the
-  CIFTI rule, which does not require `hemisphere`. So `bep011.json`'s `hemisphere: required` is
-  recorded and inert. Recognition works, which is what the group was added for; making the
-  requirement bite means identifying a rule by extension as well as suffix, which is a change to
-  how every rule in the schema is matched.
+- `datatypeMismatch` has no counterpart here. The extension check below has one now; the
+  datatype one does not, so a rule naming `datatypes: [anat]` still applies to a file under
+  `func/`. Same shape of fix, and the same need to measure it against the corpus first.
 - A layout used to *produce* a dataset is not recorded as provenance anywhere.

@@ -161,7 +161,13 @@ pub fn check_file_rules(
 
     let key_to_name = &schema.entity_key_to_name;
     let mut best_rule_issues = Vec::new();
-    let mut min_errors = usize::MAX;
+    // Ranked by (does the file's extension fit this rule, how many errors) — lower is better.
+    // Error count alone ties too often to be a choice: a `_thickness.shape.gii` missing its `hemi`
+    // scores one error against the GIFTI rule (the missing entity) and one against the CIFTI rule
+    // (the extension), and first-past-the-post then reports whichever the walk reached first. A
+    // rule that does not permit the file's extension is not the rule the file was written
+    // against, so it loses to one that does even when it would have had less to say.
+    let mut best_rank = (usize::MAX, usize::MAX);
 
     for rule_path in matches {
         let rule_val = schema.resolve_path(&rule_path);
@@ -219,12 +225,51 @@ pub fn check_file_rules(
             }
         }
 
+        // Mirrors the TS validator's `extensionMismatch`, which runs per matched rule in its
+        // `ruleChecks` array. Identification is by suffix alone (see `SuffixRule::match_context`),
+        // so this is the downstream check that narrows it — and without it the pick below is not
+        // a pick at all. Rules that share a suffix list differ *only* by extension: BEP-011 gives
+        // `thickness`/`curv`/`sulc` a `.shape.gii` rule requiring `hemi` and a `.dscalar.nii` rule
+        // that does not, so with every candidate scoring zero a GIFTI file would be judged against
+        // whichever the walk reached first, and the requirement would never bite.
+        //
+        // Two schema spellings this has to honour, and upstream's plain `includes` honours
+        // neither. `.*` is `objects.extensions.Any` — "Any extension is allowed" — so it matches
+        // anything; the two MEG headshape rules (`['.*', '.pos']`) are where that shows. And a
+        // *pseudo-file* extension is written with a trailing slash because it names a directory
+        // (`.ds/`, `.mefd/`, `.ome.zarr/`), while the parsed extension of the matching path has
+        // none — so `.ome.zarr/` must accept `.ome.zarr`, or every CTF, MEF3 and OME-Zarr
+        // recording in the corpus reads as a mismatched extension.
+        if let Some(extensions) = rule_val.get("extensions").and_then(|e| e.as_array()) {
+            let permitted: Vec<&str> = extensions.iter().filter_map(|e| e.as_str()).collect();
+            if !permitted
+                .iter()
+                .any(|e| *e == ".*" || e.trim_end_matches('/') == context.extension)
+            {
+                temp_issues.push(BidsIssue {
+                    code: "EXTENSION_MISMATCH".to_string(),
+                    sub_code: None,
+                    message: format!(
+                        "Extension {:?} is not allowed by this rule; it permits {}",
+                        context.extension,
+                        permitted.join(", ")
+                    ),
+                    severity: Severity::Error,
+                    location: context.path.clone(),
+                    rule: Some(rule_path.clone()),
+                    sub_message: None,
+                });
+            }
+        }
+
         let error_count = temp_issues
             .iter()
             .filter(|i| matches!(i.severity, Severity::Error))
             .count();
-        if error_count < min_errors {
-            min_errors = error_count;
+        let extension_fits =
+            usize::from(temp_issues.iter().any(|i| i.code == "EXTENSION_MISMATCH"));
+        if (extension_fits, error_count) < best_rank {
+            best_rank = (extension_fits, error_count);
             best_rule_issues = temp_issues;
         }
     }
