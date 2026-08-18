@@ -132,6 +132,48 @@ pub fn check_file_rules(
         }
     }
 
+    // Narrowing, mirroring the reference validator's `hasMatch`. Identification is deliberately
+    // loose — a suffix rule is claimed by its suffix alone — so several rules routinely co-apply
+    // and something has to reduce them before their requirements are read as this file's. Two
+    // passes, in this order: the datatype the file sits under, then its entities and extension.
+    //
+    // Each pass is *discarded if it would eliminate everything*, which is the part that matters
+    // and the part a scoring scheme gets wrong. The compiled schema renders an unspecialized
+    // parent rule with `datatypes: []` — matching nothing — beside the specializations carrying
+    // the real lists: `electrodes` has six rules, two empty parents plus `[eeg, ieeg]`, `[meg]`
+    // and `[emg]`. The guard is what keeps a file whose datatype matches no rule at all from
+    // losing every candidate and being judged against nothing.
+    if matches.len() > 1 {
+        let by_datatype: Vec<String> = matches
+            .iter()
+            .filter(|rule_path| {
+                schema
+                    .resolve_path(rule_path)
+                    .get("datatypes")
+                    .and_then(|d| d.as_array())
+                    .is_some_and(|permitted| {
+                        context.datatype.as_deref().is_some_and(|datatype| {
+                            permitted.iter().any(|d| d.as_str() == Some(datatype))
+                        })
+                    })
+            })
+            .cloned()
+            .collect();
+        if !by_datatype.is_empty() {
+            matches = by_datatype;
+        }
+    }
+    if matches.len() > 1 {
+        let by_entities_extension: Vec<String> = matches
+            .iter()
+            .filter(|rule_path| entities_extension_in_rule(schema, context, rule_path))
+            .cloned()
+            .collect();
+        if !by_entities_extension.is_empty() {
+            matches = by_entities_extension;
+        }
+    }
+
     context.filename_rules = matches.clone();
 
     if matches.is_empty() {
@@ -160,14 +202,20 @@ pub fn check_file_rules(
     }
 
     let key_to_name = &schema.entity_key_to_name;
+    // Narrowing usually leaves one rule, and where it leaves several the quietest is reported.
+    //
+    // The reference validator instead checks *every* survivor and reports all of them, on the
+    // stated principle that a wrongly-named file should get as much feedback as possible. That is
+    // right for a wrong name and wrong for a right one: `sub-01_acq-crosstalk_meg.fif` is claimed
+    // by both `raw.meg.meg` and `raw.meg.crosstalk`, neither of which entities-and-extensions can
+    // separate, and the first requires a `task` a crosstalk file does not have. Reporting both
+    // fails `ds000248` — a canonical, correct dataset. This crate's integration tests hold every
+    // vendored example to zero errors, which is a stronger claim than upstream makes, and it is
+    // worth more than matching upstream's noise.
+    //
+    // So: upstream's narrowing, then a last pick among what it could not separate.
     let mut best_rule_issues = Vec::new();
-    // Ranked by (does the file's extension fit this rule, how many errors) — lower is better.
-    // Error count alone ties too often to be a choice: a `_thickness.shape.gii` missing its `hemi`
-    // scores one error against the GIFTI rule (the missing entity) and one against the CIFTI rule
-    // (the extension), and first-past-the-post then reports whichever the walk reached first. A
-    // rule that does not permit the file's extension is not the rule the file was written
-    // against, so it loses to one that does even when it would have had less to say.
-    let mut best_rank = (usize::MAX, usize::MAX);
+    let mut best_error_count = usize::MAX;
 
     for rule_path in matches {
         let rule_val = schema.resolve_path(&rule_path);
@@ -240,6 +288,30 @@ pub fn check_file_rules(
         // (`.ds/`, `.mefd/`, `.ome.zarr/`), while the parsed extension of the matching path has
         // none — so `.ome.zarr/` must accept `.ome.zarr`, or every CTF, MEF3 and OME-Zarr
         // recording in the corpus reads as a mismatched extension.
+        if let Some(datatypes) = rule_val.get("datatypes").and_then(|d| d.as_array()) {
+            let permitted: Vec<&str> = datatypes.iter().filter_map(|d| d.as_str()).collect();
+            if let Some(datatype) = context.datatype.as_deref()
+                && !permitted.contains(&datatype)
+            {
+                temp_issues.push(BidsIssue {
+                    code: "DATATYPE_MISMATCH".to_string(),
+                    sub_code: None,
+                    message: format!(
+                        "Datatype {datatype:?} is not allowed by this rule; it permits {}",
+                        if permitted.is_empty() {
+                            "none".to_string()
+                        } else {
+                            permitted.join(", ")
+                        }
+                    ),
+                    severity: Severity::Error,
+                    location: context.path.clone(),
+                    rule: Some(rule_path.clone()),
+                    sub_message: None,
+                });
+            }
+        }
+
         if let Some(extensions) = rule_val.get("extensions").and_then(|e| e.as_array()) {
             let permitted: Vec<&str> = extensions.iter().filter_map(|e| e.as_str()).collect();
             if !permitted
@@ -266,10 +338,8 @@ pub fn check_file_rules(
             .iter()
             .filter(|i| matches!(i.severity, Severity::Error))
             .count();
-        let extension_fits =
-            usize::from(temp_issues.iter().any(|i| i.code == "EXTENSION_MISMATCH"));
-        if (extension_fits, error_count) < best_rank {
-            best_rank = (extension_fits, error_count);
+        if error_count < best_error_count {
+            best_error_count = error_count;
             best_rule_issues = temp_issues;
         }
     }
@@ -277,6 +347,35 @@ pub fn check_file_rules(
     for issue in best_rule_issues {
         issues.add(issue);
     }
+}
+
+/// The reference validator's `entitiesExtensionsInRule`, the second narrowing pass.
+///
+/// A rule fits when the file's extension is one it permits *and* every entity the filename carries
+/// is one it declares. Both halves are vacuously true for a rule that declares neither, which is
+/// what lets a rule constrain one axis without accidentally constraining the other.
+///
+/// The entity half is a *subset* test in one direction only: the file may omit entities the rule
+/// allows (that is what `optional` means), but an entity the rule has never heard of means the file
+/// was written against some other rule. Note this is narrowing, not an error — an unknown entity is
+/// `UNKNOWN_ENTITY`'s business, decided against the whole schema rather than one rule.
+fn entities_extension_in_rule(schema: &BidsSchema, context: &BidsContext, rule_path: &str) -> bool {
+    let rule = schema.resolve_path(rule_path);
+    let extension_fits = match rule.get("extensions").and_then(|e| e.as_array()) {
+        None => true,
+        Some(permitted) => permitted
+            .iter()
+            .filter_map(|e| e.as_str())
+            .any(|e| e == ".*" || e.trim_end_matches('/') == context.extension),
+    };
+    let entities_fit = match rule.get("entities").and_then(|e| e.as_object()) {
+        None => true,
+        Some(declared) => context
+            .entities
+            .keys()
+            .all(|key| declared.contains_key(key)),
+    };
+    extension_fits && entities_fit
 }
 
 trait MatchableRule {

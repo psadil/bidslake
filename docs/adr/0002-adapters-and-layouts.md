@@ -226,14 +226,36 @@ as one does not. BEP-011 gives `thickness` a `.shape.gii` rule requiring `hemisp
 `.dscalar.nii` rule that does not; with nothing distinguishing them, both scored zero and a GIFTI
 file was judged against whichever the walk reached first.
 
-So the extension check was added, mirroring the reference validator's `extensionMismatch`, and the
-best-rule pick is now ranked by *(does the file's extension fit, how many errors)* rather than by
-error count alone — a rule that does not permit the file's extension is not the rule the file was
-written against, so it loses to one that does even when it would have had less to say. Two schema
-spellings need honouring that a literal membership test misses: `.*` (`objects.extensions.Any`,
-"any extension is allowed"), and the trailing slash on a pseudo-file extension (`.ds/`,
-`.ome.zarr/`), which names a directory while the parsed extension of the path has none. Missing
-the second reported every CTF and OME-Zarr recording in `bids-examples` as a mismatch.
+So the crate now follows the reference validator's shape. Identification stays loose — a suffix
+rule is claimed by its suffix alone — and `hasMatch`'s two narrowing passes reduce what survives:
+first to the rules whose `datatypes` include the directory the file sits in, then to those whose
+entities and extension fit it. Both `extensionMismatch` and `datatypeMismatch` were added as
+checks, so the file is finally held to what the surviving rules actually say.
+
+**Each narrowing pass is discarded if it would eliminate everything**, and that guard is what makes
+the scheme safe rather than clever. The compiled schema renders an unspecialized parent rule with
+`datatypes: []` — matching nothing — beside the specializations carrying the real lists:
+`electrodes` has six rules, two empty parents plus `[eeg, ieeg]`, `[meg]` and `[emg]`. Without the
+guard a file whose datatype matches no rule loses every candidate; with it, narrowing that says
+nothing is simply not applied. The same guard is what lets `bep011.json` stay a verbatim mirror:
+BEP-011's rules inherit an entity list without `space`, `density` or `description`, so a real
+`_space-fsLR_den-32k_thickness.dscalar.nii` fits no rule on entities, that pass empties, and the
+file is judged on the rest rather than rejected over a gap in a draft.
+
+Two schema spellings need honouring that a literal membership test misses: `.*`
+(`objects.extensions.Any`, "any extension is allowed"), and the trailing slash on a pseudo-file
+extension (`.ds/`, `.ome.zarr/`), which names a directory while the parsed extension of the path
+has none. Missing the second reported every CTF and OME-Zarr recording in `bids-examples` as a
+mismatch.
+
+**One deliberate divergence remains, at the end.** Upstream checks every rule that survives
+narrowing and reports all of them, on the stated principle that a wrongly-named file deserves as
+much feedback as possible. This crate reports the quietest survivor instead. That principle is
+right for a wrong name and wrong for a right one: `sub-01_acq-crosstalk_meg.fif` is claimed by both
+`raw.meg.meg` and `raw.meg.crosstalk`, entities-and-extensions cannot separate them, and the first
+requires a `task` a crosstalk file has no business carrying — so reporting both fails `ds000248`, a
+canonical dataset. The integration tests here hold every vendored example to zero errors, a
+stronger claim than upstream makes and worth more than matching its noise.
 
 `bep011.json` is the first overlay to declare `rules.files`, which has a consequence worth stating:
 `bids-validator-rs` reads `bids_schema::SCHEMA_JSON` directly and shares no schema loading with the
@@ -486,7 +508,12 @@ need it is rejected above.
 - `feat` and `freesurfer` are the only layouts. fMRIPrep, MRIQC and QSIPrep have read-side
   artifacts but no write direction, so code producing files in their conventions still hardcodes
   paths.
-- `datatypeMismatch` has no counterpart here. The extension check below has one now; the
-  datatype one does not, so a rule naming `datatypes: [anat]` still applies to a file under
-  `func/`. Same shape of fix, and the same need to measure it against the corpus first.
+- **`invalidLocation` is the fourth `ruleCheck` and has no counterpart here**, so nothing asserts
+  that a file's `sub-`/`ses-` entities agree with the directories it sits in. Same shape as the two
+  that were added, and wants its own corpus measurement.
+- **Reporting only the quietest surviving rule hides detail in the wrong-name case.** It is the
+  right trade for the corpus, but a file that misses several rules by a little reports as missing
+  one by a little. If `MISSING_REQUIRED_ENTITY` and `ENTITY_NOT_IN_RULE` are ever split out as
+  distinct codes the way upstream has them, this is worth revisiting — reporting every survivor
+  *except* where one fits cleanly would get both.
 - A layout used to *produce* a dataset is not recorded as provenance anywhere.

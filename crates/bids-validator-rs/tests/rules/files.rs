@@ -162,9 +162,10 @@ async fn a_surface_map_missing_its_hemisphere_is_reported() {
     assert_eq!(reported, ["/sub-01/anat/sub-01_thickness.shape.gii"]);
 }
 
-/// The other side, and the reason the extension check has to participate in the pick rather than
-/// simply veto: the CIFTI form of the same measure carries no hemisphere, legitimately. If the
-/// GIFTI rule won here the file would be told to add an entity BIDS does not want on it.
+/// The other side: the CIFTI form of the same measure carries no hemisphere, legitimately. Note
+/// what this exercises — BEP-011's rules declare no `space`, so this filename fits *no* rule on
+/// entities, the second narrowing pass empties, and the guard restores the full set rather than
+/// leaving the file unjudged. It then has to come out clean anyway.
 #[tokio::test]
 async fn the_cifti_form_of_the_same_measure_needs_no_hemisphere() {
     let tmp = tempdir();
@@ -228,6 +229,80 @@ async fn a_pseudo_file_directory_is_not_an_extension_mismatch() {
         .issues
         .iter()
         .filter(|i| i.code == "EXTENSION_MISMATCH")
+        .map(|i| i.location.as_str())
+        .collect();
+
+    assert!(reported.is_empty(), "reported: {reported:?}");
+}
+
+/// The third of the reference validator's four `ruleChecks`, and the last one this crate was
+/// missing. A rule's `datatypes` array was consulted only when identifying a *stem* rule; a suffix
+/// rule applied wherever its suffix appeared, so a BOLD run filed under `anat/` was accepted.
+#[tokio::test]
+async fn a_file_in_the_wrong_datatype_directory_is_reported() {
+    let tmp = tempdir();
+    fs::write(
+        tmp.join("dataset_description.json"),
+        r#"{"Name": "d", "BIDSVersion": "1.11.1"}"#,
+    )
+    .unwrap();
+    let anat = tmp.join("sub-01/anat");
+    fs::create_dir_all(&anat).unwrap();
+    fs::write(anat.join("sub-01_task-rest_bold.nii.gz"), [0u8; 8]).unwrap();
+
+    let issues = bids_validator_rs::validator::validate(
+        &tmp,
+        &bids_validator_rs::schema::BidsSchema::bundled().unwrap(),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let reported: Vec<&str> = issues
+        .issues
+        .iter()
+        .filter(|i| i.code == "DATATYPE_MISMATCH")
+        .map(|i| i.location.as_str())
+        .collect();
+
+    assert_eq!(reported, ["/sub-01/anat/sub-01_task-rest_bold.nii.gz"]);
+}
+
+/// Why the datatype narrowing pass runs first, and why it is discarded when it empties.
+///
+/// Six rules carry the `electrodes` suffix. Two are unspecialized parents rendered with
+/// `datatypes: []` — matching nothing — and the specializations declare `[eeg, ieeg]`, `[meg]` and
+/// `[emg]`. Narrowing by datatype leaves only the `[eeg, ieeg]` rule, so the empty parents never
+/// reach the checks; without that pass they would put `DATATYPE_MISMATCH` on every electrodes file
+/// in the corpus.
+#[tokio::test]
+async fn an_unspecialized_parent_rule_loses_to_the_one_for_this_datatype() {
+    let tmp = tempdir();
+    fs::write(
+        tmp.join("dataset_description.json"),
+        r#"{"Name": "d", "BIDSVersion": "1.11.1"}"#,
+    )
+    .unwrap();
+    let ieeg = tmp.join("sub-01/ieeg");
+    fs::create_dir_all(&ieeg).unwrap();
+    fs::write(
+        ieeg.join("sub-01_electrodes.tsv"),
+        "name\tx\ty\tz\nA1\t1\t2\t3\n",
+    )
+    .unwrap();
+
+    let issues = bids_validator_rs::validator::validate(
+        &tmp,
+        &bids_validator_rs::schema::BidsSchema::bundled().unwrap(),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let reported: Vec<&str> = issues
+        .issues
+        .iter()
+        .filter(|i| i.code == "DATATYPE_MISMATCH")
         .map(|i| i.location.as_str())
         .collect();
 
