@@ -82,7 +82,7 @@ def test_adapter_values_are_typed(aparc) -> None:
 
 
 def test_adapter_concept_filter(fs_lake) -> None:
-    rows = list(fs_lake.get(table="freesurfer_aparc", hemi="lh", parc="aparc"))
+    rows = list(fs_lake.get(table="freesurfer_aparc", hemi="L", parc="aparc"))
 
     assert len(rows) == 2
 
