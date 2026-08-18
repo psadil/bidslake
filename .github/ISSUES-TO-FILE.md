@@ -24,28 +24,27 @@ OS/Python/Rust matrix; a scheduled run of the `#[ignore]`d whole-corpus tests
 nothing runs today; benchmark-regression tracking over `cargo bench` in `bidslake` and
 `bids-validator-rs`; and coverage reporting.
 
-## Benchmark a tree wide enough for the tabular path to show
+## Expose `timing::snapshot()` so counter assertions run under `cargo test`
 
-`crates/bidslake/benches/ingest.rs` ingests `ds001`, `ds002`, `ds114` and `ds108`. None of the four
-ships a `scans.tsv` or a `sessions.tsv`, and none has a header wider than ~11 columns, so a regression
-in the batched tabular path costs nothing any benchmark in the repo can see. Cheapest first steps: add
-the vendored `third_party/bids-examples/7t_trt` and `synthetic`, the only corpus trees carrying
-`scans.tsv`, `sessions.tsv` and a ~95-column header; drive `tools/gen-synthetic-bids.py` — a scale
-generator nothing outside its own docstring calls — into a wide-confounds case; and expose a
-`timing::snapshot()` from `crates/bidslake/src/timing.rs` so counter assertions (one tabular group per
-batched read, one undeclared statement per distinct name) fail under `cargo test` rather than needing
-criterion baselines.
+What is left of "Benchmark a tree wide enough for the tabular path to show" now that
+`crates/bidslake-synth` exists. The corpus half landed — `benches/ingest.rs` ingests `7t_trt` and
+`synthetic`, the only vendored trees with a `scans.tsv` or a `sessions.tsv` — and the wide-header
+half is `bidslake-synth`'s `ingest_wide_tabular`, at the measured 1,841 × 450 confounds shape.
+What remains: `crates/bidslake/src/timing.rs` exposes `count`/`count_max`/`report` but no
+snapshot, so the counter assertions worth having (one tabular group per batched read, one
+undeclared statement per distinct name) still need criterion baselines rather than failing under
+`cargo test`. Adding one raises its own question about the thread-locals it would read.
 
-## Port synthetic derivative-tree generation into `tools/`
+## Index fMRIPrep's surface morphometry maps
 
-`tools/gen-synthetic-bids.py` generates raw BIDS at a chosen scale, which is what the performance work
-on the walk and the sidecar paths needed. The equivalent generators for fMRIPrep and FreeSurfer
-*derivative* trees — the shapes that exercise overlays, term maps and the adapter read paths, and that
-`third_party/bids-examples` reaches only at toy size — exist only in a consumer repo's `spikes/`
-directory, which no reader of this repo can open. Port them beside `gen-synthetic-bids.py` with the
-same scale parameters and the same empty-file trick for imaging data, then point the fixtures at them:
-`crates/bidslake/tests/test_adapter_freesurfer.rs` and `crates/bidslake/tests/test_overlay.rs` build
-their trees by hand, and the wide-confounds benchmark case above needs one.
+`crates/bids-schema/data/overlays/fmriprep.json` used to declare a `morph` suffix covering the
+family; it was dropped because fMRIPrep writes no such file. Its surface maps are named by
+measure — `_hemi-L_thickness.shape.gii`, `_hemi-L_curv.shape.gii`, `_hemi-L_sulc.shape.gii` — and
+none of `thickness`/`curv`/`sulc` is a declared suffix, nor is `.shape.gii` a declared extension,
+so every one of them still indexes as nothing. Declaring the measure suffixes and the extension is
+what would actually reach them, and it is a larger question than a rename: the same three names
+are what FreeSurfer's `surf/?h.thickness` carries positionally, so the two producers should
+probably agree on one vocabulary rather than each getting its own.
 
 ## Document the public surface of `bids-validator-rs`
 

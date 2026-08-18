@@ -257,9 +257,12 @@ class Layout:
 
 
 def layout(name: str) -> Layout:
-    """Load a bundled layout by name (`feat`).
+    """Load a bundled layout by name (`feat`, `freesurfer`).
 
     Loading runs the round-trip check described in the module docstring, so a layout
     that has drifted from its term map raises here rather than at write time.
+
+    An unknown name raises, and the message lists what is bundled — the two names above are
+    every producer that ships a term map, which is the precondition a layout has.
     """
     return Layout(name=name, _inner=_bidslake.PyLayout(name))

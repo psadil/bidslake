@@ -24,7 +24,11 @@ impl ErrorValidator for NotIncluded {
     }
 
     async fn validate_file(&self, context: &BidsContext, _dataset: &DatasetContext) -> bool {
-        context.filename_rules.is_empty()
+        // A configured adapter's term map claiming the path makes it *expected* — a standardized
+        // non-BIDS layout, not an unknown file (ADR 0002 §7). `check_file_rules` already decided
+        // that; without honouring its answer here the suppression is undone, because this rule
+        // re-derives `NotIncluded` from the same emptiness that made it look up a term map.
+        context.filename_rules.is_empty() && !context.term_map_recognized
     }
 }
 

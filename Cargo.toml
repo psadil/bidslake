@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/bids-core", "crates/bids-schema", "crates/bidslake", "crates/bids-validator-rs", "crates/hed-validator-rs", "crates/bidslake-py"]
+members = ["crates/bids-core", "crates/bids-schema", "crates/bidslake", "crates/bidslake-synth", "crates/bids-validator-rs", "crates/hed-validator-rs", "crates/bidslake-py"]
 # The pyo3 extension crate builds via maturin, not plain `cargo build`/`test`.
 # Excluding it from default-members keeps the existing `cargo test` workflow
 # (and CI) untouched; it is still a workspace member so path deps and the lock
@@ -11,7 +11,7 @@ members = ["crates/bids-core", "crates/bids-schema", "crates/bidslake", "crates/
 # `-undefined dynamic_lookup`, and without it the link picks the macOS system
 # framework and the harness dies at startup with a dyld rpath error. It carries
 # no Rust tests of its own — its suite is `crates/bidslake-py`'s pytest.
-default-members = ["crates/bids-core", "crates/bids-schema", "crates/bidslake", "crates/bids-validator-rs", "crates/hed-validator-rs"]
+default-members = ["crates/bids-core", "crates/bids-schema", "crates/bidslake", "crates/bidslake-synth", "crates/bids-validator-rs", "crates/hed-validator-rs"]
 resolver = "3"
 
 [workspace.package]

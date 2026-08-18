@@ -108,6 +108,19 @@ pub struct BidsContext {
     pub ome: Option<Ome>,
     /// Schema rules that matched this file during identification.
     pub filename_rules: Vec<String>,
+    /// Whether a configured layout-adapter term map claims this path, when no BIDS file rule
+    /// does (ADR 0002 §7).
+    ///
+    /// A separate field rather than a synthetic entry in [`filename_rules`](Self::filename_rules),
+    /// because those are schema rule paths that later code resolves and reads `entities` off —
+    /// a fake one would be resolved to null and quietly skipped, which is the kind of thing that
+    /// works until it does not. It exists because **two** places decide `NotIncluded`:
+    /// `rules::files::check_file_rules` returns early when a term map recognizes the file, and
+    /// `rules::errors::system::NotIncluded` re-derives the same conclusion from
+    /// `filename_rules.is_empty()`. Without this the second one re-raises everything the first
+    /// suppressed, so a `--adapter freesurfer` run reported every file of a `recon-all` tree as
+    /// not part of BIDS.
+    pub term_map_recognized: bool,
     /// Whether this file was identified as a directory pseudofile.
     pub directory: bool,
     /// Datatypes present in the entire dataset.
@@ -430,6 +443,7 @@ impl BidsContext {
             tiff,
             ome,
             filename_rules: Vec::new(),
+            term_map_recognized: false,
             directory: false,
             dataset_datatypes: dataset.datatypes.clone(),
         }

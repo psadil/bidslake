@@ -984,6 +984,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "bidslake-synth"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bids-core",
+ "bids-schema",
+ "bids-validator-rs",
+ "bidslake",
+ "clap",
+ "criterion",
+ "duckdb",
+ "flate2",
+ "rstest",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

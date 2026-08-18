@@ -3,7 +3,10 @@
 //! See `bids_core::strategy` for the two rules these follow (no `prop_filter`; the strategy
 //! renders rather than re-derives).
 
+use std::collections::HashSet;
+
 use proptest::prelude::*;
+use proptest::sample::SizeRange;
 use serde_json::{Map, Value};
 
 /// An arbitrary [`Value`], depth ≤ 3.
@@ -40,6 +43,88 @@ pub fn json_value_with(depth: u32, desired_size: u32, branch: u32) -> impl Strat
 pub fn json_object() -> impl Strategy<Value = Value> {
     prop::collection::btree_map("[a-z]{1,4}", json_value(), 0..4)
         .prop_map(|entries| Value::Object(entries.into_iter().collect()))
+}
+
+/// Every renderable entity of the bundled schema, as `(short key, format, enum)`.
+///
+/// Drawn from `objects.entities` rather than hardcoded, so an entity the standard adds is
+/// generated the day it lands. Keys claimed by two objects are dropped: the bundled schema alone
+/// has no such collision, but this is what keeps the generator honest if one ever appears there,
+/// since [`crate::naming::NameIndex`] refuses to render one and the round-trip law is about names
+/// that *can* be rendered.
+fn renderable_entities() -> Vec<(String, Option<String>, Option<Vec<String>>)> {
+    let schema: Value = serde_json::from_str(crate::SCHEMA_JSON).expect("bundled schema parses");
+    let Some(entities) = schema
+        .get("objects")
+        .and_then(|o| o.get("entities"))
+        .and_then(|e| e.as_object())
+    else {
+        return Vec::new();
+    };
+
+    let mut by_name: Vec<(String, Option<String>, Option<Vec<String>>)> = Vec::new();
+    let mut collided: HashSet<String> = HashSet::new();
+    for def in entities.values() {
+        let Some(name) = def.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if by_name.iter().any(|(n, _, _)| n == name) {
+            collided.insert(name.to_string());
+            continue;
+        }
+        by_name.push((
+            name.to_string(),
+            def.get("format")
+                .and_then(|f| f.as_str())
+                .map(str::to_string),
+            def.get("enum").and_then(|e| e.as_array()).map(|vs| {
+                vs.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(str::to_string)
+                    .collect()
+            }),
+        ));
+    }
+    by_name.retain(|(name, _, _)| !collided.contains(name));
+    by_name
+}
+
+/// A value satisfying one entity's declared constraints.
+fn entity_value(format: Option<String>, enum_values: Option<Vec<String>>) -> BoxedStrategy<String> {
+    match (enum_values, format.as_deref()) {
+        (Some(allowed), _) => prop::sample::select(allowed).boxed(),
+        (None, Some("index")) => "[0-9]{1,4}".boxed(),
+        (None, _) => "[0-9A-Za-z]{1,8}".boxed(),
+    }
+}
+
+/// `count` `(short key, value)` pairs drawn from the schema's own entities, with distinct keys
+/// and each value satisfying that entity's declared `format` and `enum`.
+///
+/// The contrast with [`bids_core::strategy::entity_pairs`] is the point of having both: that one
+/// generates arbitrary keys because `read_entities` is schema-agnostic and must treat an unheard-of
+/// key exactly like `sub`. [`crate::naming`] is the opposite — it renders only what the schema
+/// declares — so its law needs keys the schema declares, and values it admits.
+///
+/// Deduplication is an ordinary `filter` inside `prop_map`, not a `prop_filter`, so no case is
+/// spent on a rejection.
+pub fn schema_entity_pairs(
+    count: impl Into<SizeRange>,
+) -> impl Strategy<Value = Vec<(String, String)>> {
+    let entities = renderable_entities();
+    prop::collection::vec(
+        prop::sample::select(entities).prop_flat_map(|(name, format, enum_values)| {
+            (Just(name), entity_value(format, enum_values))
+        }),
+        count,
+    )
+    .prop_map(|pairs| {
+        let mut seen = HashSet::new();
+        pairs
+            .into_iter()
+            .filter(|(key, _)| seen.insert(key.clone()))
+            .collect()
+    })
 }
 
 /// Every function name [`crate::expression::evaluate`] dispatches, plus one it does not.

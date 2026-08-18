@@ -242,9 +242,13 @@ pub struct Example {
     /// fail to load.
     #[serde(rename = "Root")]
     pub root: String,
-    /// Values for the `{name}` placeholders this layout's roles use, for validation only — the
-    /// caller supplies their own at [`Layout::render`], and nothing here reaches a rendered
-    /// path at run time.
+    /// Values for the `{name}` placeholders this layout's roles use.
+    ///
+    /// Their job is validation: a pipeline writing a real tree supplies its own at
+    /// [`Layout::render`], and nothing here reaches *that* path. They are readable via
+    /// [`Layout::examples`] all the same, because a caller materializing the tree a layout
+    /// merely *describes* — a synthetic dataset, a probe for a bundle under development — needs
+    /// a binding set the round trip has already vouched for.
     ///
     /// A role whose placeholders are not all bound here is **skipped by this example**, and
     /// skipped silently: a placeholder role is checked only if some example binds it, and
@@ -285,6 +289,21 @@ impl Layout {
     /// The named term map this layout is checked against.
     pub fn term_map_name(&self) -> &str {
         &self.file.term_map
+    }
+
+    /// The document's `Examples`, in document order.
+    ///
+    /// Exposed because they are the only *worked* instance of this layout anybody wrote down: a
+    /// root that the term map can parse, and a binding for every placeholder the roles use.
+    /// A caller that wants to materialize the tree a layout describes — a synthetic dataset, a
+    /// probe for an adapter bundle under development — would otherwise have to invent both, and
+    /// an invented root that the term map cannot parse produces a tree where nothing classifies,
+    /// which looks exactly like a broken term map.
+    ///
+    /// These are still validation data first: the round trip every load runs is what makes them
+    /// trustworthy, and a role no example binds is checked by nothing.
+    pub fn examples(&self) -> &[Example] {
+        &self.file.examples
     }
 
     /// The declaration for one role.
@@ -426,12 +445,13 @@ pub fn validate_layout(document: &Value) -> Vec<String> {
 }
 
 /// Layouts bidslake ships, addressable by name.
-pub const BUNDLED_LAYOUT_NAMES: &[&str] = &["feat"];
+pub const BUNDLED_LAYOUT_NAMES: &[&str] = &["feat", "freesurfer"];
 
 /// The raw JSON source of a bundled layout, or `None` if `name` is not bundled.
 pub fn bundled_layout_source(name: &str) -> Option<&'static str> {
     Some(match name {
         "feat" => include_str!("../data/layouts/feat.json"),
+        "freesurfer" => include_str!("../data/layouts/freesurfer.json"),
         _ => return None,
     })
 }

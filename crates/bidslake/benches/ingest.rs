@@ -46,7 +46,13 @@ use futures::stream::StreamExt as _;
 /// insert-heavy (≈238 scans, ≈200 `_events.tsv`), so it guards the bulk-Appender
 /// path for `scans`/`sidecars` and the per-file tabular `read_csv` cost against
 /// regressions.
-const DATASETS: &[&str] = &["ds001", "ds002", "ds114", "ds108"];
+///
+/// `7t_trt` and `synthetic` are here for what the first four cannot see: they are the only
+/// vendored trees carrying a `scans.tsv` or a `sessions.tsv`, so without them a regression in
+/// those two tabular paths costs nothing any benchmark could measure. The wide-*header* half of
+/// that gap is `bidslake-synth`'s `ingest_wide_tabular`, which needs a generated tree — nothing
+/// in the corpus has more than about eleven columns.
+const DATASETS: &[&str] = &["ds001", "ds002", "ds114", "ds108", "7t_trt", "synthetic"];
 
 fn bids_example(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

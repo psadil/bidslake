@@ -172,6 +172,17 @@ pub async fn ingest_with_adapters_into(
     Ok(())
 }
 
+/// Write `content` to `root/rel`, creating the parent directories.
+///
+/// Panics rather than returning, because a fixture that cannot be written is a broken test
+/// rather than a failing one — the Arrange phase, where a failure should error.
+pub fn write(root: &Path, rel: &str, content: &[u8]) {
+    let path = root.join(rel);
+    std::fs::create_dir_all(path.parent().expect("a relative path has a parent"))
+        .unwrap_or_else(|e| panic!("mkdir for {}: {e}", path.display()));
+    std::fs::write(&path, content).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+}
+
 /// `COUNT(*)` for a table.
 pub fn count(db: &BidsDb, table: &str) -> Result<i64> {
     let sql = format!("SELECT COUNT(*) FROM {table}");

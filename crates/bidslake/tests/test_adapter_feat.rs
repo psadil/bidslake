@@ -12,16 +12,9 @@
 mod common;
 
 use bidslake::db::BidsDb;
-use common::{ingest_with_adapters, ingest_with_adapters_into};
+use common::{ingest_with_adapters, ingest_with_adapters_into, write};
 use rstest::rstest;
-use std::fs;
 use std::path::Path;
-
-fn write(root: &Path, rel: &str, content: &[u8]) {
-    let path = root.join(rel);
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(path, content).unwrap();
-}
 
 const UNIT: &str = "sub-01_ses-V1_task-rest_run-01_desc-preproc_bold";
 /// A second unit, sessionless and runless, to pin the optional groups in the templates.

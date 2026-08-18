@@ -408,7 +408,7 @@ struct PyLayout {
 
 #[pymethods]
 impl PyLayout {
-    /// Load a bundled layout by name (`feat`).
+    /// Load a bundled layout by name (`feat`, `freesurfer`).
     #[new]
     fn new(name: &str) -> PyResult<Self> {
         let layout = bids_schema::layout::bundled_layout(name).ok_or_else(|| {

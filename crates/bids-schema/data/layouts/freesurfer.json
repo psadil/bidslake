@@ -1,0 +1,158 @@
+{
+  "LayoutVersion": "0.1.0",
+  "TermMap": "freesurfer",
+  "Roles": {
+    "aseg_stats": {
+      "Template": "stats/aseg.stats",
+      "Concepts": { "datatype": "anat", "suffix": "segstats" },
+      "Entities": { "seg": "aseg" },
+      "Description": "Per-structure volumetric statistics for the subcortical segmentation. Read into `freesurfer_aseg`, plus the `# Measure` scalars into `freesurfer_measures`."
+    },
+    "wmparc_stats": {
+      "Template": "stats/wmparc.stats",
+      "Concepts": { "datatype": "anat", "suffix": "segstats" },
+      "Entities": { "seg": "wmparc" },
+      "Description": "The same table for the white-matter parcellation. Same suffix as `aseg_stats`, distinguished only by `seg`, which is why the term map declares that entity literally rather than capturing it."
+    },
+    "aparc_stats": {
+      "Template": "stats/{hemi}.aparc.stats",
+      "Concepts": { "datatype": "anat", "suffix": "parcstats" },
+      "Entities": { "parc": "aparc" },
+      "Description": "Per-region cortical morphometry for the Desikan-Killiany atlas, one file per hemisphere. `{hemi}` is a placeholder rather than a declared entity: it varies per render, and a role's entities describe what is true of every file in the slot. Note it binds the FreeSurfer *filename* token (`lh`/`rh`); the entity the term map projects from that path is the BIDS label (`L`/`R`), which is a different string on purpose."
+    },
+    "aparc_a2009s_stats": {
+      "Template": "stats/{hemi}.aparc.a2009s.stats",
+      "Concepts": { "datatype": "anat", "suffix": "parcstats" },
+      "Entities": { "parc": "aparc.a2009s" },
+      "Description": "The Destrieux atlas counterpart. The `parc` value carries a dot because it is a projection of the filename, not a BIDS label — nothing renders it into a name."
+    },
+    "aparc_dktatlas_stats": {
+      "Template": "stats/{hemi}.aparc.DKTatlas.stats",
+      "Concepts": { "datatype": "anat", "suffix": "parcstats" },
+      "Entities": { "parc": "aparc.DKTatlas" },
+      "Description": "The DKT atlas counterpart."
+    },
+    "curv_stats": {
+      "Template": "stats/{hemi}.curv.stats",
+      "Concepts": { "datatype": "anat" },
+      "Description": "A free-text curvature report, not a table at all. It reaches the catalog as a path because the term map's `?h.*.stats` mapping claims it, and it declares no suffix — which is exactly what keeps the `fs_stats` reader away from a file it could not parse."
+    },
+    "brainvol_stats": {
+      "Template": "stats/brainvol.stats",
+      "Concepts": { "datatype": "anat" },
+      "Description": "Whole-brain volumes, written as `# Measure` comment lines with no table beneath them. Claimed by the `stats/` catch-all, so no suffix and no reader."
+    },
+    "annot_ctab": {
+      "Template": "label/aparc.annot.ctab",
+      "Concepts": { "datatype": "anat", "suffix": "fslabels" },
+      "Description": "The colour lookup table for the parcellation: id, name, RGBA, headerless and column-aligned. Read by the `matrix` engine, whose column order comes from the overlay's `initial_columns`."
+    },
+    "aparc_annot": {
+      "Template": "label/{hemi}.aparc.annot",
+      "Concepts": { "datatype": "anat" },
+      "Description": "The binary per-vertex parcellation assignment. Cataloged, never read."
+    },
+    "cortex_label": {
+      "Template": "label/{hemi}.cortex.label",
+      "Concepts": { "datatype": "anat" },
+      "Description": "The cortex vertex list. An ASCII format the catalog still only records a path for, since nothing declares a table for it."
+    },
+    "aseg_mgz": {
+      "Template": "mri/aseg.mgz",
+      "Concepts": { "datatype": "anat", "suffix": "dseg" },
+      "Entities": { "seg": "aseg" },
+      "Description": "The subcortical segmentation volume. `dseg` is base BIDS vocabulary, which is why this role needs no overlay suffix even though its path carries no entities."
+    },
+    "wmparc_mgz": {
+      "Template": "mri/wmparc.mgz",
+      "Concepts": { "datatype": "anat", "suffix": "dseg" },
+      "Entities": { "seg": "wmparc" },
+      "Description": "The white-matter parcellation volume — what FEAT's `reg/wmparc.nii.gz` role is resampled from, one dataset over."
+    },
+    "aparc_aseg_mgz": {
+      "Template": "mri/aparc+aseg.mgz",
+      "Concepts": { "datatype": "anat", "suffix": "dseg" },
+      "Entities": { "seg": "aparc+aseg" },
+      "Description": "Cortical parcellation merged into the subcortical segmentation. The `+` in the filename is why the term map enumerates these five volumes by alternation instead of capturing a label."
+    },
+    "t1_mgz": {
+      "Template": "mri/T1.mgz",
+      "Concepts": { "datatype": "anat" },
+      "Description": "The conformed T1. Claimed by the `mri/*.mgz` catch-all with no `seg`, which is the distinction the enumerated alternation above exists to preserve: a projection that captured a label here would read this file as `seg-T1`."
+    },
+    "norm_mgz": {
+      "Template": "mri/norm.mgz",
+      "Concepts": { "datatype": "anat" },
+      "Description": "The intensity-normalized volume."
+    },
+    "brainmask_mgz": {
+      "Template": "mri/brainmask.mgz",
+      "Concepts": { "datatype": "anat" },
+      "Description": "The skull-stripped volume."
+    },
+    "talairach_xfm": {
+      "Template": "mri/transforms/talairach.xfm",
+      "Concepts": { "datatype": "anat" },
+      "Description": "The affine to Talairach space. Nested one level deeper than every other `mri/` role, and claimed by the `mri/.+` mapping rather than the `mri/*.mgz` one."
+    },
+    "white_surf": {
+      "Template": "surf/{hemi}.white",
+      "Concepts": { "datatype": "anat" },
+      "Description": "The white-matter surface. Extensionless, like most of `surf/` — the term map claims the whole subtree by position, since there is no name here to parse."
+    },
+    "pial_surf": {
+      "Template": "surf/{hemi}.pial",
+      "Concepts": { "datatype": "anat" },
+      "Description": "The pial surface. In a real `recon-all` tree this is a relative symlink to `?h.pial.T1`; the layout names the slot, not how the filesystem fills it."
+    },
+    "thickness_surf": {
+      "Template": "surf/{hemi}.thickness",
+      "Concepts": { "datatype": "anat" },
+      "Description": "Per-vertex cortical thickness."
+    },
+    "curv_surf": {
+      "Template": "surf/{hemi}.curv",
+      "Concepts": { "datatype": "anat" },
+      "Description": "Per-vertex curvature."
+    },
+    "sulc_surf": {
+      "Template": "surf/{hemi}.sulc",
+      "Concepts": { "datatype": "anat" },
+      "Description": "Per-vertex sulcal depth."
+    },
+    "area_surf": {
+      "Template": "surf/{hemi}.area",
+      "Concepts": { "datatype": "anat" },
+      "Description": "Per-vertex surface area."
+    },
+    "recon_log": {
+      "Template": "scripts/recon-all.log",
+      "Description": "The run log. Declares no concepts at all, and that is the point: the term map recognizes `scripts/` so the validator does not call it un-BIDS, while projecting nothing, so no ingestion rule claims it and it earns no scan row."
+    },
+    "recon_done": {
+      "Template": "scripts/recon-all.done",
+      "Description": "The completion marker. Recognized and unclaimed, as `recon_log` is."
+    },
+    "touch_marker": {
+      "Template": "touch/{step}.touch",
+      "Description": "One per completed `recon-all` step — around seventy in a finished tree. The ingestion fragment's first rule `ignore`s the whole directory, so these are the one part of the tree that is recognized, unclaimed, and deliberately not even recorded."
+    }
+  },
+  "Examples": [
+    {
+      "Root": "sub-01_ses-V1",
+      "Bindings": { "hemi": "lh", "step": "wmsegment" },
+      "x_note": "The session form. FreeSurfer flattens both entities into one directory name, which is the shape one PCRE mapping collapses."
+    },
+    {
+      "Root": "sub-02",
+      "Bindings": { "hemi": "rh", "step": "inflate2" },
+      "x_note": "The sessionless form, with the other hemisphere so both bindings of every `{hemi}` role are round-tripped — and so both halves of the term map's `hemi: L` / `hemi: R` split are exercised, since a capture group could not produce a label that is not in the path."
+    },
+    {
+      "Root": "bert",
+      "Bindings": { "hemi": "lh", "step": "cortex" },
+      "x_note": "A bare label with no `sub-` prefix — FreeSurfer's own convention, and the third form the subject template admits."
+    }
+  ]
+}

@@ -347,6 +347,43 @@ impl TermMap {
             metadata: mapping.spec.metadata.clone(),
         })
     }
+
+    /// Whether this term map recognizes `path` at *any* depth: the path itself, then each of its
+    /// `/`-suffixes in turn.
+    ///
+    /// Templates are anchored, so [`classify`](Self::classify) deliberately refuses a path with a
+    /// leading `derivatives/` or `sourcedata/` component — that anchoring is what stops a mapping
+    /// reading such a component as a subject label ([ADR 0002](
+    /// ../../../docs/adr/0002-adapters-and-layouts.md) §2). Recognition is the one place that is
+    /// relaxed (§7): a FreeSurfer tree nested at `derivatives/fmriprep/sourcedata/freesurfer/`
+    /// holds files that plainly *are* part of the producer's output, and reporting them as "not
+    /// part of BIDS" would be wrong even though indexing them needs its own dataset root.
+    ///
+    /// So this answers a strictly weaker question than `classify`, and the two are not
+    /// interchangeable: nothing here yields concepts, because which suffix matched is not a fact
+    /// about the file the catalog could store.
+    pub fn recognizes_under(&self, path: &str) -> bool {
+        let mut suffix = path.trim_start_matches('/');
+        loop {
+            if self.classify(suffix).is_some() {
+                return true;
+            }
+            match suffix.split_once('/') {
+                Some((_, rest)) => suffix = rest,
+                None => return false,
+            }
+        }
+    }
+}
+
+/// Whether **any** of `term_maps` recognizes `path`, in the sense of
+/// [`TermMap::recognizes_under`].
+///
+/// The plural form callers actually hold: an adapter set is a `Vec<TermMap>`, and asking each in
+/// turn is the whole of what both the validator's `NotIncluded` suppression and a generator's
+/// "did anything claim this?" check need.
+pub fn any_recognizes_under(term_maps: &[TermMap], path: &str) -> bool {
+    term_maps.iter().any(|tm| tm.recognizes_under(path))
 }
 
 /// The extension of the final path component, from its first `.` (BIDS filename semantics).
@@ -533,14 +570,39 @@ mod tests {
         );
     }
 
-    #[test]
-    fn aparc_captures_hemi_and_parc_variants() {
-        let f = fs()
-            .classify("sub-01_ses-1/stats/lh.aparc.a2009s.stats")
-            .expect("match");
-        assert_eq!(f.get("hemi"), Some("lh"));
-        assert_eq!(f.get("parc"), Some("aparc.a2009s"));
-        assert_eq!(f.suffix.as_deref(), Some("parcstats"));
+    /// `parc` is captured — its value *is* the filename token — while `hemi` is declared, because
+    /// FreeSurfer spells a hemisphere `lh`/`rh` and BIDS spells it `L`/`R`. A capture group can
+    /// only yield the text it matched, so the two hemispheres get a mapping each and the label is
+    /// stated rather than read off the path.
+    #[rstest]
+    #[case("sub-01_ses-1/stats/lh.aparc.a2009s.stats", "L")]
+    #[case("sub-01_ses-1/stats/rh.aparc.a2009s.stats", "R")]
+    fn aparc_declares_a_bids_hemisphere_and_captures_the_parcellation(
+        #[case] path: &str,
+        #[case] hemi: &str,
+    ) {
+        let f = fs().classify(path).expect("match");
+
+        assert_eq!(
+            (f.get("hemi"), f.get("parc"), f.suffix.as_deref()),
+            (Some(hemi), Some("aparc.a2009s"), Some("parcstats"))
+        );
+    }
+
+    /// The projected label is never the filename token, for any of the five hemisphere-keyed
+    /// mappings. `lh` in a `hemi` column would join with nothing a BIDS-named producer wrote.
+    #[rstest]
+    #[case("bert/stats/lh.curv.stats", "L")]
+    #[case("bert/label/rh.aparc.annot", "R")]
+    #[case("bert/label/lh.cortex.label", "L")]
+    #[case("bert/surf/rh.thickness", "R")]
+    fn a_hemisphere_projects_the_bids_label_not_the_freesurfer_token(
+        #[case] path: &str,
+        #[case] expected: &str,
+    ) {
+        let f = fs().classify(path).expect("match");
+
+        assert_eq!(f.get("hemi"), Some(expected), "{path}");
     }
 
     /// The volumetric segmentations are the ones downstream code actually reaches for
@@ -592,10 +654,48 @@ mod tests {
         );
     }
 
+    /// The three subject-dir forms the FreeSurfer templates admit, recognized at the depth
+    /// `classify` already handles.
+    #[rstest]
+    #[case::leading_slash("/sub-01/stats/aseg.stats")]
+    #[case::sessionless("sub-02/stats/lh.aparc.stats")]
+    #[case::bare_label("bert/surf/lh.thickness")]
+    fn recognition_covers_every_subject_dir_form(#[case] path: &str) {
+        assert!(fs().recognizes_under(path), "{path}");
+    }
+
+    /// The `/`-suffix walk, which is the whole reason recognition is not just `classify`:
+    /// anchoring makes `classify` refuse this path outright, and a nested `recon-all` tree is
+    /// still the producer's output (ADR 0002 §7).
+    #[test]
+    fn recognition_reaches_a_nested_derivative_path() {
+        let nested = "/derivatives/fmriprep/sourcedata/freesurfer/sub-01_ses-1/stats/aseg.stats";
+
+        let recognized = fs().recognizes_under(nested);
+
+        assert!(
+            recognized,
+            "classify alone gives {:?}",
+            fs().classify(nested)
+        );
+    }
+
+    /// Relaxing the anchor must not make recognition total: an ordinary BIDS file is *not* this
+    /// producer's, and suppressing `NotIncluded` for it would hide a real validator finding.
+    #[test]
+    fn recognition_does_not_claim_an_ordinary_bids_file() {
+        assert!(!fs().recognizes_under("/sub-01/func/sub-01_task-rest_bold.nii.gz"));
+    }
+
+    #[test]
+    fn no_term_map_recognizes_nothing() {
+        assert!(!any_recognizes_under(&[], "/sub-01/stats/aseg.stats"));
+    }
+
     /// A census over a real `recon-all` subject established that the specific mappings above
     /// reach about a third of the tree; the rest is whole subtrees, not edge cases. Anything
     /// this map leaves unclassified is invisible to concept queries *and* raises `NotIncluded`
-    /// in `bids-validator-rs` (`rules::files::term_map_recognizes`), so recognition — not
+    /// in `bids-validator-rs` (which asks [`any_recognizes_under`]), so recognition — not
     /// projection — is what a subtree catch-all is for. One path per subtree that was missed,
     /// so a narrowing shows up here rather than on a user's tree.
     #[rstest]
@@ -746,11 +846,11 @@ mod tests {
         assert_eq!(ctab.suffix.as_deref(), Some("fslabels"));
 
         // A hemisphere surface keeps `hemi` and its `anat` datatype rather than falling to
-        // the `surf/` catch-all.
+        // the `surf/` catch-all. The label is the BIDS one, not the `lh` in the path.
         let surf = tm.classify("bert/surf/lh.thickness").expect("surf");
         assert_eq!(
             (surf.get("hemi"), surf.datatype.as_deref()),
-            (Some("lh"), Some("anat"))
+            (Some("L"), Some("anat"))
         );
     }
 

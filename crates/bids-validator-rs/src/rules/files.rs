@@ -80,25 +80,6 @@ impl EntityRequirement {
     }
 }
 
-/// Whether any configured term map recognizes `path`. Tries the path and each of its
-/// `/`-suffixes, so a term map anchored at a subject directory still matches a nested
-/// derivative path (e.g. `derivatives/fs/sub-01/stats/aseg.stats`).
-fn term_map_recognizes(term_maps: &[bids_schema::term_map::TermMap], path: &str) -> bool {
-    if term_maps.is_empty() {
-        return false;
-    }
-    let mut suffix = path.trim_start_matches('/');
-    loop {
-        if term_maps.iter().any(|tm| tm.classify(suffix).is_some()) {
-            return true;
-        }
-        match suffix.split_once('/') {
-            Some((_, rest)) => suffix = rest,
-            None => return false,
-        }
-    }
-}
-
 pub fn check_file_rules(
     context: &mut BidsContext,
     ctx_value: &EvalContext,
@@ -157,7 +138,11 @@ pub fn check_file_rules(
         // Not matched by any BIDS rule. If a configured layout-adapter term map recognizes
         // it (a standardized non-BIDS layout, e.g. FreeSurfer `recon-all`), it is expected,
         // not an error — the same projection bidslake uses to ingest it.
-        if term_map_recognizes(term_maps, &context.path) {
+        if bids_schema::term_map::any_recognizes_under(term_maps, &context.path) {
+            // Recorded, not just returned on: `errors::system::NotIncluded` decides the same
+            // thing again from `filename_rules.is_empty()`, and would re-raise every issue this
+            // early return suppresses.
+            context.term_map_recognized = true;
             return;
         }
         // No rule matched — file is not recognized by the schema
@@ -369,44 +354,5 @@ fn check_rule_group<T: MatchableRule>(
         if rule.match_context(context) {
             matches.push(rule_path);
         }
-    }
-}
-
-#[cfg(test)]
-mod term_map_tests {
-    use super::term_map_recognizes;
-    use bids_schema::term_map::{TermMap, bundled_term_map};
-
-    fn fs() -> Vec<TermMap> {
-        vec![bundled_term_map("freesurfer").expect("bundled freesurfer term map")]
-    }
-
-    #[test]
-    fn recognizes_freesurfer_files() {
-        let tms = fs();
-        assert!(term_map_recognizes(&tms, "/sub-01/stats/aseg.stats"));
-        assert!(term_map_recognizes(&tms, "sub-02/stats/lh.aparc.stats"));
-        assert!(term_map_recognizes(&tms, "bert/surf/lh.thickness"));
-    }
-
-    #[test]
-    fn recognizes_nested_derivative_paths() {
-        // A term map anchored at a subject dir still matches a nested derivative path,
-        // via the `/`-suffix walk.
-        let tms = fs();
-        assert!(term_map_recognizes(
-            &tms,
-            "/derivatives/fmriprep/sourcedata/freesurfer/sub-01_ses-1/stats/aseg.stats"
-        ));
-    }
-
-    #[test]
-    fn does_not_recognize_bids_or_unmatched() {
-        let tms = fs();
-        assert!(!term_map_recognizes(
-            &tms,
-            "/sub-01/func/sub-01_task-rest_bold.nii.gz"
-        ));
-        assert!(!term_map_recognizes(&[], "/sub-01/stats/aseg.stats"));
     }
 }

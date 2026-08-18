@@ -38,11 +38,6 @@
         "value": "boldref",
         "display_name": "BOLD reference image",
         "description": "A single 3D volume used as the reference for a BOLD run.\n"
-      },
-      "morph": {
-        "value": "morph",
-        "display_name": "Morphometric map",
-        "description": "A surface morphometry map (e.g. thickness, curvature, sulcal depth).\n"
       }
     },
     "columns": {

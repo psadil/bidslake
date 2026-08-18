@@ -19,6 +19,7 @@ resulting paths to whatever tool does the actual work.
 | [`bidslake-py`](crates/bidslake-py) | The Python query API — typed columns, SQLAlchemy composition, Polars results. |
 | [`bids-core`](crates/bids-core) | Schema-agnostic BIDS primitives: the file tree, entities, datatypes, inheritance. |
 | [`bids-schema`](crates/bids-schema) | BIDS semantics: the vendored schema and its expression language, plus overlays, term maps and layouts. |
+| [`bidslake-synth`](crates/bidslake-synth) | Synthetic BIDS and derivative trees, built from the schemas — for benchmarks, and for authoring an adapter bundle. |
 | [`bids-validator-rs`](crates/bids-validator-rs) | A pure-Rust BIDS validator, tracked for parity against the reference implementation. |
 | [`hed-validator-rs`](crates/hed-validator-rs) | A HED validator, passing the upstream conformance suite. |
 

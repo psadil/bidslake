@@ -7,9 +7,8 @@
 
 mod common;
 
-use common::{count, ingest, ingest_with_adapters};
+use common::{count, ingest, ingest_with_adapters, write};
 use rstest::rstest;
-use std::fs;
 use std::path::Path;
 
 const ASEG_STATS: &str = "\
@@ -33,12 +32,6 @@ const APARC_STATS: &str = "\
 bankssts         1000  700  2000  2.5  0.5  0.100  0.020  15  0.9
 superiorfrontal  5000 3500 11000  2.8  0.6  0.090  0.020  30  2.5
 ";
-
-fn write(root: &Path, rel: &str, content: &[u8]) {
-    let path = root.join(rel);
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(path, content).unwrap();
-}
 
 /// A synthetic FreeSurfer SUBJECTS_DIR covering all three subject-dir forms.
 fn write_fs_tree(root: &Path) {
@@ -143,7 +136,7 @@ async fn aparc_and_measures() -> anyhow::Result<()> {
     assert_eq!(count(&db, "freesurfer_aparc")?, 4, "lh+rh × 2 regions");
     let (num_vert, thick, parc): (i64, f64, String) = db.conn.query_row(
         "SELECT NumVert, ThickAvg, parc FROM freesurfer_aparc \
-         WHERE hemi = 'lh' AND StructName = 'bankssts'",
+         WHERE hemi = 'L' AND StructName = 'bankssts'",
         [],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
@@ -158,6 +151,28 @@ async fn aparc_and_measures() -> anyhow::Result<()> {
         |r| r.get(0),
     )?;
     assert!((etiv - 1_500_000.0).abs() < 1e-3);
+    Ok(())
+}
+
+/// The hemisphere reaches the catalog as a **BIDS** label, not as FreeSurfer's filename token.
+///
+/// `lh`/`rh` in a `hemi` column would join with nothing any BIDS-named producer wrote, so the
+/// term map declares `hemi: L` / `hemi: R` per mapping rather than capturing the path. Asserting
+/// the whole distinct set, rather than one value, is what catches the plausible half-failure:
+/// both mappings projecting the same label.
+#[tokio::test]
+async fn a_hemisphere_projects_the_bids_label() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_fs_tree(dir.path());
+    let db = ingest_with_adapters(dir.path(), &["freesurfer"]).await?;
+
+    let labels: String = db.conn.query_row(
+        "SELECT string_agg(DISTINCT hemi, ',' ORDER BY hemi) FROM freesurfer_aparc",
+        [],
+        |r| r.get(0),
+    )?;
+
+    assert_eq!(labels, "L,R");
     Ok(())
 }
 

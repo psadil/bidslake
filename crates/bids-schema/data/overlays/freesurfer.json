@@ -1,13 +1,6 @@
 {
   "objects": {
     "entities": {
-      "hemi": {
-        "name": "hemi",
-        "display_name": "Hemi",
-        "description": "Cortical hemisphere (`lh`/`rh`).",
-        "type": "string",
-        "format": "label"
-      },
       "seg": {
         "name": "seg",
         "display_name": "Seg",

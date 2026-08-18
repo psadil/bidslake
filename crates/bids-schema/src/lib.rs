@@ -4,14 +4,16 @@
 //! This crate is the one place that owns the vendored BIDS schema and how to *evaluate* it.
 //! It also owns the artifacts that extend BIDS without forking it: [`overlay`]
 //! (vocabulary), [`term_map`] (path → concepts, BEP-043) and [`layout`] (concepts →
-//! path, the write direction), plus the schema-parameterized [`associations`]
-//! resolver and the shared [`context`] file-context builder.
+//! path, the write direction, for a tree that is not BIDS), plus [`naming`] — the write
+//! direction for a tree that *is* — and the schema-parameterized [`associations`] resolver
+//! and the shared [`context`] file-context builder.
 
 pub mod associations;
 pub mod context;
 pub mod datatypes;
 pub mod expression;
 pub mod layout;
+pub mod naming;
 pub mod overlay;
 pub mod term_map;
 

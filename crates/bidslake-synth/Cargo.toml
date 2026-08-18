@@ -1,0 +1,37 @@
+[package]
+name = "bidslake-synth"
+version.workspace = true
+edition.workspace = true
+description = "Schema-driven synthetic BIDS and derivative trees, for benchmarking and for authoring adapter bundles"
+
+[[bin]]
+name = "bidslake-synth"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+serde_json = { workspace = true }
+# For the minimal NIfTI volumes: an empty `.nii.gz` is four validator errors, and the bar this
+# crate sets itself is that a generated raw tree validates. Same version the validator reads with.
+flate2 = "1.1.9"
+bids-core = { path = "../bids-core" }
+bids-schema = { path = "../bids-schema" }
+bidslake = { path = "../bidslake", default-features = false }
+
+[dev-dependencies]
+rstest = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true }
+criterion = { workspace = true }
+duckdb = { workspace = true }
+# The acceptance bar: a generated raw tree must validate. Only the tests need it, so the
+# generator itself never links the validator.
+bids-validator-rs = { path = "../bids-validator-rs" }
+
+[[bench]]
+name = "ingest_synthetic"
+harness = false
+
+[lints]
+workspace = true
