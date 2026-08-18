@@ -14,16 +14,6 @@ signature true. When the PyO3 PyCapsule stream bridge is available in
 `get()` holds one batch at a time. Cover it with a test that iterates a partial result and asserts the
 frame was never built.
 
-## Widen CI past a single Linux runner
-
-`.github/workflows/ci.yml` runs four jobs — rust (fmt, clippy, test), python (pytest, ty), docs
-(rustdoc, `cargo test --doc`, mdbook, link check) and the codegen-drift guard — all on one
-`ubuntu-latest` runner at one Python and one Rust version. Four additions, roughly in value order: an
-OS/Python/Rust matrix; a scheduled run of the `#[ignore]`d whole-corpus tests
-(`crates/bidslake/tests/smoke_bids_examples.rs`, `crates/bidslake/tests/tabular_coverage.rs`), which
-nothing runs today; benchmark-regression tracking over `cargo bench` in `bidslake` and
-`bids-validator-rs`; and coverage reporting.
-
 ## Expose `timing::snapshot()` so counter assertions run under `cargo test`
 
 What is left of "Benchmark a tree wide enough for the tabular path to show" now that
@@ -45,47 +35,6 @@ so every one of them still indexes as nothing. Declaring the measure suffixes an
 what would actually reach them, and it is a larger question than a rename: the same three names
 are what FreeSurfer's `surf/?h.thickness` carries positionally, so the two producers should
 probably agree on one vocabulary rather than each getting its own.
-
-## Document the public surface of `bids-validator-rs`
-
-`crates/bids-validator-rs/src/lib.rs` opens with `#![allow(missing_docs)]` over 287 undocumented public
-items. `missing_docs` is `warn` workspace-wide in the root `Cargo.toml` and CI runs clippy with
-`-D warnings`, so that one attribute is the whole of what keeps the crate green. Document the items and
-delete the attribute; the workspace lint comment names removing it as the entirety of this task.
-
-## Document the public surface of `hed-validator-rs`
-
-The same task for `crates/hed-validator-rs/src/lib.rs`, whose `#![allow(missing_docs)]` covers 176
-undocumented public items. Separate from the `bids-validator-rs` one: different crate, different
-vocabulary, and either can land alone.
-
-## Extend the bundled overlays to what they still skip
-
-The five overlays under `crates/bids-schema/data/overlays/` cover the common outputs; several known
-files still route nowhere. On `third_party/bids-examples/ds000001-fmriprep`,
-`*_desc-MELODIC_mixing.tsv` and `*_AROMAnoiseICs.csv` index as `skipped`. MRIQC's group TSVs are
-undeclared, and they are the only route to *dataset-level* IQM summaries — the per-image IQMs already
-populate from `sub-…_T1w.json`/`_bold.json`, 475 records on `ds001761-mriqc`. QSIPrep has further QC
-files. Column *values* are only lightly exercised because the bids-examples confounds files are empty:
-check the declared names against a dataset carrying real confound data when one is available, which
-would also let the corpus carry the row-alignment assertion that
-`crates/bidslake/tests/test_overlay.rs::adapter_keys_confounds_rows_to_every_image_of_the_run` makes
-against a synthetic fixture.
-
-## Add `emit-types --from-db`
-
-`python -m bidslake.stubgen` (`crates/bidslake-py/python/bidslake/stubgen.py`) regenerates the typed
-column surface from a catalog's stored `effective_schema` and is the recommended path. For cargo-only
-workflows, add a `--from-db <db>` mode to `crates/bidslake-py/src/bin/emit_types.rs` that reads the same
-stamped schema out of `bidslake_schema` rather than the vendored one.
-
-## Keep the `bidslake_*` meta tables out of the generated typed surface
-
-`bidslake_meta` and `bidslake_schema` are internal provenance tables, and both appear in the generated
-`COLUMNS` map and `C` class in `crates/bidslake-py/python/bidslake/schema/_generated.py`. Filter them
-in the emitter — `crates/bidslake-py/src/bin/emit_types.rs`, and `stubgen.py` for the `--from-db` path
-— so the typed surface offers only tables a query means. The regenerated module ships in the same
-commit; CI's codegen-drift job compares the two.
 
 ## One name for a motion trace, whatever produced it
 
@@ -119,12 +68,3 @@ validated against `crates/bids-schema/data/layout-metaschema.json`; the `Example
 direction against the read side at load time, and the round-trip check does the rest. The three have
 overlays under `crates/bids-schema/data/overlays/` to name their vocabulary from, and no term map yet.
 ADR 0002 (`docs/adr/0002-adapters-and-layouts.md`) records the gap.
-
-## Give ADR 0002's ingest percentages a corpus and a date
-
-The two percentages in `docs/adr/0002-adapters-and-layouts.md`'s Rationale name only the query
-shape — no corpus, catalog size, build profile or date — yet they are the record's sole quantitative
-support for a load-bearing decision. Every other measurement in the set says what was measured on
-what (`docs/adr/0004-undeclared-column-policy.md` is the model: "Profiled 2026-07 on 12 fMRIPrep
-derivative datasets, 2 subjects each, 48 confounds files"). Re-run the measurement and state its
-basis, or drop the figures and keep the qualitative claim.
