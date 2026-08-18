@@ -8,12 +8,20 @@
 //! `every_overlay_suffix_is_emitted_by_some_producer` is what stops them falling behind the
 //! vocabulary.
 //!
-//! There are no surface files here, and that is the overlay's answer rather than an omission.
-//! fMRIPrep names its morphometry maps by measure — `_hemi-L_thickness.shape.gii` — and neither
-//! `thickness`/`curv`/`sulc` nor `.shape.gii` is declared anywhere, so nothing this producer
-//! wrote would index. The overlay briefly carried a `morph` suffix covering the family, which no
-//! tool writes; emitting a `_hemi-L_morph.shape.gii` to satisfy the coverage test was
-//! vocabulary-faithful and tool-unfaithful, and the suffix was dropped instead.
+//! The surface family below is the exception to that paragraph, and the reason it is worth
+//! reading twice. It used to be absent: fMRIPrep names its morphometry maps by measure —
+//! `_hemi-L_thickness.shape.gii` — and none of `thickness`/`curv`/`sulc` nor `.shape.gii` was
+//! declared anywhere, so nothing written here would have indexed. The overlay briefly carried a
+//! `morph` suffix covering the family, which no tool writes; emitting a `_hemi-L_morph.shape.gii`
+//! to satisfy the coverage test was vocabulary-faithful and tool-unfaithful, and the suffix was
+//! dropped instead.
+//!
+//! The always-applied `bep011` overlay settled it by mirroring what BIDS itself is adopting, and
+//! it declares `rules.files.deriv.structural_mri` as well as the vocabulary. So these paths are
+//! the one part of this producer a rule group *does* describe, and the guarantee is stronger
+//! than the suffix census: `a_generated_fmriprep_tree_has_no_validator_errors` runs the real
+//! validator over the tree, which is only silent if the names, their entities and their
+//! extensions all match what the schema declares.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -32,9 +40,12 @@ use crate::{
 /// own trees are fast-TR multiband; 0.8 s is what the a2cps tree this is modelled on used.
 const REPETITION_TIME: f64 = 0.8;
 
-/// The patterns fMRIPrep really writes into `.bidsignore` — and note that two of them hide the
-/// files this tree exists to exercise, which is why writing it at all is opt-in.
-const BIDSIGNORE: &str = "*.html\nlogs/\nfigures/\n*_xfm.*\n*_timeseries.tsv\n";
+/// The patterns fMRIPrep really writes into `.bidsignore` — and note that three of them hide the
+/// files this tree exists to exercise, which is why writing it at all is opt-in. `*.surf.gii` is
+/// among them and `*.shape.gii` is not, so a real fMRIPrep tree hides its surface *geometry* from
+/// an ordinary ingest while leaving the morphometry maps visible.
+const BIDSIGNORE: &str =
+    "*.html\nlogs/\nfigures/\n*_xfm.*\n*_timeseries.tsv\n*.surf.gii\n*_bold.func.gii\n";
 
 /// Every file an fMRIPrep tree of this scale holds.
 pub fn plan(schema: &Schema, scale: &Scale, bidsignore: bool) -> Result<Vec<PlannedFile>> {
@@ -93,6 +104,33 @@ pub fn plan(schema: &Schema, scale: &Scale, bidsignore: bool) -> Result<Vec<Plan
                 if path.ends_with(".nii.gz") {
                     files.push(PlannedFile::bytes(path, Claim::Bids, anat_volume.clone()));
                 } else {
+                    files.push(PlannedFile::empty(path, Claim::Bids));
+                }
+            }
+
+            // Surface morphometry and geometry. Named by measure, the way fMRIPrep writes them,
+            // and the whole point of the shared vocabulary: `_hemi-L_thickness.shape.gii` here
+            // and FreeSurfer's positional `surf/lh.thickness` are one quantity under one suffix,
+            // reachable by one predicate.
+            //
+            // No volume is written, for the reason the `.h5` transforms above get none: GIFTI is
+            // opaque to every reader in the workspace, so bytes here would be parsed by nothing.
+            for hemi in ["L", "R"] {
+                for (suffix, extension) in [
+                    ("thickness", ".shape.gii"),
+                    ("curv", ".shape.gii"),
+                    ("sulc", ".shape.gii"),
+                    ("white", ".surf.gii"),
+                    ("pial", ".surf.gii"),
+                    ("midthickness", ".surf.gii"),
+                    ("inflated", ".surf.gii"),
+                ] {
+                    let path = BidsName::new(suffix, extension)
+                        .entity("sub", &subject)
+                        .entity("ses", &session)
+                        .entity("hemi", hemi)
+                        .datatype("anat")
+                        .render_path(&index)?;
                     files.push(PlannedFile::empty(path, Claim::Bids));
                 }
             }

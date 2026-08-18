@@ -97,33 +97,48 @@
     },
     "white_surf": {
       "Template": "surf/{hemi}.white",
-      "Concepts": { "datatype": "anat" },
+      "Concepts": { "datatype": "anat", "suffix": "white" },
       "Description": "The white-matter surface. Extensionless, like most of `surf/` — the term map claims the whole subtree by position, since there is no name here to parse."
     },
     "pial_surf": {
       "Template": "surf/{hemi}.pial",
-      "Concepts": { "datatype": "anat" },
+      "Concepts": { "datatype": "anat", "suffix": "pial" },
       "Description": "The pial surface. In a real `recon-all` tree this is a relative symlink to `?h.pial.T1`; the layout names the slot, not how the filesystem fills it."
     },
     "thickness_surf": {
       "Template": "surf/{hemi}.thickness",
-      "Concepts": { "datatype": "anat" },
+      "Concepts": { "datatype": "anat", "suffix": "thickness" },
       "Description": "Per-vertex cortical thickness."
     },
     "curv_surf": {
       "Template": "surf/{hemi}.curv",
-      "Concepts": { "datatype": "anat" },
+      "Concepts": { "datatype": "anat", "suffix": "curv" },
       "Description": "Per-vertex curvature."
     },
     "sulc_surf": {
       "Template": "surf/{hemi}.sulc",
-      "Concepts": { "datatype": "anat" },
+      "Concepts": { "datatype": "anat", "suffix": "sulc" },
       "Description": "Per-vertex sulcal depth."
     },
     "area_surf": {
       "Template": "surf/{hemi}.area",
-      "Concepts": { "datatype": "anat" },
+      "Concepts": { "datatype": "anat", "suffix": "area" },
       "Description": "Per-vertex surface area."
+    },
+    "inflated_surf": {
+      "Template": "surf/{hemi}.inflated",
+      "Concepts": { "datatype": "anat", "suffix": "inflated" },
+      "Description": "The inflated surface, for visualization. Its `?h.inflated.H`/`.K` companions are curvature measures of it, carry no BIDS term, and stay on the catch-all."
+    },
+    "sphere_surf": {
+      "Template": "surf/{hemi}.sphere",
+      "Concepts": { "datatype": "anat", "suffix": "sphere" },
+      "Description": "The spherical surface. `?h.sphere.reg` is the registered form — a different file with no BIDS term — so the mapping matches this name exactly rather than by prefix."
+    },
+    "smoothwm_surf": {
+      "Template": "surf/{hemi}.smoothwm",
+      "Concepts": { "datatype": "anat", "suffix": "smoothwm" },
+      "Description": "The smoothed white-matter surface. The eight `?h.smoothwm.*.crv` files beside it are curvature derivatives with no BIDS term."
     },
     "recon_log": {
       "Template": "scripts/recon-all.log",

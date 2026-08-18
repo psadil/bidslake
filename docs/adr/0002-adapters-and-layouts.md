@@ -194,6 +194,37 @@ An overlay is ordinary BIDS and is all a BIDS-named derivative needs: fMRIPrep, 
 ship overlays and no term map. Overlay and term map are standards-track; the ingestion fragment and
 the layout are deliberately bidslake's own.
 
+One overlay is not a producer's: `overlays/bep011.json` is applied to every load of the embedded
+schema, the way `ingestion/base.json` is layered under every ingest, and is filtered out of the
+adapter names a caller can select. It exists because a *shared* vocabulary has no owner among the
+producers. fMRIPrep writes `_hemi-L_thickness.shape.gii` and FreeSurfer writes `surf/lh.thickness`,
+and those are the same quantity; before it, neither name was vocabulary the schema could state, so
+the same cortical thickness map answered to `suffix='thickness'` from one tool and only to a
+`file_path LIKE` from the other. Put in either producer's overlay it would have to be duplicated
+into both, and a caller indexing a `recon-all` tree would have to name a draft BEP to get thickness
+back.
+
+**It is a mirror, and mirroring is the whole discipline.** Its content is BEP-011 "Structural
+derivatives" (bids-standard/bids-specification#518) transcribed from the branch, expanded out of
+the `$ref`s a compiled render does not carry — 17 suffixes, three GIFTI/CIFTI extensions, and the
+`rules.files.deriv.structural_mri` groups. Nothing in it is improved relative to upstream, because
+the exit is a deletion: when `third_party/bids-schema` is bumped past BEP-011, an identical
+upstream render makes the overlay inert and an edited one makes it an `OverlayError::Conflict`
+naming the pointer that drifted. A paraphrase would turn that clean deletion into a merge.
+
+This is also the answer to *what may an overlay declare* that the Rejected Ideas below leave
+implicit. The bar is not the kind of term — it is whether the term is bidslake's invention. An
+entity for FIX's training set is refused because BIDS has no such concept and is not getting one;
+BEP-011's suffixes are adopted, unchanged, because BIDS is adopting them.
+
+`bep011.json` is the first overlay to declare `rules.files`, which has a consequence worth stating:
+`bids-validator-rs` reads `bids_schema::SCHEMA_JSON` directly and shares no schema loading with the
+indexer, so the merge happens in `BidsSchema::bundled()` as well as `Schema::load_full`. Both, or
+the rules have no reader. It is not carried in `Schema::overlays()`: that list is what
+`bidslake_overlays` and `overlay_digest` record, and it answers what the *caller* augmented a
+catalog with — an entry every catalog gets would make the answer never "nothing". The full merged
+document is stamped as `effective_schema` regardless, so nothing about reproducibility rests on it.
+
 ### 1. An adapter is a named bundle of optional, single-purpose artifacts
 
 `--adapter <name>` resolves whichever of the three read-side artifacts bidslake ships under that
@@ -434,6 +465,14 @@ need it is rejected above.
 - Selecting the file that fills a role has no home. It cannot be the layout — a role describes its
   destination, not its source (*On roles as destinations, not sources*) — and no other document
   currently declares it.
-- `feat` is the only layout. fMRIPrep, MRIQC and QSIPrep have read-side artifacts but no write
-  direction, so code producing files in their conventions still hardcodes paths.
+- `feat` and `freesurfer` are the only layouts. fMRIPrep, MRIQC and QSIPrep have read-side
+  artifacts but no write direction, so code producing files in their conventions still hardcodes
+  paths.
+- **A mirrored `rules.files` group cannot enforce its entities.** `SuffixRule::match_context`
+  identifies a rule by suffix alone and never reads `extensions`, so BEP-011's GIFTI rule and its
+  CIFTI twin always co-match, and `check_file_rules` keeps whichever produced fewest errors — the
+  CIFTI rule, which does not require `hemisphere`. So `bep011.json`'s `hemisphere: required` is
+  recorded and inert. Recognition works, which is what the group was added for; making the
+  requirement bite means identifying a rule by extension as well as suffix, which is a change to
+  how every rule in the schema is matched.
 - A layout used to *produce* a dataset is not recorded as provenance anywhere.

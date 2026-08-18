@@ -51,6 +51,21 @@ fn write_fs_tree(root: &Path) {
         "sub-01_ses-1/surf/lh.thickness",
         b"\xff\xff\xffbinary",
     );
+    write(root, "sub-01_ses-1/surf/rh.curv", b"\xff\xff\xffbinary");
+    write(root, "sub-01_ses-1/surf/lh.sulc", b"\xff\xff\xffbinary");
+    // No BEP-011 term: a registered sphere is not the sphere, and the `.crv` files beside
+    // `?h.smoothwm` are curvature derivatives of it. Both must stay on the catch-all, which
+    // states a datatype and no suffix.
+    write(
+        root,
+        "sub-01_ses-1/surf/lh.sphere.reg",
+        b"\xff\xff\xffbinary",
+    );
+    write(
+        root,
+        "sub-01_ses-1/surf/lh.smoothwm.K1.crv",
+        b"\xff\xff\xffbinary",
+    );
     write(root, "sub-01_ses-1/mri/aseg.mgz", b"\xff\xffMGZ");
     write(
         root,
@@ -173,6 +188,93 @@ async fn a_hemisphere_projects_the_bids_label() -> anyhow::Result<()> {
     )?;
 
     assert_eq!(labels, "L,R");
+    Ok(())
+}
+
+/// The whole point, stated as the query a user would actually write.
+///
+/// Two producers, two conventions, one catalog: fMRIPrep puts the measure in the filename
+/// (`_hemi-L_thickness.shape.gii`, parsed), FreeSurfer puts it in the position
+/// (`surf/lh.thickness`, projected by the term map). If they agree on the suffix, one predicate
+/// reaches both and a caller never has to know which tool ran. If they ever stop agreeing, this
+/// returns 1 instead of 2 and says so.
+#[tokio::test]
+async fn one_predicate_reaches_both_producers_thickness_maps() -> anyhow::Result<()> {
+    let fs_dir = tempfile::tempdir()?;
+    write_fs_tree(fs_dir.path());
+    let fmriprep_dir = tempfile::tempdir()?;
+    let anat = fmriprep_dir.path().join("sub-01/anat");
+    std::fs::create_dir_all(&anat)?;
+    std::fs::write(
+        fmriprep_dir.path().join("dataset_description.json"),
+        r#"{"Name":"fp","BIDSVersion":"1.11.1","DatasetType":"derivative"}"#,
+    )?;
+    std::fs::write(anat.join("sub-01_hemi-L_thickness.shape.gii"), b"")?;
+
+    // Both roots are indexed with both adapters configured, which is what a caller accumulating
+    // them into one catalog does — and is required, not stylistic: the registry's columns are
+    // fixed by the run that creates the table, and a term map adds `projected` to them. A second
+    // run configured without one writes a narrower row than the table holds and fails in the
+    // appender (docs/adr/0006, *A catalog cannot gain `projected` short of a rebuild*).
+    let db = bidslake::db::BidsDb::new(":memory:")?;
+    let adapters = ["freesurfer", "fmriprep"];
+    common::ingest_with_adapters_into(&db, fs_dir.path(), &adapters, Some("recon")).await?;
+    common::ingest_with_adapters_into(&db, fmriprep_dir.path(), &adapters, Some("fmriprep"))
+        .await?;
+
+    let producers: String = db.conn.query_row(
+        "SELECT string_agg(DISTINCT dataset_id, ' ' ORDER BY dataset_id) FROM all_files \
+         WHERE suffix = 'thickness'",
+        [],
+        |r| r.get(0),
+    )?;
+
+    assert_eq!(producers, "fmriprep recon");
+    Ok(())
+}
+
+/// The claim the shared vocabulary exists to make. FreeSurfer names this file positionally —
+/// `surf/lh.thickness` carries no BIDS entity to parse — so the suffix can only come from the
+/// term map's projection, and it has to be the same string fMRIPrep puts in
+/// `_hemi-L_thickness.shape.gii` or the two producers do not join.
+#[tokio::test]
+async fn a_surface_measure_reaches_the_catalog_under_its_bids_suffix() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_fs_tree(dir.path());
+    let db = ingest_with_adapters(dir.path(), &["freesurfer"]).await?;
+
+    let found: String = db.conn.query_row(
+        "SELECT string_agg(suffix || '/' || hemi, ' ' ORDER BY suffix) FROM all_files \
+         WHERE file_path LIKE '%/surf/%' AND suffix IS NOT NULL",
+        [],
+        |r| r.get(0),
+    )?;
+
+    assert_eq!(found, "curv/R sulc/L thickness/L");
+    Ok(())
+}
+
+/// The other half, and the one that would rot silently. `recon-all` writes ~90 files into
+/// `surf/` and only nine have a BIDS term; every other name shares a prefix with one of them.
+/// A mapping that claimed `?h.sphere.reg` as `sphere` would put a wrong suffix in the catalog
+/// rather than leave a right one out, which is the worse failure.
+#[tokio::test]
+async fn a_surface_file_with_no_bids_term_is_cataloged_without_one() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_fs_tree(dir.path());
+    let db = ingest_with_adapters(dir.path(), &["freesurfer"]).await?;
+
+    let unnamed: i64 = db.conn.query_row(
+        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND suffix IS NULL \
+         AND file_path LIKE '%/surf/%'",
+        [],
+        |r| r.get(0),
+    )?;
+
+    assert_eq!(
+        unnamed, 2,
+        "lh.sphere.reg and lh.smoothwm.K1.crv stay unnamed"
+    );
     Ok(())
 }
 

@@ -196,7 +196,28 @@ impl Schema {
             None => serde_json::from_str(SCHEMA_JSON).expect("embedded schema.json must parse"),
         };
 
-        if !overlays.is_empty() {
+        // The always-applied overlay rides with the *embedded* schema only: it mirrors one
+        // upstream draft against one pinned base, and a caller who supplied their own
+        // `--schema` has opted out of that base (see `overlay::always_applied_overlay`). It is
+        // merged as an overlay rather than folded into the base so that what it adds is
+        // metaschema-checked like any other overlay's additions.
+        //
+        // It is deliberately *not* carried in `self.overlays`. That list is what
+        // `db::stamp_schema` writes to `bidslake_overlays`, and what sets `overlay_digest`
+        // non-NULL — it answers "what did the caller augment this catalog with", and folding in
+        // something every catalog gets would make the answer never "nothing". Reproducibility
+        // does not depend on it: `stamp_schema` also stores the whole merged document as
+        // `effective_schema`, so the surface vocabulary is on the catalog either way.
+        let mut applied: Vec<AppliedOverlay> = Vec::with_capacity(overlays.len() + 1);
+        if schema_path.is_none() {
+            applied.push(AppliedOverlay {
+                source: bids_schema::overlay::ALWAYS_APPLIED_OVERLAY_NAME.to_string(),
+                content: bids_schema::overlay::always_applied_overlay(),
+            });
+        }
+        applied.extend(overlays.iter().cloned());
+
+        if !applied.is_empty() {
             // Keep the pre-overlay schema to validate only what the overlays *add*
             // (the base schema itself has known, tolerated metaschema deviations).
             let base = schema.clone();
@@ -208,7 +229,7 @@ impl Schema {
             // the per-overlay context is gone from here.
             bids_schema::overlay::merge_all(
                 &mut schema,
-                overlays
+                applied
                     .iter()
                     .map(|overlay| (overlay.source.as_str(), &overlay.content)),
             )

@@ -589,6 +589,54 @@ mod tests {
         );
     }
 
+    /// The nine `surf/` basenames BEP-011 has a term for project it, which is what lets one
+    /// `WHERE suffix = 'thickness'` reach both this tree and an fMRIPrep
+    /// `_hemi-L_thickness.shape.gii`. FreeSurfer names these positionally, so the mapping
+    /// declares the suffix rather than capturing it — the filename carries no BIDS suffix to
+    /// parse (ADR 0002, *Vocabulary is not identity*).
+    #[rstest]
+    #[case("bert/surf/lh.thickness", "thickness")]
+    #[case("bert/surf/rh.curv", "curv")]
+    #[case("bert/surf/lh.sulc", "sulc")]
+    #[case("bert/surf/rh.area", "area")]
+    #[case("bert/surf/lh.white", "white")]
+    #[case("bert/surf/rh.pial", "pial")]
+    #[case("bert/surf/lh.inflated", "inflated")]
+    #[case("bert/surf/rh.sphere", "sphere")]
+    #[case("bert/surf/lh.smoothwm", "smoothwm")]
+    fn a_surface_measure_projects_its_bep011_suffix(#[case] path: &str, #[case] expected: &str) {
+        let f = fs().classify(path).expect("match");
+
+        assert_eq!(f.suffix.as_deref(), Some(expected), "{path}");
+    }
+
+    /// The other side of the same mapping, and the one that is easy to get wrong. `recon-all`
+    /// writes ~90 files into `surf/`, and only the nine above have a BIDS term: the rest are
+    /// intermediates (`.nofix`, `.preaparc`), curvature derivatives (`?h.smoothwm.K1.crv`),
+    /// registered forms (`?h.sphere.reg`) and variants measured against another surface
+    /// (`?h.area.pial`). Every one of them shares a prefix with a mapped name, so an unanchored
+    /// or prefix-matching template would claim it and put a wrong suffix in the catalog. They
+    /// must keep falling through to the `surf/[lr]h\.[^/]+` catch-all, which states a datatype
+    /// and no suffix — recognized, cataloged, and honestly unnamed.
+    ///
+    /// Every case here is a real filename from
+    /// `third_party/bids-examples/ieeg_epilepsy_ecog/derivatives/freesurfer/sub-ecog01_ses-preimp/surf/`.
+    #[rstest]
+    #[case::registered_sphere("bert/surf/lh.sphere.reg")]
+    #[case::curvature_derivative("bert/surf/lh.smoothwm.K1.crv")]
+    #[case::area_on_another_surface("bert/surf/rh.area.pial")]
+    #[case::curv_on_another_surface("bert/surf/lh.curv.pial")]
+    #[case::averaged_curv("bert/surf/rh.avg_curv")]
+    #[case::unfixed_intermediate("bert/surf/lh.inflated.nofix")]
+    #[case::preaparc_intermediate("bert/surf/rh.white.preaparc")]
+    #[case::pial_variant("bert/surf/lh.pial.T1")]
+    #[case::area_midway("bert/surf/rh.area.mid")]
+    fn a_surface_file_with_no_bep011_term_projects_no_suffix(#[case] path: &str) {
+        let f = fs().classify(path).expect("recognized by the catch-all");
+
+        assert_eq!(f.suffix, None, "{path}");
+    }
+
     /// The projected label is never the filename token, for any of the five hemisphere-keyed
     /// mappings. `lh` in a `hemi` column would join with nothing a BIDS-named producer wrote.
     #[rstest]
