@@ -37,16 +37,17 @@ fn a_bad_row_names_the_table_and_its_keys() {
     let schema = Schema::load(None).unwrap();
     db.create_tables(&schema).unwrap();
 
-    // A `file_id` that is not an integer. `row_values` cannot shape it, substitutes NULL,
-    // and the registry's NOT NULL constraint rejects the row -- so the failure surfaces
-    // from the staged INSERT, several frames from where the bad value came in. That is
-    // exactly the case the added context is for.
+    // A `file_id` that is not a UUID. `row_values` hands the string on unchanged and the
+    // Appender's cast to `UUID` rejects it -- so the failure surfaces from the staged write,
+    // several frames from where the bad value came in. That is exactly the case the added
+    // context is for. (It is also the *right* failure: refusing beats the NULL this used to
+    // produce, which reached the primary key with nothing pointing at why.)
     let err = db
         .upsert_rows(
             &schema,
             "file_registry",
             &[json!({
-                "file_id": "not-an-integer",
+                "file_id": "not-a-uuid",
                 "dataset_id": "ds",
                 "root_uri": "file:///tmp/ds",
                 "file_path": "sub-01/anat/sub-01_T1w.nii.gz",
@@ -64,8 +65,12 @@ fn a_bad_row_names_the_table_and_its_keys() {
         "should say what the write layer was doing: {msg}"
     );
     assert!(
-        msg.contains("NOT NULL constraint"),
-        "should keep DuckDB's own diagnostic: {msg}"
+        msg.contains("row 0 of 1"),
+        "and which row, since a batch fails as a whole: {msg}"
+    );
+    assert!(
+        msg.contains("Could not convert") && msg.contains("not-a-uuid"),
+        "should keep DuckDB's own diagnostic, and name the offending value: {msg}"
     );
     // And should not trail off into the FFI leaf, which is the same constant every time.
     assert!(!msg.contains("Error code"), "FFI noise leaked: {msg}");
@@ -81,7 +86,7 @@ fn a_good_row_still_writes() {
         &schema,
         "file_registry",
         &[json!({
-            "file_id": "12345678901234567890",
+            "file_id": "38e45ea0-e42a-80bd-a500-eb3dbf6342a7",
             "dataset_id": "ds",
             "root_uri": "file:///tmp/ds",
             "file_path": "sub-01/anat/sub-01_T1w.nii.gz",

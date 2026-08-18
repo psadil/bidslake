@@ -48,7 +48,16 @@ class BidsFile:
     Attributes:
         root_uri: Which of the dataset's ingest roots `file_path` is relative to
             (docs/adr/0005).
-        file_id: The registry key every file-keyed table stores (docs/adr/0006).
+        file_id: The registry key every file-keyed table stores (docs/adr/0006) — the
+            first 128 bits of `SHA-256(dataset_id ␟ root_uri ␟ file_path)`, stamped as an
+            RFC 9562 version-8 UUID and spelled canonically. A `str`, and deliberately the
+            same `str` a query returns, so `f.file_id == df["file_id"][0]` holds without a
+            conversion: a `UUID` column crosses Arrow as `Utf8` and polars has no UUID dtype
+            to receive it as, so a frame could not hand back anything else. Pass it to
+            `uuid.UUID(...)` for `.version` or a hashable key; `bidslake.file_id(...)`
+            derives the same value without a catalog. Note polars elides strings at 31
+            characters, so `pl.Config.set_fmt_str_lengths(40)` makes an id legible in a
+            notebook.
         entities: Every non-null BIDS concept column of the row — the entities (`sub`,
             `task`, `run` …) plus `datatype`/`suffix`/`extension`/`modality`/`pseudofile`.
             The common ones are also exposed as properties.
@@ -57,7 +66,7 @@ class BidsFile:
     dataset_id: str
     root_uri: str
     file_path: str
-    file_id: int
+    file_id: str
     uri: str
     entities: dict[str, Any]
     # Back-reference to the opened database, for lazy metadata/events/associated
@@ -193,7 +202,7 @@ class BidsFile:
         dataset_id: str,
         root_uri: str,
         file_path: str,
-        file_id: int,
+        file_id: str,
         uri: str,
         row: dict[str, Any],
         lake: BidsLake | None = None,

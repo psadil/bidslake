@@ -17,7 +17,10 @@ crate-type = ["cdylib", "rlib"]
 extension-module = ["pyo3/extension-module"]
 
 [dependencies]
-pyo3 = { version = "0.26" }
+# The `uuid` feature is what lets `file_id` cross as a real `uuid.UUID` in both
+# directions: `IntoPyObject` for the exported `file_id()`, `FromPyObject` so a
+# `uuid.UUID` binds as a query parameter (ADR 0006).
+pyo3 = { version = "0.26", features = ["uuid"] }
 # Bundled DuckDB engine. Declared once in `[workspace.dependencies]` precisely because it
 # must stay the same crate/version/features as `bidslake`'s: cargo then builds the vendored
 # engine once, and the Arrow types line up across crates.
@@ -31,6 +34,7 @@ anyhow = { workspace = true }
 bidslake = { path = "../bidslake" }
 bids-schema = { path = "../bids-schema" }
 serde_json = { workspace = true }
+uuid = { workspace = true }
 
 # `emit-types` renders python/bidslake/schema/_generated.py from the bidslake
 # schema model. Plain Rust bin (no pyo3) — run via `cargo run -p bidslake-py --bin emit-types`.

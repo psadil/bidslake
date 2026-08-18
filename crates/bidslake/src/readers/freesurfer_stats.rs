@@ -22,13 +22,14 @@ use bids_schema::term_map::FileFacts;
 use serde_json::Value;
 
 use super::{ContentReader, DeclaredTable, ReaderRows, seed_row};
+use uuid::Uuid;
 
 pub struct FreeSurferStats;
 
 impl ContentReader for FreeSurferStats {
     fn read(
         &self,
-        file_id: u64,
+        file_id: Uuid,
         content: &str,
         facts: &FileFacts,
         declared: Option<DeclaredTable<'_>>,

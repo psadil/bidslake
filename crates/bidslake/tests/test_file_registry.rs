@@ -11,6 +11,7 @@ mod common;
 use bidslake::db::BidsDb;
 use bidslake::schema::Schema;
 use rstest::rstest;
+use uuid::Uuid;
 
 fn fresh() -> anyhow::Result<BidsDb> {
     let db = BidsDb::new(":memory:")?;
@@ -130,19 +131,19 @@ async fn the_view_computes_concepts_for_every_kind() -> anyhow::Result<()> {
          VALUES (?, ?, ?, ?, ?, ?)",
     )?;
     for (id, path, kind) in [
-        (1u64, "sub-01/func/sub-01_task-x_run-2_bold.nii.gz", "data"),
+        (1u128, "sub-01/func/sub-01_task-x_run-2_bold.nii.gz", "data"),
         (2, "sub-01/anat/sub-01_T1w.json", "sidecar"),
         (3, "README", "other"),
-        // Ids are unsigned now (`UBIGINT`), so a large one is the interesting case rather
-        // than a negative one. Under the old signed `HUGEINT` half of all ids were
-        // negative; nothing downstream has to allow for that any more.
-        (u64::MAX, "sub-02/dwi/sub-02_dwi.nii.gz", "data"),
+        // An id with every bit set. `UUID` is `PhysicalType::INT128` internally and DuckDB
+        // flips the top bit so `ORDER BY uuid` agrees with `ORDER BY uuid::varchar`, so the
+        // extremes of the range are worth one row rather than none.
+        (u128::MAX, "sub-02/dwi/sub-02_dwi.nii.gz", "data"),
         // The case the single view exists for: a per-row table keys on this, and it is not
         // a data file.
         (5, "sub-01/func/sub-01_task-x_run-2_events.tsv", "tabular"),
     ] {
         insert.execute(duckdb::params![
-            id,
+            Uuid::from_u128(id).to_string(),
             "ds",
             "file:///r",
             path,
@@ -164,10 +165,10 @@ async fn the_view_computes_concepts_for_every_kind() -> anyhow::Result<()> {
     )?;
     assert_eq!(data, 2, "narrowing to data files is a filter, not a view");
 
-    let concepts = |file_id: i64| -> anyhow::Result<(String, String, String, String, String)> {
+    let concepts = |n: u128| -> anyhow::Result<(String, String, String, String, String)> {
         Ok(db.conn.query_row(
             "SELECT sub, task, run, datatype, suffix FROM all_files WHERE file_id = ?",
-            [file_id],
+            [Uuid::from_u128(n).to_string()],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )?)
     };
@@ -184,7 +185,10 @@ async fn the_view_computes_concepts_for_every_kind() -> anyhow::Result<()> {
         ("01", "x", "2", "func", "bold")
     );
     let modality: String = db.conn.query_row(
-        "SELECT modality FROM all_files WHERE file_id = 1",
+        &format!(
+            "SELECT modality FROM all_files WHERE file_id = '{}'",
+            Uuid::from_u128(1)
+        ),
         [],
         |r| r.get(0),
     )?;
@@ -298,25 +302,26 @@ async fn bidsignored_files_are_absent_from_the_registry() -> anyhow::Result<()> 
     Ok(())
 }
 
-/// The route the ingest uses: a plain JSON number, preserved exactly to the top of the
-/// range. This is the whole point of moving off `HUGEINT` — `u64::MAX` is representable in
-/// JSON, in `serde_json::Number`, in DuckDB, and in polars, with nothing in between rounding
-/// or refusing it.
+/// The route the ingest uses: the canonical hyphenated spelling, preserved exactly across
+/// the whole 128-bit range. A `UUID` is the one 128-bit type that survives the trip to
+/// Python, and a string is the one representation `serde_json` has for it — so unlike the
+/// `HUGEINT` attempt there is nothing in between to round or refuse it.
 #[rstest]
 #[case(0)]
 #[case(1)]
-#[case(i64::MAX as u64)]
-#[case(u64::MAX)]
-fn a_json_number_id_round_trips_every_one_of_its_64_bits(#[case] n: u64) -> anyhow::Result<()> {
+#[case(u64::MAX as u128)]
+#[case(u128::MAX)]
+fn an_id_round_trips_every_one_of_its_128_bits(#[case] n: u128) -> anyhow::Result<()> {
     let schema = Schema::load(None)?;
-    let row = serde_json::json!({ "file_id": n, "dataset_id": "d" });
+    let id = Uuid::from_u128(n);
+    let row = serde_json::json!({ "file_id": id.to_string(), "dataset_id": "d" });
 
     let got = registry_file_id(&schema, &row);
 
     assert_eq!(
         got,
-        Some(duckdb::types::Value::UBigInt(n)),
-        "a JSON number must round-trip every one of its 64 bits"
+        Some(duckdb::types::Value::Text(id.to_string())),
+        "a canonical UUID string must round-trip every one of its 128 bits"
     );
     Ok(())
 }
@@ -330,47 +335,93 @@ fn registry_file_id(schema: &Schema, row: &serde_json::Value) -> Option<duckdb::
     schema.row_values("file_registry", row).unwrap()[idx].clone()
 }
 
-/// `file_id` is a `UBIGINT`, and the write path shapes values from JSON — which represents a
-/// `u64` exactly, so unlike the 128-bit version it needs no decimal-string detour. The routes
-/// into the column that are *not* a plain JSON number are pinned here, because getting this
-/// wrong corrupts a primary key *silently*: `UBIGINT` sits in the same `is_numeric_col` set as
-/// the float types, whose fallback is `parse::<f64>()`, and an f64 holds 53 bits of mantissa.
+/// The routes into the column that are **not** a canonical UUID string.
+///
+/// Two things have to hold, and they pull in opposite directions. A *number* must be refused
+/// at the Rust boundary — it is the shape a stale 64-bit id arrives in, and the generic
+/// numeric arms would happily turn it into something. Anything else that is merely
+/// *malformed* is allowed through to DuckDB, whose cast throws: what must never happen is a
+/// third outcome where a bad id becomes NULL or a different file's key.
 #[test]
-fn a_64_bit_id_survives_the_write_path_or_is_refused() -> anyhow::Result<()> {
+fn a_128_bit_id_survives_the_write_path_or_is_refused() -> anyhow::Result<()> {
     let schema = Schema::load(None)?;
-    let id_at = |row: &serde_json::Value| registry_file_id(&schema, row);
+    let id_at = |row: &serde_json::Value| schema.row_values("file_registry", row);
 
-    // A decimal string still works, for a hand-built row or a caller outside the ingest.
-    let row = serde_json::json!({ "file_id": u64::MAX.to_string() });
-    assert_eq!(id_at(&row), Some(duckdb::types::Value::UBigInt(u64::MAX)));
+    // A number in an id column is a caller bug, not a value to coerce — most likely a
+    // 64-bit id from before the width changed. Refused with a message, rather than the NULL
+    // the primary key would reject with nothing pointing at why.
+    let row = serde_json::json!({ "file_id": 4_099_505_605_929_783_485i64 });
+    let err = id_at(&row).unwrap_err().to_string();
+    assert!(
+        err.contains("UUID column") && err.contains("file_registry.file_id"),
+        "a numeric id must be refused by name, got: {err}"
+    );
 
-    // A negative number is not an id. It must be refused rather than wrapped around into a
-    // huge positive one, which would be a different file's key.
+    // The same for a negative one, which under the old signed `HUGEINT` was half the range.
     let row = serde_json::json!({ "file_id": -1i64 });
-    assert_eq!(
-        id_at(&row),
-        None,
-        "a negative id must be refused, not wrapped"
-    );
+    assert!(id_at(&row).is_err(), "a negative id is still a number");
 
-    // The trap that survives the width change: `serde_json` parses an integer literal too
-    // large for `u64` as an `f64`, so the precision is gone before the write path sees it.
-    // NULL fails the primary key loudly instead of corrupting it quietly.
-    let too_big = "170141183460469231731687303715884105727"; // i128::MAX, well past u64
-    let rounded: serde_json::Value = serde_json::from_str(&format!(r#"{{"file_id": {too_big}}}"#))?;
+    // A malformed *string* is passed to DuckDB rather than second-guessed here, because the
+    // Appender casts it and throws — see `a_malformed_id_is_refused_by_the_engine`. What
+    // matters is that it is not silently dropped on the way.
+    let row = serde_json::json!({ "file_id": "not-a-uuid" });
     assert_eq!(
-        id_at(&rounded),
-        None,
-        "an already-rounded literal must be refused, not stored"
+        registry_file_id(&schema, &row),
+        Some(duckdb::types::Value::Text("not-a-uuid".to_string())),
+        "a malformed id must reach the engine, not become NULL here"
     );
-    // …and the same value as a string, which reaches the parse rather than the number arm.
-    let row = serde_json::json!({ "file_id": too_big });
-    assert_eq!(id_at(&row), None, "an out-of-range string must be refused");
-
-    // Non-numeric text is refused too, rather than becoming 0 or a partial parse.
-    let row = serde_json::json!({ "file_id": "not-a-number" });
-    assert_eq!(id_at(&row), None);
     Ok(())
+}
+
+/// …and the engine end of that contract: the malformed id above fails the run.
+///
+/// This is the property the whole width argument rests on. An id that cannot be stored must
+/// stop the ingest, because the alternative — a NULL, or a wrapped value — is a row filed
+/// under a key that belongs to a different file, and nothing downstream could tell.
+#[tokio::test]
+async fn a_malformed_id_is_refused_by_the_engine() -> anyhow::Result<()> {
+    let db = fresh()?;
+    let schema = Schema::load(None)?;
+    let row = serde_json::json!({
+        "file_id": "not-a-uuid",
+        "dataset_id": "ds",
+        "root_uri": "file:///r",
+        "file_path": "sub-01/anat/sub-01_T1w.nii.gz",
+        "kind": "data",
+    });
+
+    // `{:#}` for the whole context chain: anyhow's plain `Display` prints only the outermost
+    // `.context()`, which here is "upserting 1 rows into file_registry" — true, and silent
+    // about why.
+    let err = format!(
+        "{:#}",
+        db.upsert_rows(&schema, "file_registry", &[row])
+            .unwrap_err()
+    );
+
+    assert!(
+        err.contains("not-a-uuid") || err.contains("Conversion Error"),
+        "a malformed id must fail the run and say so, got: {err}"
+    );
+    assert_eq!(
+        common::count(&db, "file_registry")?,
+        0,
+        "and nothing may be stored"
+    );
+    Ok(())
+}
+
+/// A `file_id` derived twice is the same id, and `bids::file_id` is the one place that says
+/// so — which is why it is public API rather than an internal detail.
+#[test]
+fn the_derivation_is_a_well_formed_v8_uuid() {
+    let id = bidslake::bids::file_id("ds", "file:///r", "sub-01/anat/sub-01_T1w.nii.gz");
+    assert_eq!(id.get_version_num(), 8, "RFC 9562 vendor-specific version");
+    assert_eq!(id.get_variant(), uuid::Variant::RFC4122);
+    assert_eq!(
+        id,
+        bidslake::bids::file_id("ds", "file:///r", "sub-01/anat/sub-01_T1w.nii.gz")
+    );
 }
 
 /// A plain BIDS catalog carries no `projected` column anywhere — including on the registry.

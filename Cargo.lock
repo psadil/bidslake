@@ -968,6 +968,7 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -981,6 +982,7 @@ dependencies = [
  "duckdb",
  "pyo3",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]
@@ -3439,6 +3441,7 @@ dependencies = [
  "pyo3-ffi",
  "pyo3-macros",
  "unindent",
+ "uuid",
 ]
 
 [[package]]

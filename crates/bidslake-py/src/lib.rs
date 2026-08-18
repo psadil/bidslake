@@ -22,6 +22,7 @@ use duckdb::{AccessMode, Config, Connection, params_from_iter};
 use pyo3::exceptions::{PyRuntimeError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyBytes};
+use uuid::Uuid;
 
 /// A read (or read-write) handle to a bidslake DuckDB database.
 ///
@@ -281,20 +282,38 @@ fn resolve_uri(root_uri: &str, file_path: &str) -> String {
     }
 }
 
+/// The `file_id` of a file, derived exactly as the ingest derives it.
+///
+/// Returns the canonical UUID spelling as a `str` — the same thing a query hands back, so
+/// the two are directly comparable. The derivation is specified in ADR 0006 and stable
+/// across runs, machines and bidslake versions, so this is the supported way to compute an
+/// id by hand: checking one, or building a query key without a round-trip through the
+/// catalog. Before this, the only way was to reimplement SHA-256 and the `\x1f` join from a
+/// Rust doc comment.
+///
+/// `root_uri` is the root the `file_path` is relative to, not the dataset's only root: a
+/// dataset may span several (ADR 0005), and the same relative path under two of them is two
+/// files with two ids.
+#[pyfunction]
+fn file_id(dataset_id: &str, root_uri: &str, file_path: &str) -> String {
+    bidslake::bids::file_id(dataset_id, root_uri, file_path).to_string()
+}
+
 /// Convert a Python scalar into a DuckDB bind value. `bool` is checked before
 /// `int` because Python `bool` is an `int` subclass.
 ///
-/// The integer arms are widened in order, and the `u64` one is load-bearing: `file_id` is a
-/// `UBIGINT` derived from a SHA-256, so **half of every catalog's ids are above `i64::MAX`**.
-/// Without it those fell past `BigInt` into `Double`, where an `f64` has 53 bits of mantissa
-/// and does not reject what it cannot hold — it rounds. `WHERE file_id = ?` then matched a
-/// number no row had, and returned nothing.
+/// This is the parameter half of a trip [`bidslake::bids::file_id`] documents the result half
+/// of. A `file_id` is a `UUID`, which DuckDB exports over Arrow as `Utf8` — so it arrives in
+/// Python as a `str` and goes back as one. The `uuid::Uuid` arm accepts the other spelling
+/// too; without it a `uuid.UUID` fell past every arm to the `TypeError` at the end.
 ///
-/// This is the parameter half of a trip `bids::file_id` documents the result half of. That
-/// note explains why the key moved from `HUGEINT` to `UBIGINT` — `HUGEINT` "does not survive
-/// the trip to Python", arriving as `Decimal128(38, 0)` with 41% of the id space outside its
-/// own type. `i64` here was exactly as narrow for a `UBIGINT` as `Decimal128` was for a
-/// `HUGEINT`, in the other direction.
+/// The `uuid::Uuid` arm goes **before** the string arm and both go before the numeric ones,
+/// because the ordering here has been load-bearing before: when the key was a `UBIGINT`, an
+/// `i64`-only ladder sent every id above `i64::MAX` — half of them — into `Double`, where an
+/// `f64` has 53 bits of mantissa and does not reject what it cannot hold. It rounds.
+/// `WHERE file_id = ?` then matched a number no row had, and returned nothing. The integer
+/// arms remain for `size_bytes` and `row_idx`; an `int` bound against a `UUID` column is now
+/// a loud cast error rather than a silent miss.
 ///
 /// `i128`/`u128` follow so the ladder covers every DuckDB integer width; past that an `int`
 /// still reaches `f64`, which is the right answer for a Python value that is genuinely not an
@@ -305,6 +324,14 @@ fn py_to_duck_value(ob: &Bound<'_, PyAny>) -> PyResult<DuckValue> {
     }
     if let Ok(b) = ob.downcast::<PyBool>() {
         return Ok(DuckValue::Boolean(b.is_true()));
+    }
+    // A `uuid.UUID` binds as its canonical spelling. Nothing in this package *emits* one —
+    // every id crosses as a `str`, polars having no UUID dtype — but a caller who built one
+    // from an id, or from `uuid.UUID(...)`, should not have to unwrap it to ask a question.
+    // duckdb-rs has no UUID `Value`, and a bound string resolves to whatever type the other
+    // side has (`STRING_LITERAL`), so a `UUID` column takes it without an explicit cast.
+    if let Ok(id) = ob.extract::<Uuid>() {
+        return Ok(DuckValue::Text(id.to_string()));
     }
     if let Ok(i) = ob.extract::<i64>() {
         return Ok(DuckValue::BigInt(i));
@@ -503,5 +530,6 @@ fn _bidslake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyLake>()?;
     m.add_class::<PyLayout>()?;
     m.add_function(wrap_pyfunction!(resolve_uri, m)?)?;
+    m.add_function(wrap_pyfunction!(file_id, m)?)?;
     Ok(())
 }

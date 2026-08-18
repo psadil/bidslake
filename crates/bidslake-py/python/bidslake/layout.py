@@ -624,7 +624,7 @@ class BidsLake:
 
     # -- BidsFile lazy lookups --------------------------------------------
 
-    def _sidecar_metadata(self, file_id: int) -> dict[str, Any]:
+    def _sidecar_metadata(self, file_id: str) -> dict[str, Any]:
         df = self._query("SELECT * FROM sidecars WHERE file_id = ?", [file_id])
         if df.height == 0:
             return {}
@@ -650,7 +650,7 @@ class BidsLake:
 
     def _rows_for(
         self,
-        file_id: int,
+        file_id: str,
         association_type: str,
         table: str | None = None,
         order_by: str | None = None,
@@ -687,14 +687,14 @@ class BidsLake:
             sql += f" ORDER BY t.{quote_ident(order_by)}"
         return self._query(sql, [file_id, association_type])
 
-    def _events_for(self, file_id: int) -> DataFrame:
+    def _events_for(self, file_id: str) -> DataFrame:
         # Ordered by `onset`, which is what addresses an event. `events` is declared
         # order-insensitive so its files are read concurrently and it has no `row_idx`;
         # `onset` is the canonical order, and BIDS asks for events.tsv to be written in it.
         return self._rows_for(file_id, "events", order_by="onset")
 
     def _associated_for(
-        self, dataset_id: str, root_uri: str, file_id: int, kind: str | None
+        self, dataset_id: str, root_uri: str, file_id: str, kind: str | None
     ) -> list[BidsFile]:
         # `target_file_id` is NULL for a reference to a file this dataset does not ship —
         # a dangling `IntendedFor`, kept deliberately. Those still come back, as a path

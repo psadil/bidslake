@@ -11,8 +11,8 @@ Requires: 0002, 0005
 
 ## Abstract
 
-`file_registry` is one row per file the walk sees, keyed by `file_id` — the first 64 bits of
-`SHA-256(dataset_id ␟ root_uri ␟ file_path)`. Every file-keyed table keys on that id, four of them
+`file_registry` is one row per file the walk sees, keyed by `file_id` — the first 128 bits of
+`SHA-256(dataset_id ␟ root_uri ␟ file_path)`, stored as a `UUID`. Every file-keyed table keys on that id, four of them
 through a real foreign key. `all_files` is a view over the registry adding the BIDS-concept columns
 computed from `file_path`, defined once rather than per table. `scans` is the `scans.tsv` satellite.
 
@@ -62,18 +62,73 @@ SHA-256 is fixed by specification, and `file_id` is a *stored* key that satellit
 deriving it from content rather than a sequence is what makes a re-index upsert onto the same rows,
 and two machines agree on one tree.
 
-64 bits and not 128, because `HUGEINT` does not survive the trip to Python: the Arrow bridge hands
-it over as `Decimal128(38, 0)`, whose maximum is `10^38 - 1` against `HUGEINT`'s `2^127 - 1`, about
-`1.7 × 10^38` — so two ids in five fall outside the type they are handed over in and cannot rebuild
-a frame, and widening is unavailable, polars capping decimal precision at 38. The cost is collision
-resistance: by the birthday bound a catalog of `n` files collides with probability `n² / 2^65` —
-≈ 3 × 10⁻⁸ at 10⁶ files, ≈ 3 × 10⁻⁴ at 10⁸.
+`UUID` and not `HUGEINT`, though both are 128 bits, because the two cross the Arrow bridge
+differently. DuckDB hands `HUGEINT` over as `Decimal128(38, 0)`, whose maximum is `10^38 - 1`
+against `HUGEINT`'s `2^127 - 1`, about `1.7 × 10^38` — so two ids in five fall outside the type they
+are handed over in and cannot rebuild a frame. That is what once sent this key down to 64 bits, and
+the reasoning was one step short: it is a fact about `HUGEINT`'s *Arrow mapping*, not about width.
+A `UUID` column exports as Arrow `Utf8` (`arrow_converter.cpp`, and duckdb-rs pins it in a test
+against the same `query_arrow` call this crate makes), so it arrives as a `str` with no decimal in
+sight, while remaining `PhysicalType::INT128` inside the engine. That second half is what makes it
+the right 128-bit type rather than merely a working one: an id column wants integer join width,
+integer hashing and the integer compression schemes, and a `VARCHAR` spelling of the same bits
+forfeits all three. Measured on `ds000117`, `file_id` on `events` (33,236 rows) stores as **RLE** —
+a scheme `VARCHAR` is not eligible for at all.
 
-A key of this width goes wrong silently on the write path: `UBIGINT` sits in the same numeric set as
-the float types, whose generic string fallback is `parse::<i64>()` then `parse::<f64>()`, and 53
-bits of mantissa round any id past `2^53`. So `row_values` has `UBIGINT` arms taking a `u64` number
-or a decimal string and NULLing anything else, a negative included: NULL fails the primary key
-loudly, a wrapped id would not.
+The write side pays something in principle and nothing that shows up in practice. duckdb-rs has no
+UUID `Value`, so the id reaches the Appender as `Value::Text` and DuckDB casts it per value instead
+of storing it through the typed vector path — `LogicalTypeId::UUID` has no arm in `appender.cpp`'s
+switch. That cost is not measurable here: against the `ubigint` baseline, `ingest/ds108` — the
+insert-heaviest dataset in the bench — comes in at 149.1–150.0 ms, **−1.5%** (p = 0.02), and `ds001`
+shows no significant change. Doubling the key width is not plausibly a speedup, so read that as *no
+regression* rather than a gain. The million-row tables would not pay it in any case: they go through
+`read_csv`, where the id is one constant-folded literal per statement.
+
+The derivation stamps RFC 9562 version 8, the version reserved for vendor-specific ids
+(`uuid::Builder::from_custom_bytes`). Those 6 bits are the whole cost of the id being a *well-formed*
+UUID rather than a raw digest prefix, and what they buy is that `uuid.UUID(...).version` reads `8`
+instead of whichever nibble the hash happened to land on — for a truncated SHA-256 that answer is
+arbitrary, and sometimes a confident, wrong `4` or `6`. The remaining 122 bits leave the birthday
+bound at `n² / 2^123` — ≈ 9 × 10⁻²² at 10⁸ files, against 3 × 10⁻⁴ for the 64-bit key.
+
+That last figure is what closes this ADR's longest-standing open issue rather than answering it.
+A collision is still written with replace-on-conflict, so two files sharing an id would still become
+one row silently — but at `9 × 10⁻²²` there is no scale at which to worry about it, where at 64 bits
+`3 × 10⁻⁴` at 10⁸ files was a real number.
+
+Detecting one anyway was built and then removed, and the reason is worth recording so it is not
+rebuilt. The argument for it was never the birthday bound; it was that a *derivation* bug — hashing
+fewer than the three identity parts — collides systematically at a rate no bound describes. That
+argument does not survive testing. Dropping `root_uri` from the hash fails
+`file_id_is_stable_and_separator_safe` and the corpus proptest, at `cargo test`, unconditionally.
+Hashing a different root than the row stores fails the `sidecars` foreign key on the first real
+dataset, naming the id that has no registry row. Both are caught earlier, more precisely, and
+without a per-upsert cost; a stage-versus-registry join would only have restated what the pinned
+tests and the four foreign keys already guarantee.
+
+Python sees **one** spelling of an id — the canonical string — and that is forced rather than
+preferred. polars has no UUID dtype, so a frame column can only be `pl.String`; the one route to 16
+raw bytes over Arrow is `arrow_lossless_conversion`, which is connection-wide and also retypes every
+`BOOLEAN` column to an `arrow.bool8` extension. Since a frame cannot hand back anything else,
+everything else matches it: `BidsFile.file_id` is a `str`, `bidslake.file_id(...)` returns a `str`,
+and the generated models annotate `Mapped[str]`. A `uuid.UUID` is still accepted as a bind
+parameter, for a caller who has built one.
+
+Annotating the models `Mapped[uuid.UUID]` — describing the engine's type rather than the query
+layer's — was tried and reverted, and the reason it is worth recording is that **nothing catches the
+difference statically**. polars is not generic over its schema, so `df["file_id"][0]` is `Any` and a
+type checker sees no conflict with a `uuid.UUID` on the other side; the mismatch surfaces only as a
+comparison that is quietly always false. `COLUMNS` records the DuckDB type, which is where an
+engine-level fact belongs. Note also that polars elides strings at 31 characters, so a 36-character
+id needs `pl.Config.set_fmt_str_lengths(40)` to print in full.
+
+The write path is where a key of any width goes wrong quietly, and the shape of the danger changed
+with the type. A *number* in an id column can only be a stale 64-bit id or a mis-keyed row — no
+`serde_json::Number` holds 128 bits — so `row_values` refuses one by name rather than coercing it.
+A malformed *string* is passed through to DuckDB, whose appender casts it and throws
+(`Could not convert string 'not-a-uuid' to INT128`). Both are loud. What must never happen is the
+third outcome, a bad id becoming NULL or a different file's key, which is also why `UUID` is absent
+from `needs_try_cast`: a `TRY_CAST` on a key would turn exactly that failure back into silence.
 
 Enforcement is partial for cost, not principle. Without the constraint a payload row can key on a
 file the dataset does not ship — `ds114`'s root-level inherited `dwi.bval`/`dwi.bvec` are that case,
@@ -101,7 +156,7 @@ None of the three is documented upstream; all hold on DuckDB 1.5.5, the bundled 
 
 ```sql
 CREATE TABLE file_registry (
-    file_id UBIGINT PRIMARY KEY,
+    file_id UUID PRIMARY KEY,
     dataset_id TEXT, root_uri TEXT, file_path TEXT, kind TEXT, status TEXT,
     size_bytes UBIGINT, mtime_ns BIGINT   -- , projected JSON   (only with a term map)
 );
@@ -140,7 +195,8 @@ rows already stored as much as for new ones; `projected`, a physical column, is 
 ### 4. `file_id` is a surrogate key over the identity triple
 
 ```
-file_id = first 64 bits of SHA-256(dataset_id ␟ root_uri ␟ file_path)   as UBIGINT
+file_id = first 128 bits of SHA-256(dataset_id ␟ root_uri ␟ file_path),
+          version/variant stamped RFC 9562 v8   as UUID
 ```
 
 `␟` is ASCII unit separator, a byte that does not occur in the paths bidslake walks, so the three
@@ -214,10 +270,6 @@ could drift from `all_files`' concept expressions.
   nothing does. `test_registry_shape.rs::narrowing_is_allowed` asserts only that no error is raised.
 - **Extending the foreign key to the 22 per-row tables**, once a per-row check on the bulk
   `read_csv` path has been measured against the batched-ingest benchmark.
-- **A collision would be silent**, `file_id` being written with replace-on-conflict: two files
-  sharing one become one row rather than an error. The registry stores the identity triple beside
-  the id, so detecting it is one join against the upsert stage — worth doing before a catalog past
-  10⁸ files.
 - **Nothing enforces that a file's subject is a subject the dataset has.** `all_files.sub` and `ses`
   are select items of a view rather than columns of a table, and a foreign key against a view is
   refused, so the tie to `participants` is asserted by test instead — `test_adapter_freesurfer.rs`

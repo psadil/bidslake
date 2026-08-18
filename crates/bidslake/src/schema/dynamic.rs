@@ -60,6 +60,7 @@ use anyhow::{Context as _, Result, anyhow};
 use duckdb::Connection;
 use serde_json::Value;
 use std::collections::HashMap;
+use uuid::Uuid;
 
 /// The vendored BIDS schema, embedded at compile time. An instance of the BIDS
 /// metaschema; its `objects.*` and `rules.*` sections drive table generation.
@@ -597,7 +598,7 @@ impl Schema {
         // so it is stable across runs and machines and needs no second UNIQUE constraint —
         // which DuckDB would anyway refuse to upsert against (ADR 0006).
         let mut columns = vec![
-            "file_id UBIGINT PRIMARY KEY".to_string(),
+            "file_id UUID PRIMARY KEY".to_string(),
             "dataset_id TEXT".to_string(),
             "root_uri TEXT".to_string(),
             "file_path TEXT".to_string(),
@@ -623,7 +624,7 @@ impl Schema {
             "mtime_ns BIGINT".to_string(),
         ];
         let mut fields: Vec<(String, String, String)> = [
-            ("file_id", "UBIGINT"),
+            ("file_id", "UUID"),
             ("dataset_id", "TEXT"),
             ("root_uri", "TEXT"),
             ("file_path", "TEXT"),
@@ -707,13 +708,15 @@ impl Schema {
                 columns.push(format!("{} TEXT", name));
                 fields.push((name.to_string(), "TEXT".to_string(), name.to_string()));
             };
-        // The surrogate key every file-keyed table points at (docs/adr/0006). `UBIGINT`
-        // rather than `TEXT`, matching `file_registry.file_id`.
+        // The surrogate key every file-keyed table points at (docs/adr/0006). `UUID`
+        // rather than `TEXT`, matching `file_registry.file_id` — and the difference is not
+        // cosmetic: `UUID` is `PhysicalType::INT128`, so it keeps the integer join width and
+        // the integer compression schemes a `TEXT` spelling of the same bits would forfeit.
         let file_key = |columns: &mut Vec<String>, fields: &mut Vec<(String, String, String)>| {
-            columns.push("file_id UBIGINT".to_string());
+            columns.push("file_id UUID".to_string());
             fields.push((
                 "file_id".to_string(),
-                "UBIGINT".to_string(),
+                "UUID".to_string(),
                 "file_id".to_string(),
             ));
         };
@@ -1037,10 +1040,10 @@ impl Schema {
         // Keyed by the file its metadata describes. Note *which* file: a sidecar row is the
         // merged metadata for a **data** file, not for the `.json` it was read from — the
         // JSON has its own registry row, under its own path (docs/adr/0006).
-        sidecar_columns.push("file_id UBIGINT".to_string());
+        sidecar_columns.push("file_id UUID".to_string());
         sidecar_fields.push((
             "file_id".to_string(),
-            "UBIGINT".to_string(),
+            "UUID".to_string(),
             "file_id".to_string(),
         ));
         seen_lowercase_names.insert("file_id".to_string());
@@ -1411,15 +1414,30 @@ impl Schema {
                 match val {
                     // A number can't go into a BOOLEAN column.
                     Some(Value::Number(_)) if is_bool_col => params.push(None),
-                    // The registry key, before the generic numeric arm. A `u64` is exactly
-                    // what `serde_json::Number` holds, so an id makes the trip as a JSON
-                    // *number* and arrives needing no parse — which is most of the
-                    // simplification of moving off `HUGEINT` (see [`crate::bids::file_id`]).
-                    //
-                    // A negative or fractional value is not an id and cannot be coerced into
-                    // one. NULL rather than a wrap-around: `file_registry.file_id` is a NOT
-                    // NULL primary key, so such a row fails loudly instead of landing under
-                    // a corrupted id.
+                    // The registry key, ahead of every generic arm. It travels as the
+                    // canonical hyphenated string, which is the only 128-bit-safe
+                    // representation `serde_json` has (see [`crate::bids::file_id`]), and
+                    // reaches the column as `Value::Text` — the Appender casts it to `UUID`
+                    // and *throws* if it cannot, so a malformed id fails the run.
+                    Some(Value::String(s)) if col_type == "UUID" => {
+                        params.push(Some(duckdb::types::Value::Text(s.clone())));
+                    }
+                    // A *number* in an id column is a caller bug, not a value to coerce:
+                    // every id is 128 bits and no `serde_json::Number` holds one, so this
+                    // can only be a stale 64-bit id or a mis-keyed row. Refusing beats the
+                    // NULL the generic arms would produce, which the primary key would then
+                    // reject with nothing pointing at why.
+                    Some(Value::Number(n)) if col_type == "UUID" => {
+                        return Err(anyhow!(
+                            "`{table_name}.{col_name}` is a UUID column and cannot take the \
+                             number {n}: a `file_id` is derived in Rust and travels as its \
+                             canonical string (docs/adr/0006)"
+                        ));
+                    }
+                    // `size_bytes` is the remaining `UBIGINT`, and it stays ahead of the
+                    // generic numeric arm for the reason the id once did: that arm's
+                    // fallback is `parse::<i64>()` then `parse::<f64>()`, and 53 bits of
+                    // mantissa silently round anything past 2^53.
                     Some(Value::Number(n)) if col_type == "UBIGINT" => match n.as_u64() {
                         Some(u) => params.push(Some(duckdb::types::Value::UBigInt(u))),
                         None => params.push(None),
@@ -1433,10 +1451,7 @@ impl Schema {
                             params.push(Some(duckdb::types::Value::Text(n.to_string())));
                         }
                     }
-                    // An id that still arrives as a string — a hand-built row, or a caller
-                    // outside the ingest. Kept because the generic arm below would try
-                    // `parse::<i64>()`, fall through to `parse::<f64>()`, and silently round
-                    // a primary key to 53 bits of mantissa for any id above 2^53.
+                    // A `UBIGINT` that arrives as a string, for the same reason.
                     Some(Value::String(s)) if col_type == "UBIGINT" => match s.parse::<u64>() {
                         Ok(u) => params.push(Some(duckdb::types::Value::UBigInt(u))),
                         Err(_) => params.push(None),
@@ -1536,6 +1551,22 @@ pub(crate) fn quote_ident(name: &str) -> String {
 /// [`quote_ident`] so one place owns SQL literal- and identifier-escaping.
 pub(crate) fn sql_lit(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
+}
+
+/// A `file_id` as a SQL literal, with the cast spelled out: `'<uuid>'::UUID`.
+///
+/// The id is computed in Rust and carried into generated SQL as a literal, DuckDB being
+/// unable to reproduce a SHA-256 (see [`crate::bids::file_id`]). A [`Uuid`] renders as 36
+/// characters of lowercase hex and hyphens, so unlike [`sql_lit`] there is nothing to escape
+/// — the quotes cannot be broken out of.
+///
+/// The `::UUID` is not strictly required: a bare string literal binds as `STRING_LITERAL`,
+/// which implicitly casts to whichever type the other side resolved to. But that is a rule
+/// about literals rather than about `VARCHAR` — an actual `VARCHAR` column compares to a
+/// `UUID` only under equality, and errors under `<`/`>` — so the cast is written down rather
+/// than depended on.
+pub(crate) fn sql_uuid_lit(id: Uuid) -> String {
+    format!("'{id}'::UUID")
 }
 
 /// Map a BIDS schema field/column definition to a DuckDB column type.

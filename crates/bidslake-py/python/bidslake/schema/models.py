@@ -50,7 +50,7 @@ class AllFiles(Base):
     __tablename__ = "all_files"
     # A view has no declared key; this one exists only to satisfy the mapper.
 
-    file_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    file_id: Mapped[str] = mapped_column(String, primary_key=True)
     dataset_id: Mapped[str | None] = mapped_column(String)
     root_uri: Mapped[str | None] = mapped_column(String)
     file_path: Mapped[str | None] = mapped_column(String)
@@ -104,7 +104,7 @@ class AslContext(Base):
     __tablename__ = "asl_context"
     # A view has no declared key; this one exists only to satisfy the mapper.
 
-    file_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    file_id: Mapped[str] = mapped_column(String, primary_key=True)
     row_idx: Mapped[int | None] = mapped_column(BigInteger)
     volume_type: Mapped[str | None] = mapped_column(String)
     other_data: Mapped[str | None] = mapped_column(String)
@@ -114,18 +114,18 @@ class AslVolumes(Base):
     __tablename__ = "asl_volumes"
     # A view has no declared key; this one exists only to satisfy the mapper.
 
-    file_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    file_id: Mapped[str] = mapped_column(String, primary_key=True)
     volume_idx: Mapped[int | None] = mapped_column(BigInteger)
     volume_type: Mapped[str | None] = mapped_column(String)
     other_data: Mapped[str | None] = mapped_column(String)
-    source_file_id: Mapped[int | None] = mapped_column(BigInteger)
+    source_file_id: Mapped[str | None] = mapped_column(String)
 
 
 class Behavioral(Base):
     __tablename__ = "behavioral"
     # A view has no declared key; this one exists only to satisfy the mapper.
 
-    file_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    file_id: Mapped[str] = mapped_column(String, primary_key=True)
     row_idx: Mapped[int | None] = mapped_column(BigInteger)
     HED: Mapped[str | None] = mapped_column(String)
     response_time: Mapped[float | None] = mapped_column(Float)
@@ -156,7 +156,7 @@ class Blood(Base):
     __tablename__ = "blood"
     # A view has no declared key; this one exists only to satisfy the mapper.
 
-    file_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    file_id: Mapped[str] = mapped_column(String, primary_key=True)
     row_idx: Mapped[int | None] = mapped_column(BigInteger)
     time: Mapped[float | None] = mapped_column(Float)
     hplc_recovery_fractions: Mapped[float | None] = mapped_column(Float)
@@ -171,16 +171,16 @@ class BvalVolumes(Base):
     __tablename__ = "bval_volumes"
     # A view has no declared key; this one exists only to satisfy the mapper.
 
-    file_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    file_id: Mapped[str] = mapped_column(String, primary_key=True)
     volume_idx: Mapped[int | None] = mapped_column(BigInteger)
     b: Mapped[float | None] = mapped_column(Float)
-    source_file_id: Mapped[int | None] = mapped_column(BigInteger)
+    source_file_id: Mapped[str | None] = mapped_column(String)
 
 
 class Bvals(Base):
     __tablename__ = "bvals"
 
-    file_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    file_id: Mapped[str] = mapped_column(String, primary_key=True)
     row_idx: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     b: Mapped[float | None] = mapped_column(Float)
 
@@ -189,18 +189,18 @@ class BvecVolumes(Base):
     __tablename__ = "bvec_volumes"
     # A view has no declared key; this one exists only to satisfy the mapper.
 
-    file_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    file_id: Mapped[str] = mapped_column(String, primary_key=True)
     volume_idx: Mapped[int | None] = mapped_column(BigInteger)
     x: Mapped[float | None] = mapped_column(Float)
     y: Mapped[float | None] = mapped_column(Float)
     z: Mapped[float | None] = mapped_column(Float)
-    source_file_id: Mapped[int | None] = mapped_column(BigInteger)
+    source_file_id: Mapped[str | None] = mapped_column(String)
 
 
 class Bvecs(Base):
     __tablename__ = "bvecs"
 
-    file_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    file_id: Mapped[str] = mapped_column(String, primary_key=True)
     row_idx: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     x: Mapped[float | None] = mapped_column(Float)
     y: Mapped[float | None] = mapped_column(Float)
@@ -284,7 +284,7 @@ class Descriptions(Base):
     __tablename__ = "descriptions"
     # A view has no declared key; this one exists only to satisfy the mapper.
 
-    file_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    file_id: Mapped[str] = mapped_column(String, primary_key=True)
     row_idx: Mapped[int | None] = mapped_column(BigInteger)
     desc_id: Mapped[str | None] = mapped_column(String)
     description: Mapped[str | None] = mapped_column(String)
@@ -295,21 +295,21 @@ class Diffusion(Base):
     __tablename__ = "diffusion"
     # A view has no declared key; this one exists only to satisfy the mapper.
 
-    file_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    file_id: Mapped[str] = mapped_column(String, primary_key=True)
     volume_idx: Mapped[int | None] = mapped_column(BigInteger)
     bval: Mapped[float | None] = mapped_column(Float)
     bvec_x: Mapped[float | None] = mapped_column(Float)
     bvec_y: Mapped[float | None] = mapped_column(Float)
     bvec_z: Mapped[float | None] = mapped_column(Float)
-    bval_file_id: Mapped[int | None] = mapped_column(BigInteger)
-    bvec_file_id: Mapped[int | None] = mapped_column(BigInteger)
+    bval_file_id: Mapped[str | None] = mapped_column(String)
+    bvec_file_id: Mapped[str | None] = mapped_column(String)
 
 
 class EegChannels(Base):
     __tablename__ = "eeg_channels"
     # A view has no declared key; this one exists only to satisfy the mapper.
 
-    file_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    file_id: Mapped[str] = mapped_column(String, primary_key=True)
     row_idx: Mapped[int | None] = mapped_column(BigInteger)
     name: Mapped[str | None] = mapped_column(String)
     type: Mapped[str | None] = mapped_column(String)
@@ -329,7 +329,7 @@ class EegElectrodes(Base):
     __tablename__ = "eeg_electrodes"
     # A view has no declared key; this one exists only to satisfy the mapper.
 
-    file_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    file_id: Mapped[str] = mapped_column(String, primary_key=True)
     row_idx: Mapped[int | None] = mapped_column(BigInteger)
     name: Mapped[str | None] = mapped_column(String)
     x: Mapped[float | None] = mapped_column(Float)
@@ -345,7 +345,7 @@ class EmgChannels(Base):
     __tablename__ = "emg_channels"
     # A view has no declared key; this one exists only to satisfy the mapper.
 
-    file_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    file_id: Mapped[str] = mapped_column(String, primary_key=True)
     row_idx: Mapped[int | None] = mapped_column(BigInteger)
     name: Mapped[str | None] = mapped_column(String)
     type: Mapped[str | None] = mapped_column(String)
@@ -371,7 +371,7 @@ class EmgElectrodes(Base):
     __tablename__ = "emg_electrodes"
     # A view has no declared key; this one exists only to satisfy the mapper.
 
-    file_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    file_id: Mapped[str] = mapped_column(String, primary_key=True)
     row_idx: Mapped[int | None] = mapped_column(BigInteger)
     name: Mapped[str | None] = mapped_column(String)
     x: Mapped[float | None] = mapped_column(Float)
@@ -389,7 +389,7 @@ class Events(Base):
     __tablename__ = "events"
     # A view has no declared key; this one exists only to satisfy the mapper.
 
-    file_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    file_id: Mapped[str] = mapped_column(String, primary_key=True)
     onset: Mapped[float | None] = mapped_column(Float)
     duration: Mapped[float | None] = mapped_column(Float)
     HED: Mapped[str | None] = mapped_column(String)
@@ -403,8 +403,8 @@ class Events(Base):
 class FileAssociations(Base):
     __tablename__ = "file_associations"
 
-    source_file_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    target_file_id: Mapped[int | None] = mapped_column(BigInteger)
+    source_file_id: Mapped[str] = mapped_column(String, primary_key=True)
+    target_file_id: Mapped[str | None] = mapped_column(String)
     target_file_path: Mapped[str] = mapped_column(String, primary_key=True)
     association_type: Mapped[str] = mapped_column(String, primary_key=True)
 
@@ -412,7 +412,7 @@ class FileAssociations(Base):
 class FileRegistry(Base):
     __tablename__ = "file_registry"
 
-    file_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    file_id: Mapped[str] = mapped_column(String, primary_key=True)
     dataset_id: Mapped[str | None] = mapped_column(String)
     root_uri: Mapped[str | None] = mapped_column(String)
     file_path: Mapped[str | None] = mapped_column(String)
@@ -426,7 +426,7 @@ class IeegChannels(Base):
     __tablename__ = "ieeg_channels"
     # A view has no declared key; this one exists only to satisfy the mapper.
 
-    file_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    file_id: Mapped[str] = mapped_column(String, primary_key=True)
     row_idx: Mapped[int | None] = mapped_column(BigInteger)
     name: Mapped[str | None] = mapped_column(String)
     type: Mapped[str | None] = mapped_column(String)
@@ -447,7 +447,7 @@ class IeegElectrodes(Base):
     __tablename__ = "ieeg_electrodes"
     # A view has no declared key; this one exists only to satisfy the mapper.
 
-    file_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    file_id: Mapped[str] = mapped_column(String, primary_key=True)
     row_idx: Mapped[int | None] = mapped_column(BigInteger)
     name: Mapped[str | None] = mapped_column(String)
     x: Mapped[float | None] = mapped_column(Float)
@@ -468,7 +468,7 @@ class MegChannels(Base):
     __tablename__ = "meg_channels"
     # A view has no declared key; this one exists only to satisfy the mapper.
 
-    file_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    file_id: Mapped[str] = mapped_column(String, primary_key=True)
     row_idx: Mapped[int | None] = mapped_column(BigInteger)
     name: Mapped[str | None] = mapped_column(String)
     type: Mapped[str | None] = mapped_column(String)
@@ -488,7 +488,7 @@ class Motion(Base):
     __tablename__ = "motion"
     # A view has no declared key; this one exists only to satisfy the mapper.
 
-    file_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    file_id: Mapped[str] = mapped_column(String, primary_key=True)
     row_idx: Mapped[int | None] = mapped_column(BigInteger)
     other_data: Mapped[str | None] = mapped_column(String)
 
@@ -497,7 +497,7 @@ class MotionChannels(Base):
     __tablename__ = "motion_channels"
     # A view has no declared key; this one exists only to satisfy the mapper.
 
-    file_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    file_id: Mapped[str] = mapped_column(String, primary_key=True)
     row_idx: Mapped[int | None] = mapped_column(BigInteger)
     name: Mapped[str | None] = mapped_column(String)
     component: Mapped[str | None] = mapped_column(String)
@@ -517,7 +517,7 @@ class NirsChannels(Base):
     __tablename__ = "nirs_channels"
     # A view has no declared key; this one exists only to satisfy the mapper.
 
-    file_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    file_id: Mapped[str] = mapped_column(String, primary_key=True)
     row_idx: Mapped[int | None] = mapped_column(BigInteger)
     name: Mapped[str | None] = mapped_column(String)
     type: Mapped[str | None] = mapped_column(String)
@@ -542,7 +542,7 @@ class NirsOptodes(Base):
     __tablename__ = "nirs_optodes"
     # A view has no declared key; this one exists only to satisfy the mapper.
 
-    file_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    file_id: Mapped[str] = mapped_column(String, primary_key=True)
     row_idx: Mapped[int | None] = mapped_column(BigInteger)
     name: Mapped[str | None] = mapped_column(String)
     type: Mapped[str | None] = mapped_column(String)
@@ -577,7 +577,7 @@ class Phenotype(Base):
     __tablename__ = "phenotype"
     # A view has no declared key; this one exists only to satisfy the mapper.
 
-    file_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    file_id: Mapped[str] = mapped_column(String, primary_key=True)
     row_idx: Mapped[int | None] = mapped_column(BigInteger)
     participant_id: Mapped[str | None] = mapped_column(String)
     HED: Mapped[str | None] = mapped_column(String)
@@ -588,7 +588,7 @@ class Physio(Base):
     __tablename__ = "physio"
     # A view has no declared key; this one exists only to satisfy the mapper.
 
-    file_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    file_id: Mapped[str] = mapped_column(String, primary_key=True)
     row_idx: Mapped[int | None] = mapped_column(BigInteger)
     cardiac: Mapped[float | None] = mapped_column(Float)
     respiratory: Mapped[float | None] = mapped_column(Float)
@@ -604,7 +604,7 @@ class PhysioEvents(Base):
     __tablename__ = "physio_events"
     # A view has no declared key; this one exists only to satisfy the mapper.
 
-    file_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    file_id: Mapped[str] = mapped_column(String, primary_key=True)
     row_idx: Mapped[int | None] = mapped_column(BigInteger)
     onset: Mapped[float | None] = mapped_column(Float)
     duration: Mapped[float | None] = mapped_column(Float)
@@ -617,7 +617,7 @@ class Samples(Base):
     __tablename__ = "samples"
     # A view has no declared key; this one exists only to satisfy the mapper.
 
-    file_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    file_id: Mapped[str] = mapped_column(String, primary_key=True)
     row_idx: Mapped[int | None] = mapped_column(BigInteger)
     derived_from: Mapped[str | None] = mapped_column(String)
     participant_id: Mapped[str | None] = mapped_column(String)
@@ -630,7 +630,7 @@ class Samples(Base):
 class Scans(Base):
     __tablename__ = "scans"
 
-    file_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    file_id: Mapped[str] = mapped_column(String, primary_key=True)
     HED: Mapped[str | None] = mapped_column(String)
     acq_time: Mapped[str | None] = mapped_column(String)
     other_data: Mapped[str | None] = mapped_column(String)
@@ -640,7 +640,7 @@ class SegmentationLookup(Base):
     __tablename__ = "segmentation_lookup"
     # A view has no declared key; this one exists only to satisfy the mapper.
 
-    file_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    file_id: Mapped[str] = mapped_column(String, primary_key=True)
     row_idx: Mapped[int | None] = mapped_column(BigInteger)
     abbreviation: Mapped[str | None] = mapped_column(String)
     color: Mapped[str | None] = mapped_column(String)
@@ -665,7 +665,7 @@ class Sessions(Base):
 class Sidecars(Base):
     __tablename__ = "sidecars"
 
-    file_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    file_id: Mapped[str] = mapped_column(String, primary_key=True)
     ACCELChannelCount: Mapped[int | None] = mapped_column(BigInteger)
     ANGACCELChannelCount: Mapped[int | None] = mapped_column(BigInteger)
     Acknowledgements: Mapped[str | None] = mapped_column(String)
@@ -1121,7 +1121,7 @@ class Stim(Base):
     __tablename__ = "stim"
     # A view has no declared key; this one exists only to satisfy the mapper.
 
-    file_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    file_id: Mapped[str] = mapped_column(String, primary_key=True)
     row_idx: Mapped[int | None] = mapped_column(BigInteger)
     other_data: Mapped[str | None] = mapped_column(String)
 

@@ -48,6 +48,13 @@ anyhow = "1"
 # line up across the FFI boundary. That invariant used to live in a comment.
 duckdb = { version = "1.0", features = ["bundled"] }
 
+# `file_id` is a UUID (ADR 0006), so this is shared by `bidslake`, which derives it, and the
+# `bidslake-py` extension, which hands it to Python as a `uuid.UUID` — the same
+# must-not-drift argument as `duckdb` above, and pyo3's `uuid` feature pins a floor of 1.11.
+# `default-features = false` drops `rng` and `serde`: every id here comes from a SHA-256, so
+# there is nothing to generate randomly, and the value crosses `serde_json` as a string.
+uuid = { version = "1.11", default-features = false, features = ["std"] }
+
 # Dev-only, but shared, so declared on the same terms. `tempfile` was pinned three different
 # ways ("3", "3.8", "3") across three crates before this; "3.8" is the tightest of them, so
 # nothing loosens.

@@ -37,6 +37,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 
+from ._bidslake import file_id
 from .file import BidsFile
 from .layout import BidsLake, Table
 from .layouts import Layout, LayoutAt, RoleState, layout
@@ -47,7 +48,9 @@ from .schema import C
 
 # `_bidslake` (the compiled extension) is intentionally not re-exported here — it
 # is a private implementation detail, imported and used by `layout`. It remains
-# importable as `bidslake._bidslake` for anyone who needs it.
+# importable as `bidslake._bidslake` for anyone who needs it. `file_id` is the one
+# exception: the id derivation is specified behaviour (docs/adr/0006), and computing one
+# by hand otherwise means reimplementing SHA-256 and the `\x1f` join.
 __all__ = [
     "BidsFile",
     "BidsLake",
@@ -59,6 +62,7 @@ __all__ = [
     "RoleState",
     "Sibling",
     "Table",
+    "file_id",
     "layout",
     "open",
     "sibling",

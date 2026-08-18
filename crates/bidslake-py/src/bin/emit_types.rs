@@ -132,6 +132,14 @@ fn class_name(table: &str) -> String {
 /// Approximate on purpose: these models are compiled to SQL strings and executed by the
 /// Rust engine, never used to emit DDL, so the type only has to be close enough to render
 /// a literal correctly. `HUGEINT` has no SQLAlchemy spelling and maps to `BigInteger`.
+///
+/// `UUID` falls to the `String` default deliberately rather than mapping to SQLAlchemy's
+/// `Uuid`. It is `file_id`, and what a caller *holds* is a `str`: a `UUID` column crosses
+/// Arrow as `Utf8` and polars has no UUID dtype to receive it as, so every frame hands the
+/// value over as a string (docs/adr/0006). An annotation of `uuid.UUID` would describe the
+/// engine's type rather than the one the query layer returns, and a type checker cannot
+/// catch the difference — polars is not generic over its schema, so a column element is
+/// `Any`. `COLUMNS` still records the DuckDB type, which is where that belongs.
 fn sa_type(duckdb_type: &str) -> (&'static str, &'static str) {
     match duckdb_type {
         "BIGINT" | "INTEGER" | "HUGEINT" | "SMALLINT" | "TINYINT" | "UBIGINT" => {

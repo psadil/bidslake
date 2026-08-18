@@ -33,8 +33,9 @@
 //!   It identifies a file only together with the root it was walked from, which is why
 //!   `file_registry` holds `(dataset_id, root_uri, file_path)` and everything else refers
 //!   to a file by `file_id`.
-//! - **`file_id`** — the surrogate key for a file: the first 64 bits of
-//!   `SHA-256(dataset_id ␟ root_uri ␟ file_path)`, as a `UBIGINT` (`bids::file_id`).
+//! - **`file_id`** — the surrogate key for a file: the first 128 bits of
+//!   `SHA-256(dataset_id ␟ root_uri ␟ file_path)`, stamped RFC 9562 v8 and stored as a
+//!   `UUID` (`bids::file_id`).
 //!   Content-derived, so it is stable across runs and machines and a re-index upserts onto
 //!   the same rows. Every file-keyed table keys on it; `scans`, `sidecars`, `bvals` and
 //!   `bvecs` declare a real `FOREIGN KEY`, and the per-row tables and `file_associations`
@@ -304,7 +305,7 @@ CREATE TABLE IF NOT EXISTS tabular_undeclared_columns (
 /// ingestion schema and surfaced by the generated `bval_volumes` view as `volume_idx`.
 pub const CREATE_BVALS_TABLE: &str = "
 CREATE TABLE IF NOT EXISTS bvals (
-    file_id UBIGINT,
+    file_id UUID,
     row_idx BIGINT,
     b DOUBLE,
     PRIMARY KEY (file_id, row_idx),
@@ -322,7 +323,7 @@ CREATE TABLE IF NOT EXISTS bvals (
 /// `bvec_volumes`) a plain one-to-one join (ADR 0003).
 pub const CREATE_BVECS_TABLE: &str = "
 CREATE TABLE IF NOT EXISTS bvecs (
-    file_id UBIGINT,
+    file_id UUID,
     row_idx BIGINT,
     x DOUBLE,
     y DOUBLE,
@@ -381,8 +382,8 @@ LEFT JOIN bvec_volumes c USING (file_id, volume_idx);
 /// when the id is NULL and the file arrives in a later run.
 pub const CREATE_FILE_ASSOCIATIONS_TABLE: &str = "
 CREATE TABLE IF NOT EXISTS file_associations (
-    source_file_id UBIGINT,
-    target_file_id UBIGINT,
+    source_file_id UUID,
+    target_file_id UUID,
     target_file_path TEXT,
     association_type TEXT,
     PRIMARY KEY (source_file_id, target_file_path, association_type)

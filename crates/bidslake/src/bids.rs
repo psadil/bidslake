@@ -32,7 +32,7 @@ use crate::links;
 use crate::readers::{
     self, CSV_READER, ContentReader, DIFFUSION_READER, DeclaredTable, MATRIX_READER,
 };
-use crate::schema::dynamic::{quote_ident, sql_lit};
+use crate::schema::dynamic::{quote_ident, sql_lit, sql_uuid_lit};
 use crate::schema::ingestion::{Disposition, Undeclared};
 use crate::schema::recording::ColumnNames;
 use crate::schema::tabular::{ColumnSpec, FileContext, RowIdentity, TableSpec};
@@ -47,6 +47,7 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use uuid::Uuid;
 
 /// The `read_csv` relaxations that make a tabular read non-poisoning: a malformed
 /// row is padded or dropped rather than aborting the ingest transaction (so
@@ -657,7 +658,7 @@ impl BidsParser {
     ///
     /// `root_uri` is the run's, because a run walks exactly one root and every path it hands
     /// this is relative to that root.
-    fn file_key(&self, dataset_id: &str, rel_path: &str) -> u64 {
+    fn file_key(&self, dataset_id: &str, rel_path: &str) -> Uuid {
         file_id(dataset_id, &self.root_uri, rel_path)
     }
 
@@ -676,10 +677,10 @@ impl BidsParser {
         let mut row = serde_json::Map::new();
         row.insert(
             "file_id".to_string(),
-            // A JSON *number*, not a string: a `u64` is exactly what
-            // `serde_json::Number` holds, so the id needs no decimal-string detour to
-            // reach the writer (see [`file_id`]).
-            Value::Number(file_id(dataset_id, &self.root_uri, file_path).into()),
+            // The canonical hyphenated spelling, which is what `UUID` columns take and
+            // what the Arrow bridge hands back (see [`file_id`]). `serde_json` has no
+            // 128-bit number, so a string is the representation rather than a detour.
+            Value::String(file_id(dataset_id, &self.root_uri, file_path).to_string()),
         );
         row.insert(
             "dataset_id".to_string(),
@@ -1388,7 +1389,7 @@ impl BidsParser {
         // `.json` it was read from, which has a registry row of its own.
         sidecar_entry
             .entry("file_id".to_string())
-            .or_insert_with(|| Value::Number(self.file_key(dataset_id, file_path).into()));
+            .or_insert_with(|| Value::String(self.file_key(dataset_id, file_path).to_string()));
         Some(Value::Object(sidecar_entry))
     }
 
@@ -2521,11 +2522,9 @@ impl BidsParser {
                     // Scoped by `file_id`, which already carries the dataset and the root —
                     // so a re-index of one root of a multi-root dataset cannot reach another
                     // root's rows, even where the two hold the same relative path.
-                    // Unsigned integer literals: no quoting, and nothing for
-                    // `sql_in_list`'s escaping to do.
                     let id_list = members
                         .iter()
-                        .map(|m| self.file_key(&dataset_id, &m.rel_path).to_string())
+                        .map(|m| sql_uuid_lit(self.file_key(&dataset_id, &m.rel_path)))
                         .collect::<Vec<_>>()
                         .join(", ");
                     let del = format!("DELETE FROM {} WHERE file_id IN ({id_list})", spec.table);
@@ -2763,7 +2762,7 @@ impl BidsParser {
         let del = format!(
             "DELETE FROM {} WHERE file_id = {}",
             table,
-            self.file_key(&rec.dataset_id, &rec.rel_path)
+            sql_uuid_lit(self.file_key(&rec.dataset_id, &rec.rel_path))
         );
         db.conn.execute(&del, [])?;
 
@@ -2848,7 +2847,7 @@ impl BidsParser {
         }
 
         let source = self.fs.read_csv_source(Path::new(rel_path)).await?;
-        let file_key = self.file_key(dataset_id, rel_path);
+        let file_key = sql_uuid_lit(self.file_key(dataset_id, rel_path));
 
         // An order-preserving read needs a sequential scan, for the same reason the batched
         // tabular path does: `row_number()` is assigned in physical read order, and only a
@@ -2982,7 +2981,7 @@ impl BidsParser {
         // `_channels.tsv`'s line order maps onto the columns of the recording beside it.
         let sql = format!(
             "SELECT name FROM {channels_table} WHERE file_id = {} ORDER BY row_idx",
-            self.file_key(&rec.dataset_id, &channels_path)
+            sql_uuid_lit(self.file_key(&rec.dataset_id, &channels_path))
         );
         let mut stmt = db.conn.prepare(&sql)?;
         let names = stmt
@@ -3165,6 +3164,12 @@ fn split_suffix_ext(file_name: &str) -> (String, String) {
 
 /// Whether a DuckDB type needs a `TRY_CAST` when read from an all-varchar TSV
 /// (so a `n/a` or otherwise unparseable cell becomes NULL rather than erroring).
+///
+/// `UUID` is deliberately absent, and `file_id_is_never_try_cast` pins it. A `TRY_CAST` is
+/// exactly the wrong verb for a key: it turns a malformed id into a silent NULL, which is the
+/// failure mode the whole of ADR 0006 exists to keep loud. Nothing writes an id through this
+/// path today — the id arrives as a literal, not a TSV cell — but a schema declaring a `UUID`
+/// column later would inherit whatever this says.
 fn needs_try_cast(sql_type: &str) -> bool {
     matches!(
         sql_type,
@@ -3204,7 +3209,7 @@ fn needs_try_cast(sql_type: &str) -> bool {
 fn build_tabular_insert_sql(
     spec: &TableSpec,
     source: &str,
-    file_id: u64,
+    file_id: Uuid,
     colnames: &[String],
     read_opts: &str,
     preserve_order: bool,
@@ -3218,8 +3223,7 @@ fn build_tabular_insert_sql(
     let present: HashSet<&str> = colnames.iter().map(|s| s.as_str()).collect();
     let mut selects: Vec<String> = Vec::new();
 
-    // An unsigned integer literal needs no quoting and no cast.
-    selects.push(format!("{file_id} AS file_id"));
+    selects.push(format!("{} AS file_id", sql_uuid_lit(file_id)));
     // `row_number() OVER ()` numbers rows in physical read order; under the `parallel=false`
     // read forced below, that is file line order — which for a recording is sample order, so it
     // is load-bearing rather than cosmetic. Gated on the same flag as the column's existence in
@@ -3472,13 +3476,14 @@ fn build_tabular_batch_select(
         .iter()
         .map(|(l, r, aux)| {
             format!(
-                // The id is an unsigned integer literal now, so it needs no quoting
-                // and no cast to get out of a string.
+                // The `::UUID` on the id matters here beyond documentation: without it
+                // the `VALUES` column infers `VARCHAR`, and a `VARCHAR` compares to a
+                // `UUID` under equality only.
                 "({}, {}, {}, {})",
                 sql_lit(l),
                 sql_lit(r),
                 sql_lit(aux),
-                file_id(dataset_id, root_uri, r)
+                sql_uuid_lit(file_id(dataset_id, root_uri, r))
             )
         })
         .collect::<Vec<_>>()
@@ -3634,8 +3639,8 @@ impl Kind {
     }
 }
 
-/// The stable identity of one file in the catalog: the first **64 bits** of
-/// `SHA-256(dataset_id \x1f root_uri \x1f file_path)`, stored as a `UBIGINT`.
+/// The stable identity of one file in the catalog: the first **128 bits** of
+/// `SHA-256(dataset_id \x1f root_uri \x1f file_path)`, stored as a `UUID`.
 ///
 /// This is a **stored** primary key that every satellite table foreign-keys to, so it must be
 /// reproducible from the three identity columns alone — across runs, machines, ingest orders and
@@ -3647,13 +3652,22 @@ impl Kind {
 /// `\x1f` (ASCII unit separator) delimits the parts because it cannot occur in a path or URI, so
 /// no combination of the three can be confused for another.
 ///
-/// The width is 64 and not 128 because `HUGEINT` does not survive the Arrow bridge to Python,
-/// which hands it over as `Decimal128(38, 0)` — a range two ids in five fall outside of. ADR
-/// 0006 works that through, along with the collision resistance it costs and the point past
-/// which the choice wants revisiting. `UBIGINT` crosses as `UInt64` and arrives as a plain
-/// Python `int`, and it fits `serde_json::Number` exactly, which is why this returns an integer
-/// and [`Schema::row_values`] takes one without a decimal-string detour.
-pub(crate) fn file_id(dataset_id: &str, root_uri: &str, file_path: &str) -> u64 {
+/// `UUID` and not `HUGEINT`, though both are 128 bits, because the two cross the Arrow bridge
+/// differently and only one of them survives it. DuckDB hands `HUGEINT` to Python as
+/// `Decimal128(38, 0)`, whose maximum is `10^38 - 1` against `HUGEINT`'s `2^127 - 1` — a range
+/// two ids in five fall outside of, which is what sent the key to `UBIGINT` before. `UUID`
+/// exports as Arrow `Utf8` and arrives as a `str`, while remaining `PhysicalType::INT128`
+/// inside the engine, so it keeps the integer join width, hashing and compression an id column
+/// wants. ADR 0006 works that through.
+///
+/// [`uuid::Builder::from_custom_bytes`] is RFC 9562 version 8 — the version reserved for
+/// vendor-specific ids — so it stamps the 6 version and variant bits and leaves the other 122
+/// alone. Those 6 bits are the whole cost of the id being a *well-formed* UUID rather than a
+/// raw digest prefix: `uuid.UUID(...).version` then reads `8` instead of whichever nibble the
+/// hash happened to land on, which for a truncated SHA-256 is arbitrary and sometimes a
+/// confidently wrong `4` or `6`. 122 bits leaves the birthday bound at `n² / 2^123`
+/// — about `9 × 10⁻²²` at `10⁸` files.
+pub fn file_id(dataset_id: &str, root_uri: &str, file_path: &str) -> Uuid {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(dataset_id.as_bytes());
@@ -3662,8 +3676,8 @@ pub(crate) fn file_id(dataset_id: &str, root_uri: &str, file_path: &str) -> u64 
     hasher.update(b"\x1f");
     hasher.update(file_path.as_bytes());
     let digest = hasher.finalize();
-    let bytes: [u8; 8] = digest[..8].try_into().expect("sha256 yields 32 bytes");
-    u64::from_be_bytes(bytes)
+    let bytes: [u8; 16] = digest[..16].try_into().expect("sha256 yields 32 bytes");
+    uuid::Builder::from_custom_bytes(bytes).into_uuid()
 }
 
 /// Classify a walked file.
@@ -3721,6 +3735,7 @@ mod tests {
     use proptest::prelude::*;
     use rstest::rstest;
     use std::path::Path;
+    use uuid::Uuid;
 
     #[test]
     fn normalize_path_skips_cross_dataset_bids_uri() {
@@ -3821,7 +3836,7 @@ mod tests {
             build_tabular_insert_sql(
                 spec,
                 "/t/f.tsv",
-                12345,
+                file_id("ds", "file:///r", "x.tsv"),
                 &[],
                 HEADER_READ_OPTS,
                 preserve,
@@ -3892,7 +3907,7 @@ mod tests {
             let (single, dropped_single) = build_tabular_insert_sql(
                 &spec,
                 "/t/f.tsv",
-                12345,
+                file_id("ds", "file:///r", "x.tsv"),
                 &header,
                 HEADER_READ_OPTS,
                 true,
@@ -3961,16 +3976,23 @@ mod tests {
     fn file_id_is_stable_and_separator_safe() {
         use super::file_id;
         // Cross-checked against an independent implementation:
-        //   int.from_bytes(sha256(b"ds001\x1ffile:///data/ds001\x1fsub-01/anat/sub-01_T1w.nii.gz")
-        //                  .digest()[:8], "big")
-        assert_eq!(
-            file_id(
-                "ds001",
-                "file:///data/ds001",
-                "sub-01/anat/sub-01_T1w.nii.gz"
-            ),
-            4_099_505_605_929_783_485
+        //   b = bytearray(sha256(b"ds001\x1ffile:///data/ds001\x1fsub-01/anat/sub-01_T1w.nii.gz")
+        //                 .digest()[:16])
+        //   b[6] = (b[6] & 0x0F) | 0x80   # RFC 9562 version 8
+        //   b[8] = (b[8] & 0x3F) | 0x80   # RFC 9562 variant
+        //   uuid.UUID(bytes=bytes(b))
+        let id = file_id(
+            "ds001",
+            "file:///data/ds001",
+            "sub-01/anat/sub-01_T1w.nii.gz",
         );
+        assert_eq!(id.to_string(), "38e45ea0-e42a-80bd-a500-eb3dbf6342a7");
+
+        // A well-formed RFC 9562 v8, not a bare digest prefix. Python's `uuid.UUID` reads
+        // these nibbles and will report *some* version for any 16 bytes; stamping them is
+        // what makes the answer 8 rather than whichever the hash happened to produce.
+        assert_eq!(id.get_version_num(), 8);
+        assert_eq!(id.get_variant(), uuid::Variant::RFC4122);
 
         // Same three parts, same id — whatever else is in the catalog.
         assert_eq!(
@@ -3994,10 +4016,11 @@ mod tests {
     proptest! {
         /// No two distinct identity triples in a catalog-sized corpus share an id.
         ///
-        /// `file_id` is a primary key written with `INSERT OR REPLACE`, so a collision does not
-        /// raise — it quietly merges two files into one row, which ADR 0006 records as open.
-        /// This is the half that can be checked without a catalog, and the half that would
-        /// fail first if the hash, the truncation to 64 bits, or the `\x1f` join ever changed.
+        /// `file_id` is a primary key written with `INSERT OR REPLACE`, so a collision would
+        /// merge two files into one row rather than raise — which `BidsDb::check_id_collisions`
+        /// now refuses at the upsert. This is the half that can be checked without a catalog,
+        /// and the half that would fail first if the hash, the truncation to 128 bits, the
+        /// version/variant stamp, or the `\x1f` join ever changed.
         ///
         /// The alphabets include `/`, `:`, `.`, `_` and `-` because the claim being tested is
         /// that the unit separator "cannot occur in a path or URI" — an alphabet of bare
@@ -4005,7 +4028,7 @@ mod tests {
         /// by construction, so no case is spent rejecting a duplicate.
         ///
         /// This does not disprove the birthday bound in the doc above; 200 triples is far below
-        /// where 64 bits gets interesting. It asserts the function is injective on the shapes a
+        /// where 122 bits gets interesting. It asserts the function is injective on the shapes a
         /// real catalog holds, which is the property the primary key actually rests on.
         #[test]
         fn no_two_identity_triples_in_a_corpus_share_an_id(
@@ -4014,7 +4037,7 @@ mod tests {
                 1..200,
             )
         ) {
-            let ids: std::collections::BTreeSet<u64> = triples
+            let ids: std::collections::BTreeSet<Uuid> = triples
                 .iter()
                 .map(|(dataset, root, path)| file_id(dataset, root, path))
                 .collect();

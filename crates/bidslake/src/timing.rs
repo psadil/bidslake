@@ -53,7 +53,7 @@ pub enum Phase {
     Associations,
     /// The slice of `Finalize` spent in the staged upserts of `file_associations`,
     /// `bvals` and `bvecs`. Note this brackets the `BidsDb::upsert_*` calls, which parse
-    /// each `file_id` into its physical `UBIGINT` before handing the row to the Appender —
+    /// each `file_id` into its canonical spelling before handing the row to the Appender —
     /// so, like [`Phase::InheritAppend`], it is not purely DuckDB's write time. The Rust-side
     /// dedup and the gradient partition are deliberately outside it.
     Writes,

@@ -14,6 +14,7 @@
 
 use bidslake::db::{BidsDb, FileAssociation};
 use bidslake::schema::Schema;
+use uuid::Uuid;
 
 /// `file_associations` because it carries no foreign keys — the duplicate behaviour is a
 /// property of the staging pattern, and this keeps the setup to one table.
@@ -23,10 +24,16 @@ fn db() -> anyhow::Result<BidsDb> {
     Ok(db)
 }
 
-fn assoc(target_id: u64) -> FileAssociation {
+/// A distinct id per `n`, spelled so the assertions can name one: the value is opaque, only
+/// its distinctness matters.
+fn id(n: u128) -> Uuid {
+    Uuid::from_u128(n)
+}
+
+fn assoc(target_id: u128) -> FileAssociation {
     FileAssociation {
-        source_file_id: 1,
-        target_file_id: Some(target_id),
+        source_file_id: id(1),
+        target_file_id: Some(id(target_id)),
         target_file_path: "sub-01/func/sub-01_task-rest_bold.nii.gz".to_string(),
         assoc_type: "events".to_string(),
     }
@@ -41,14 +48,15 @@ fn a_duplicate_within_one_batch_is_dropped_silently_keeping_the_first() -> anyho
     // is the one a re-index legitimately changes.
     db.upsert_file_associations(&[assoc(100), assoc(200)])?;
 
-    let (rows, target): (i64, i64) = db.conn.query_row(
-        "SELECT COUNT(*), MAX(target_file_id) FROM file_associations",
+    let (rows, target): (i64, String) = db.conn.query_row(
+        "SELECT COUNT(*), MAX(target_file_id)::VARCHAR FROM file_associations",
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     assert_eq!(rows, 1, "the duplicate collapsed rather than erroring");
     assert_eq!(
-        target, 100,
+        target,
+        id(100).to_string(),
         "the *first* staged row won; the row-at-a-time path this replaced kept the last"
     );
     Ok(())
@@ -64,23 +72,27 @@ fn a_conflict_with_an_existing_row_replaces_it() -> anyhow::Result<()> {
     let mut dangling = assoc(0);
     dangling.target_file_id = None;
     db.upsert_file_associations(&[dangling])?;
-    let unresolved: Option<i64> =
-        db.conn
-            .query_row("SELECT target_file_id FROM file_associations", [], |r| {
-                r.get(0)
-            })?;
+    let unresolved: Option<String> = db.conn.query_row(
+        "SELECT target_file_id::VARCHAR FROM file_associations",
+        [],
+        |r| r.get(0),
+    )?;
     assert_eq!(unresolved, None, "the target was not in the catalog yet");
 
     // A second run, with the target now resolvable.
     db.upsert_file_associations(&[assoc(42)])?;
 
-    let (rows, target): (i64, Option<i64>) = db.conn.query_row(
-        "SELECT COUNT(*), MAX(target_file_id) FROM file_associations",
+    let (rows, target): (i64, Option<String>) = db.conn.query_row(
+        "SELECT COUNT(*), MAX(target_file_id)::VARCHAR FROM file_associations",
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     assert_eq!(rows, 1, "the re-index refreshed rather than duplicating");
-    assert_eq!(target, Some(42), "and the NULL was not frozen in");
+    assert_eq!(
+        target,
+        Some(id(42).to_string()),
+        "and the NULL was not frozen in"
+    );
     Ok(())
 }
 

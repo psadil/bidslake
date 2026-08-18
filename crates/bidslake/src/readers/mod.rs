@@ -27,6 +27,7 @@ use bids_schema::term_map::FileFacts;
 use serde_json::{Map, Value};
 
 use crate::schema::tabular::ColumnSpec;
+use uuid::Uuid;
 
 /// The ingestion schema's `reader` name for the batched tabular ingest.
 pub const CSV_READER: &str = "csv";
@@ -107,7 +108,7 @@ pub trait ContentReader: Send + Sync {
     /// back from the registry as though no rule ever routed it.
     fn read(
         &self,
-        file_id: u64,
+        file_id: Uuid,
         content: &str,
         facts: &FileFacts,
         declared: Option<DeclaredTable<'_>>,
@@ -120,7 +121,7 @@ pub trait ContentReader: Send + Sync {
 ///
 /// `file_id` rather than `(dataset_id, file_path)`: a data table points at the registry, and
 /// the path it points to is a column of that (docs/adr/0006).
-pub(crate) fn seed_row(file_id: u64, facts: &FileFacts) -> Map<String, Value> {
+pub(crate) fn seed_row(file_id: Uuid, facts: &FileFacts) -> Map<String, Value> {
     let mut obj = Map::new();
     obj.insert("file_id".to_string(), Value::String(file_id.to_string()));
     for (k, v) in &facts.entities {

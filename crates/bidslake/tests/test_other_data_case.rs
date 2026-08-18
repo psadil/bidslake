@@ -15,8 +15,8 @@ use bidslake::schema::Schema;
 use serde_json::json;
 
 const FILE: &str = "sub-01/func/sub-01_task-rest_bold.nii.gz";
-/// Any stable id will do — these tests never resolve it back to a path.
-const FILE_ID: &str = "424242";
+/// Any well-formed id will do — these tests never resolve it back to a path.
+const FILE_ID: &str = "00000000-0000-8000-8000-000000424242";
 
 /// A catalog with the standard schema and the `file_registry` row `sidecars` keys against —
 /// that foreign key is enforced on this insert path, so the parent has to exist first.

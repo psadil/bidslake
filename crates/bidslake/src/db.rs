@@ -18,6 +18,7 @@ use anyhow::{Context as _, Result};
 use duckdb::{Connection, params};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 /// A [`duckdb::Error`] as a *leaf* [`anyhow::Error`], discarding its `source()`.
 ///
@@ -81,11 +82,11 @@ pub struct FileAssociation {
     /// `meta.associations` were resolved, or the file whose sidecar named an `IntendedFor`
     /// target. Never optional: only files the walk saw can be sources, so the id always
     /// resolves.
-    pub source_file_id: u64,
+    pub source_file_id: Uuid,
     /// `None` when the target names a file this dataset does not ship — a dangling
     /// `IntendedFor`. Kept rather than dropped (see the table's DDL), which is why the
     /// path below travels alongside the id.
-    pub target_file_id: Option<u64>,
+    pub target_file_id: Option<Uuid>,
     /// The target's dataset-relative path, already normalized — an `IntendedFor` written as a
     /// BIDS URI or as a subject-relative path arrives here resolved against the declaring
     /// file, and one naming *another* dataset never arrives at all.
@@ -388,11 +389,11 @@ impl BidsDb {
     ///
     /// Replaces the former `tabular_files` table, whose `table_name`/`n_rows` are dropped:
     /// which table a file's rows landed in is recoverable by joining that table on `file_id`.
-    pub fn record_file_status(&self, file_id: u64, status: TabularStatus) -> Result<()> {
+    pub fn record_file_status(&self, file_id: Uuid, status: TabularStatus) -> Result<()> {
         let mut stmt = self
             .conn
             .prepare_cached("UPDATE file_registry SET status = ? WHERE file_id = ?")?;
-        stmt.execute(params![status.as_str(), file_id])
+        stmt.execute(params![status.as_str(), file_id.to_string()])
             .with_context(|| format!("recording file {file_id} as {}", status.as_str()))?;
         Ok(())
     }
@@ -609,11 +610,11 @@ impl BidsDb {
     /// Note the scope: rows belonging to a file that has since been *deleted* are not reached,
     /// because this only runs for files the walk still finds. Pruning those is an integrity
     /// question, deliberately not one the write path answers.
-    pub fn clear_file_rows(&self, table: &str, file_id: u64) -> Result<()> {
+    pub fn clear_file_rows(&self, table: &str, file_id: Uuid) -> Result<()> {
         // `table` is always an internal literal, never user input.
         self.conn.execute(
             &format!("DELETE FROM {table} WHERE file_id = ?"),
-            params![file_id],
+            params![file_id.to_string()],
         )?;
         Ok(())
     }
@@ -724,8 +725,11 @@ impl BidsDb {
     ///   point, and `OR REPLACE` resolves them as intended.
     /// - **The Appender writes physical columns**, bypassing the planner, so none of the
     ///   implicit casting an `INSERT` performs happens — which is why the gradient and
-    ///   association writers hand it a `duckdb::types::Value::UBigInt` directly rather than
-    ///   letting a JSON number find its own way to the column.
+    ///   association writers name the `duckdb::types::Value` themselves rather than letting a
+    ///   JSON value find its own way to the column. For `file_id` that is `Value::Text`
+    ///   holding the canonical UUID spelling: duckdb-rs has no UUID variant, and DuckDB's
+    ///   appender casts a mismatched value with `DefaultTryCastAs` and *throws* when it
+    ///   cannot — so a malformed id is a failed run, not a corrupted key.
     ///
     /// Requires `table_name` to have a primary key (nothing to upsert on otherwise) and no
     /// generated columns (`SELECT *` would materialize them, and inserting into a generated
@@ -799,14 +803,13 @@ impl BidsDb {
         }
         self.upsert_staged("file_associations", |appender| {
             for assoc in assocs {
-                // Straight to the physical value: a `u64` *is* what the column
-                // holds, so there is nothing to parse and nothing that can fail. The
-                // helper this replaces existed only to turn a decimal string back into an
-                // `i128`, and was the last of three fabricated
-                // `ToSqlConversionFailure`s.
-                let source = duckdb::types::Value::UBigInt(assoc.source_file_id);
+                // The canonical spelling, which the Appender casts to `UUID` on the way
+                // in — duckdb-rs has no UUID `Value` variant, so `Text` is the only way to
+                // hand one over. A value that is not a UUID fails the cast loudly rather
+                // than landing under a corrupted id.
+                let source = duckdb::types::Value::Text(assoc.source_file_id.to_string());
                 let target = match assoc.target_file_id {
-                    Some(id) => duckdb::types::Value::UBigInt(id),
+                    Some(id) => duckdb::types::Value::Text(id.to_string()),
                     None => duckdb::types::Value::Null,
                 };
                 appender.append_row(params![
@@ -835,7 +838,7 @@ impl BidsDb {
         }
         self.upsert_staged("bvals", |appender| {
             for (file_id, bvals) in files {
-                let id = duckdb::types::Value::UBigInt(*file_id);
+                let id = duckdb::types::Value::Text(file_id.to_string());
                 for (i, &b) in bvals.iter().enumerate() {
                     appender.append_row(params![id, i as i64, b])?;
                 }
@@ -857,7 +860,7 @@ impl BidsDb {
         }
         self.upsert_staged("bvecs", |appender| {
             for (file_id, x, y, z) in files {
-                let id = duckdb::types::Value::UBigInt(*file_id);
+                let id = duckdb::types::Value::Text(file_id.to_string());
                 for i in 0..x.len() {
                     appender.append_row(params![id, i as i64, x[i], y[i], z[i]])?;
                 }
@@ -869,8 +872,8 @@ impl BidsDb {
 
 /// One `.bval` file's row of b-values, alongside the id of the gradient file it came from.
 /// Borrowed from the parse, so a batch costs no copy of the values.
-pub type BvalFile<'a> = (u64, &'a [f64]);
+pub type BvalFile<'a> = (Uuid, &'a [f64]);
 
 /// One `.bvec` file's three direction rows — `x`, `y`, `z` — alongside the id of the gradient
 /// file they came from. Borrowed from the parse, so a batch costs no copy of the values.
-pub type BvecFile<'a> = (u64, &'a [f64], &'a [f64], &'a [f64]);
+pub type BvecFile<'a> = (Uuid, &'a [f64], &'a [f64], &'a [f64]);

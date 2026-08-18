@@ -15,8 +15,14 @@ fn na_in_a_numeric_column_becomes_null() -> anyhow::Result<()> {
     let schema = Schema::load(None).unwrap();
     db.create_tables(&schema)?;
 
-    // `sidecars` foreign-keys into the registry, so the file has to exist first.
-    let file_id = "987654321";
+    // `sidecars` foreign-keys into the registry, so the file has to exist first. Any
+    // well-formed id will do — this test is about `n/a`, not about the key.
+    let file_id = bidslake::bids::file_id(
+        "ds000002",
+        "file:///r",
+        "sub-01/func/sub-01_task-x_run-01_bold.nii.gz",
+    )
+    .to_string();
     db.insert(
         &schema,
         "file_registry",
@@ -39,7 +45,7 @@ fn na_in_a_numeric_column_becomes_null() -> anyhow::Result<()> {
 
     let (tr, te): (Option<f64>, Option<f64>) = db.conn.query_row(
         "SELECT RepetitionTime, EchoTime FROM sidecars WHERE file_id = ?",
-        [file_id],
+        [&file_id],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     assert_eq!(tr, None, "`n/a` in a numeric column must store NULL");
