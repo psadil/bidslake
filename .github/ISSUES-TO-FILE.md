@@ -25,17 +25,6 @@ snapshot, so the counter assertions worth having (one tabular group per batched 
 undeclared statement per distinct name) still need criterion baselines rather than failing under
 `cargo test`. Adding one raises its own question about the thread-locals it would read.
 
-## Index fMRIPrep's surface morphometry maps
-
-`crates/bids-schema/data/overlays/fmriprep.json` used to declare a `morph` suffix covering the
-family; it was dropped because fMRIPrep writes no such file. Its surface maps are named by
-measure — `_hemi-L_thickness.shape.gii`, `_hemi-L_curv.shape.gii`, `_hemi-L_sulc.shape.gii` — and
-none of `thickness`/`curv`/`sulc` is a declared suffix, nor is `.shape.gii` a declared extension,
-so every one of them still indexes as nothing. Declaring the measure suffixes and the extension is
-what would actually reach them, and it is a larger question than a rename: the same three names
-are what FreeSurfer's `surf/?h.thickness` carries positionally, so the two producers should
-probably agree on one vocabulary rather than each getting its own.
-
 ## One name for a motion trace, whatever produced it
 
 `fmriprep_confounds`, `qsiprep_confounds` and `feat_motion` now declare their six rigid-body columns
@@ -68,3 +57,21 @@ validated against `crates/bids-schema/data/layout-metaschema.json`; the `Example
 direction against the read side at load time, and the round-trip check does the rest. The three have
 overlays under `crates/bids-schema/data/overlays/` to name their vocabulary from, and no term map yet.
 ADR 0002 (`docs/adr/0002-adapters-and-layouts.md`) records the gap.
+
+## Declare `.func.gii`, and revisit the vendored schema pin
+
+The `bep011` overlay declares the *structural* surface family, so fMRIPrep's `.shape.gii`
+morphometry and `.surf.gii` geometry now index and validate. Its surface BOLD does not:
+`ds000001-fmriprep` holds 48 `_bold.func.gii`, and `.func.gii` is not in the overlay because it is
+not BEP-011's — it was merged to `bids-specification` `master` separately, after the
+`third_party/bids-schema` pin at 1.11.1. So the fix is a vendored-schema bump
+(`tools/vendor-schema.sh`), not another overlay entry, and the bump wants doing on its own: it
+moves `schema_version`, regenerates `crates/bidslake-py/python/bidslake/schema/_generated.py` under
+the `codegen-drift` job, and re-runs `overlay::validate_effective`'s base/effective delta against a
+render whose pre-existing metaschema deviations may differ.
+
+Note the interaction with `crates/bids-schema/data/overlays/bep011.json` when the bump eventually
+crosses BEP-011 itself: the merge is additive, so an upstream render carrying these terms verbatim
+makes the overlay inert, and one carrying them with any edit makes it an `OverlayError::Conflict`
+naming the pointer that drifted. Either is the signal to delete the overlay rather than reconcile
+it, and `bids_schema::overlay::always_applied_overlay`'s doc comment says so.

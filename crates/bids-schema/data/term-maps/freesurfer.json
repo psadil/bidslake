@@ -119,6 +119,186 @@
       }
     },
     {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/surf/lh\\.thickness",
+      "Entities": {
+        "hemi": "L"
+      },
+      "Concepts": {
+        "datatype": "anat",
+        "suffix": "thickness"
+      }
+    },
+    {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/surf/rh\\.thickness",
+      "Entities": {
+        "hemi": "R"
+      },
+      "Concepts": {
+        "datatype": "anat",
+        "suffix": "thickness"
+      }
+    },
+    {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/surf/lh\\.curv",
+      "Entities": {
+        "hemi": "L"
+      },
+      "Concepts": {
+        "datatype": "anat",
+        "suffix": "curv"
+      }
+    },
+    {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/surf/rh\\.curv",
+      "Entities": {
+        "hemi": "R"
+      },
+      "Concepts": {
+        "datatype": "anat",
+        "suffix": "curv"
+      }
+    },
+    {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/surf/lh\\.sulc",
+      "Entities": {
+        "hemi": "L"
+      },
+      "Concepts": {
+        "datatype": "anat",
+        "suffix": "sulc"
+      }
+    },
+    {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/surf/rh\\.sulc",
+      "Entities": {
+        "hemi": "R"
+      },
+      "Concepts": {
+        "datatype": "anat",
+        "suffix": "sulc"
+      }
+    },
+    {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/surf/lh\\.area",
+      "Entities": {
+        "hemi": "L"
+      },
+      "Concepts": {
+        "datatype": "anat",
+        "suffix": "area"
+      }
+    },
+    {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/surf/rh\\.area",
+      "Entities": {
+        "hemi": "R"
+      },
+      "Concepts": {
+        "datatype": "anat",
+        "suffix": "area"
+      }
+    },
+    {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/surf/lh\\.white",
+      "Entities": {
+        "hemi": "L"
+      },
+      "Concepts": {
+        "datatype": "anat",
+        "suffix": "white"
+      }
+    },
+    {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/surf/rh\\.white",
+      "Entities": {
+        "hemi": "R"
+      },
+      "Concepts": {
+        "datatype": "anat",
+        "suffix": "white"
+      }
+    },
+    {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/surf/lh\\.pial",
+      "Entities": {
+        "hemi": "L"
+      },
+      "Concepts": {
+        "datatype": "anat",
+        "suffix": "pial"
+      }
+    },
+    {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/surf/rh\\.pial",
+      "Entities": {
+        "hemi": "R"
+      },
+      "Concepts": {
+        "datatype": "anat",
+        "suffix": "pial"
+      }
+    },
+    {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/surf/lh\\.inflated",
+      "Entities": {
+        "hemi": "L"
+      },
+      "Concepts": {
+        "datatype": "anat",
+        "suffix": "inflated"
+      }
+    },
+    {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/surf/rh\\.inflated",
+      "Entities": {
+        "hemi": "R"
+      },
+      "Concepts": {
+        "datatype": "anat",
+        "suffix": "inflated"
+      }
+    },
+    {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/surf/lh\\.sphere",
+      "Entities": {
+        "hemi": "L"
+      },
+      "Concepts": {
+        "datatype": "anat",
+        "suffix": "sphere"
+      }
+    },
+    {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/surf/rh\\.sphere",
+      "Entities": {
+        "hemi": "R"
+      },
+      "Concepts": {
+        "datatype": "anat",
+        "suffix": "sphere"
+      }
+    },
+    {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/surf/lh\\.smoothwm",
+      "Entities": {
+        "hemi": "L"
+      },
+      "Concepts": {
+        "datatype": "anat",
+        "suffix": "smoothwm"
+      }
+    },
+    {
+      "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/surf/rh\\.smoothwm",
+      "Entities": {
+        "hemi": "R"
+      },
+      "Concepts": {
+        "datatype": "anat",
+        "suffix": "smoothwm"
+      }
+    },
+    {
       "Template": "(?:sub-)?(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?/surf/lh\\.[^/]+",
       "Entities": {
         "hemi": "L"

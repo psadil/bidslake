@@ -66,7 +66,19 @@ impl BidsSchema {
     /// Load the bundled schema — the workspace's single source of truth, owned by the
     /// `bids-schema` crate (vendored in-tree via the `third_party/bids-schema` subtree).
     pub fn bundled() -> Result<Self, SchemaError> {
-        let raw: Value = serde_json::from_str(bids_schema::SCHEMA_JSON)?;
+        let mut raw: Value = serde_json::from_str(bids_schema::SCHEMA_JSON)?;
+        // The same always-applied overlay `bidslake::schema::Schema` merges, and for the same
+        // reason: the vendored render declares no cortical-surface vocabulary, so every
+        // `_hemi-L_thickness.shape.gii` an fMRIPrep tree holds matches no `rules.files` entry
+        // and is reported `NotIncluded`. This crate shares no schema loading with the indexer —
+        // it reads `SCHEMA_JSON` directly — so the merge has to happen on both sides or the
+        // overlay's `rules.files.deriv.structural_mri` block has no reader at all.
+        //
+        // Only `bundled()`. `from_spec`/`from_file`/`from_url` are a caller naming their own
+        // schema, and a mirror of one draft merged onto a render that may already carry it is
+        // their run aborting over vocabulary they did not ask for.
+        bids_schema::overlay::merge_into(&mut raw, &bids_schema::overlay::always_applied_overlay())
+            .map_err(|e| SchemaError::Overlay(e.to_string()))?;
         Self::from_value(raw)
     }
 
@@ -490,6 +502,11 @@ pub enum SchemaError {
         url: String,
         source: Box<ureq::Error>,
     },
+    /// The always-applied overlay disagreed with the vendored schema. Reachable only once
+    /// `third_party/bids-schema` is bumped past BEP-011 — at which point the fix is to delete
+    /// `data/overlays/bep011.json`, not to reconcile it.
+    #[error("Failed to merge the always-applied overlay: {0}")]
+    Overlay(String),
 }
 
 #[cfg(test)]

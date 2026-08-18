@@ -93,6 +93,50 @@ async fn a_generated_raw_tree_has_no_validator_errors() {
     );
 }
 
+/// The `Producer::Raw` bar, applied to a derivative tree — which was not previously possible.
+///
+/// Every other suffix this producer writes (`timeseries`, `xfm`, `boldref`) is overlay
+/// vocabulary that no `rules.files` group describes, so the validator reports each one
+/// `NotIncluded` and the tree could never be held to "zero errors". The surface family is the
+/// first that *is* described: the always-applied `bep011` overlay carries
+/// `rules.files.deriv.structural_mri`, mirroring the BEP the standard is adopting.
+///
+/// So this asserts on `NOT_INCLUDED` for the surface paths specifically rather than on the whole
+/// error set, and that is the honest scope: it fails if the overlay's rules stop reaching them —
+/// which is exactly what happens if the merge is dropped from `BidsSchema::bundled()`, the one
+/// place the validator's schema and the indexer's could silently diverge.
+#[tokio::test]
+async fn a_generated_fmriprep_trees_surfaces_are_part_of_bids() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let schema = schema_with(&["fmriprep"]);
+    Plan::producer(Producer::Fmriprep)
+        .scale(small())
+        .write(dir.path(), &schema)
+        .expect("writes");
+
+    let issues = bids_validator_rs::validate(
+        dir.path(),
+        &BidsSchema::bundled().expect("bundled validator schema"),
+        None,
+    )
+    .await
+    .expect("validator runs");
+
+    let unrecognized: Vec<&str> = issues
+        .all()
+        .iter()
+        .filter(|i| i.code == "NOT_INCLUDED")
+        .map(|i| i.location.as_str())
+        .filter(|p| p.ends_with(".shape.gii") || p.ends_with(".surf.gii"))
+        .collect();
+
+    assert!(
+        unrecognized.is_empty(),
+        "{} surface paths reported as not part of BIDS: {unrecognized:?}",
+        unrecognized.len()
+    );
+}
+
 /// ADR 0002 §7 at scale: a term-mapped file is *expected*, not un-BIDS. Without the adapter
 /// configured every one of these paths is a `NotIncluded` error, so this asserts the suppression
 /// reaches a whole generated tree and not only the handful of paths a fixture lists.

@@ -28,6 +28,11 @@ fn write_derivative_tree(root: &Path) {
     )
     .unwrap();
 
+    // Surface morphometry, named by measure the way fMRIPrep writes it. Undeclared until the
+    // always-applied `bep011` overlay, and reachable now without any adapter being named.
+    fs::write(anat.join("sub-01_hemi-L_thickness.shape.gii"), b"").unwrap();
+    fs::write(anat.join("sub-01_hemi-R_thickness.shape.gii"), b"").unwrap();
+
     // A preprocessed BOLD scan + sidecar.
     fs::write(func.join("sub-01_task-rest_desc-preproc_bold.nii.gz"), b"").unwrap();
     // A second spatial variant of the *same* run. One confounds file describes both, which
@@ -84,6 +89,27 @@ fn fmriprep_overlay() -> AppliedOverlay {
         content: bids_schema::overlay::bundled_overlay("fmriprep")
             .expect("bundled fmriprep overlay"),
     }
+}
+
+/// A BIDS-named surface map reads its concepts out of its own filename, so this needs no adapter
+/// and no `--overlay`: it is what the always-applied vocabulary buys on an ordinary ingest. The
+/// extension is the part worth asserting — `.shape.gii` is two dots, and a parser that split on
+/// the last one would report `.gii` and a suffix of `thickness.shape`.
+#[tokio::test]
+async fn a_surface_map_indexes_under_its_measure_suffix() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_derivative_tree(dir.path());
+    let db = common::ingest(dir.path()).await?;
+
+    let row: String = db.conn.query_row(
+        "SELECT suffix || ' ' || extension || ' ' || hemi FROM all_files \
+         WHERE file_path LIKE '%hemi-L_thickness%'",
+        [],
+        |r| r.get(0),
+    )?;
+
+    assert_eq!(row, "thickness .shape.gii L");
+    Ok(())
 }
 
 #[tokio::test]

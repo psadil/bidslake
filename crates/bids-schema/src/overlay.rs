@@ -139,6 +139,42 @@ pub fn load_overlay(path: &Path) -> Result<Value, OverlayError> {
 /// takes file paths only. Kept alongside [`bundled_overlay`] so the two never drift.
 pub const BUNDLED_OVERLAY_NAMES: &[&str] = &["fmriprep", "mriqc", "qsiprep", "freesurfer", "feat"];
 
+/// The overlay applied to *every* load of the embedded schema, whoever the caller is.
+///
+/// It mirrors BEP-011 "Structural derivatives" (bids-standard/bids-specification#518), which
+/// declares the cortical-surface family — `thickness`/`curv`/`sulc` and the rest, on
+/// `.shape.gii`/`.surf.gii`/`.dscalar.nii`. Two producers bidslake already ships adapters for
+/// write those files, and neither could name them: `objects.suffixes` had none of the terms and
+/// `objects.extensions` had none of the formats, so the same cortical thickness map needed a
+/// different predicate depending on which tool wrote it (ADR 0002).
+///
+/// **Why always, rather than under a name a caller opts into.** The vocabulary is not one
+/// producer's — it is what fMRIPrep's `_hemi-L_thickness.shape.gii` and FreeSurfer's
+/// `surf/lh.thickness` *agree* on, and a term map projects it for the second one. An overlay
+/// reached by `--adapter <name>` would have to be named by both, and a caller indexing a
+/// FreeSurfer tree would have to know to ask for a draft BEP by number to get cortical
+/// thickness back. It is layered the way [`crate::bundled_ingestion_source`]'s `base` fragment
+/// is, and like it, it is not an adapter anyone selects.
+///
+/// **It is meant to be deleted.** When BEP-011 merges and `third_party/bids-schema` is bumped
+/// past it, the vendored render carries these terms itself. Then either the merge is idempotent
+/// (upstream matches this mirror byte for byte, and the overlay is inert) or it is an
+/// [`OverlayError::Conflict`] naming the pointer that drifted — which is the signal to delete
+/// this file, not to reconcile it. That is why nothing here is "improved" relative to upstream:
+/// a paraphrase would turn a clean deletion into a merge.
+///
+/// Applied to the *embedded* schema only. A caller who supplies their own `--schema` has opted
+/// out of the vendored base, and merging a mirror of one draft onto a render that may already
+/// contain it would abort their run over vocabulary they never asked for.
+pub fn always_applied_overlay() -> Value {
+    serde_json::from_str(include_str!("../data/overlays/bep011.json"))
+        .expect("bundled bep011 overlay must be valid JSON")
+}
+
+/// The name [`always_applied_overlay`] is stamped under, for provenance and for the
+/// `bidslake_overlays` catalog table.
+pub const ALWAYS_APPLIED_OVERLAY_NAME: &str = "bep011";
+
 /// The parsed bundled overlay for a pipeline `name`, or `None` if `name` is not a
 /// bundled pipeline (callers then treat the argument as a filesystem path). The JSON
 /// is embedded at compile time, so this needs no I/O.
@@ -463,6 +499,67 @@ mod tests {
             validate_effective(&base, &effective)
                 .unwrap_or_else(|e| panic!("bundled overlay {name} is not metaschema-valid: {e}"));
         }
+    }
+
+    /// The always-applied overlay is the one overlay `BUNDLED_OVERLAY_NAMES` does not cover, so
+    /// nothing above reaches it. It is also the only overlay that declares `rules.files`, which
+    /// is the part of the metaschema no other bundled fragment exercises.
+    #[test]
+    fn the_always_applied_overlay_is_metaschema_valid() {
+        let base = base_schema();
+        let mut effective = base.clone();
+        merge_into(&mut effective, &always_applied_overlay()).expect("merges into the base");
+
+        validate_effective(&base, &effective).expect("is metaschema-valid");
+    }
+
+    /// It rides with every ingest, so it has to survive alongside whatever adapters a caller
+    /// names — including two at once, which is how a FreeSurfer tree nested under an fMRIPrep
+    /// derivative gets indexed.
+    #[test]
+    fn the_always_applied_overlay_is_co_applicable_with_every_bundled_overlay() {
+        let mut effective = base_schema();
+        merge_into(&mut effective, &always_applied_overlay()).unwrap();
+
+        for name in BUNDLED_OVERLAY_NAMES {
+            merge_into(&mut effective, &bundled_overlay(name).unwrap()).unwrap_or_else(|e| {
+                panic!("{name} conflicts with the always-applied overlay: {e}")
+            });
+        }
+
+        validate_effective(&base_schema(), &effective).expect("is metaschema-valid");
+    }
+
+    /// The point of the whole overlay, reduced to the smallest claim that would fail without it:
+    /// the two names fMRIPrep and FreeSurfer share are vocabulary the schema can state.
+    #[test]
+    fn the_always_applied_overlay_declares_the_surface_vocabulary() {
+        let mut effective = base_schema();
+        merge_into(&mut effective, &always_applied_overlay()).unwrap();
+
+        let suffixes = effective["objects"]["suffixes"].as_object().unwrap();
+        let declared: Vec<&str> = ["thickness", "curv", "sulc", "white", "pial"]
+            .into_iter()
+            .filter(|s| suffixes.contains_key(*s))
+            .collect();
+
+        assert_eq!(declared, ["thickness", "curv", "sulc", "white", "pial"]);
+    }
+
+    #[test]
+    fn the_always_applied_overlay_declares_the_gifti_extensions() {
+        let mut effective = base_schema();
+        merge_into(&mut effective, &always_applied_overlay()).unwrap();
+
+        let values: Vec<&str> = effective["objects"]["extensions"]
+            .as_object()
+            .unwrap()
+            .values()
+            .filter_map(|e| e.get("value").and_then(|v| v.as_str()))
+            .filter(|v| v.ends_with(".gii"))
+            .collect();
+
+        assert_eq!(values, [".label.gii", ".shape.gii", ".surf.gii"]);
     }
 
     #[test]

@@ -1,0 +1,305 @@
+{
+  "objects": {
+    "extensions": {
+      "shapegii": {
+        "value": ".shape.gii",
+        "display_name": "GIFTI Shape File",
+        "description": "A GIFTI shape file.\n\nThis extension may only be used in derivative datasets.\n"
+      },
+      "surfgii": {
+        "value": ".surf.gii",
+        "display_name": "GIFTI Surface File",
+        "description": "A GIFTI surface file.\n\nThis extension may only be used in derivative datasets.\n"
+      },
+      "dscalarnii": {
+        "value": ".dscalar.nii",
+        "display_name": "CIFTI-2 Dense Scalar File",
+        "description": "A CIFTI-2 dense scalar file.\n\nThis extension may only be used in derivative datasets.\n"
+      }
+    },
+    "suffixes": {
+      "white": {
+        "value": "white",
+        "display_name": "Gray matter / white matter border for the cortex",
+        "description": "The gray matter / white matter border for the cortex.\n"
+      },
+      "smoothwm": {
+        "value": "smoothwm",
+        "display_name": "Smoothed gray matter / white matter border",
+        "description": "The smoothed gray matter / white matter border.\n"
+      },
+      "pial": {
+        "value": "pial",
+        "display_name": "Gray matter / pial matter border",
+        "description": "The gray matter / pial matter border.\n"
+      },
+      "midthickness": {
+        "value": "midthickness",
+        "display_name": "Midpoints between white matter and pial matter",
+        "description": "The midpoints between white matter and pial surfaces.\n"
+      },
+      "inflated": {
+        "value": "inflated",
+        "display_name": "Inflated surface",
+        "description": "An inflation of the midthickness surface (useful for visualization).\n"
+      },
+      "vinflated": {
+        "value": "vinflated",
+        "display_name": "Very-inflated surface",
+        "description": "A very-inflated midthickness surface (also for visualization).\n"
+      },
+      "sphere": {
+        "value": "sphere",
+        "display_name": "Sphere",
+        "description": "The sphere (used for registration - see transforms for nomenclature)\n"
+      },
+      "flat": {
+        "value": "flat",
+        "display_name": "Flattened surface",
+        "description": "The flattened surface (used for visualization).\n"
+      },
+      "curv": {
+        "value": "curv",
+        "display_name": "Cortical surface curvature indices",
+        "description": "Cortical surface curvature indices.\n"
+      },
+      "thickness": {
+        "value": "thickness",
+        "display_name": "Cortical thickness",
+        "description": "Cortical thickness.\n"
+      },
+      "area": {
+        "value": "area",
+        "display_name": "Discretized surface area across regions",
+        "description": "Discretized surface area across regions.\n"
+      },
+      "dist": {
+        "value": "dist",
+        "display_name": "Distance from a point",
+        "description": "Distance from a point.\n"
+      },
+      "defects": {
+        "value": "defects",
+        "display_name": "Marked regions with surface defects",
+        "description": "Marked regions with surface defects.\n"
+      },
+      "sulc": {
+        "value": "sulc",
+        "display_name": "Sulcal depth",
+        "description": "Sulcal depth.\n"
+      },
+      "T1wT2wratio": {
+        "value": "T1wT2wratio",
+        "display_name": "T1w to T2w ratio, a proxy for myelination",
+        "description": "T1w to T2w ratio, a proxy for myelination.\n"
+      },
+      "distortion": {
+        "value": "distortion",
+        "display_name": "Distortion map calculated from a surface registration",
+        "description": "Distortion map calculated from a surface registration.\n"
+      },
+      "morph": {
+        "value": "morph",
+        "display_name": "Morphometrics",
+        "description": "Structural statistics produced by segmentation routines.\n"
+      }
+    }
+  },
+  "rules": {
+    "files": {
+      "deriv": {
+        "structural_mri": {
+          "cortical_surfaces": {
+            "selectors": [
+              "dataset.dataset_description.DatasetType == 'derivative'"
+            ],
+            "entities": {
+              "ceagent": "optional",
+              "reconstruction": "optional",
+              "chunk": "optional",
+              "acquisition": "optional",
+              "run": "optional",
+              "subject": "required",
+              "session": "optional"
+            },
+            "suffixes": [
+              "white",
+              "smoothwm",
+              "pial",
+              "midthickness",
+              "inflated",
+              "vinflated",
+              "sphere",
+              "flat"
+            ],
+            "extensions": [
+              ".json"
+            ]
+          },
+          "cortical_surfaces_giftis": {
+            "selectors": [
+              "dataset.dataset_description.DatasetType == 'derivative'"
+            ],
+            "entities": {
+              "ceagent": "optional",
+              "reconstruction": "optional",
+              "chunk": "optional",
+              "acquisition": "optional",
+              "run": "optional",
+              "subject": "required",
+              "session": "optional",
+              "hemisphere": "required"
+            },
+            "suffixes": [
+              "white",
+              "smoothwm",
+              "pial",
+              "midthickness",
+              "inflated",
+              "vinflated",
+              "sphere",
+              "flat"
+            ],
+            "extensions": [
+              ".json",
+              ".surf.gii"
+            ]
+          },
+          "cortical_surfaces_ciftis": {
+            "selectors": [
+              "dataset.dataset_description.DatasetType == 'derivative'"
+            ],
+            "entities": {
+              "ceagent": "optional",
+              "reconstruction": "optional",
+              "chunk": "optional",
+              "acquisition": "optional",
+              "run": "optional",
+              "subject": "required",
+              "session": "optional"
+            },
+            "suffixes": [
+              "white",
+              "smoothwm",
+              "pial",
+              "midthickness",
+              "inflated",
+              "vinflated",
+              "sphere",
+              "flat"
+            ],
+            "extensions": [
+              ".json",
+              ".dscalar.nii"
+            ]
+          },
+          "surface_mapped_scalars": {
+            "selectors": [
+              "dataset.dataset_description.DatasetType == 'derivative'"
+            ],
+            "entities": {
+              "ceagent": "optional",
+              "reconstruction": "optional",
+              "chunk": "optional",
+              "acquisition": "optional",
+              "run": "optional",
+              "subject": "required",
+              "session": "optional"
+            },
+            "suffixes": [
+              "curv",
+              "thickness",
+              "area",
+              "dist",
+              "defects",
+              "sulc",
+              "T1wT2wratio",
+              "distortion"
+            ],
+            "extensions": [
+              ".json"
+            ]
+          },
+          "surface_mapped_scalars_giftis": {
+            "selectors": [
+              "dataset.dataset_description.DatasetType == 'derivative'"
+            ],
+            "entities": {
+              "ceagent": "optional",
+              "reconstruction": "optional",
+              "chunk": "optional",
+              "acquisition": "optional",
+              "run": "optional",
+              "subject": "required",
+              "session": "optional",
+              "hemisphere": "required"
+            },
+            "suffixes": [
+              "curv",
+              "thickness",
+              "area",
+              "dist",
+              "defects",
+              "sulc",
+              "T1wT2wratio",
+              "distortion"
+            ],
+            "extensions": [
+              ".json",
+              ".shape.gii"
+            ]
+          },
+          "surface_mapped_scalars_ciftis": {
+            "selectors": [
+              "dataset.dataset_description.DatasetType == 'derivative'"
+            ],
+            "entities": {
+              "ceagent": "optional",
+              "reconstruction": "optional",
+              "chunk": "optional",
+              "acquisition": "optional",
+              "run": "optional",
+              "subject": "required",
+              "session": "optional"
+            },
+            "suffixes": [
+              "curv",
+              "thickness",
+              "area",
+              "dist",
+              "defects",
+              "sulc",
+              "T1wT2wratio",
+              "distortion"
+            ],
+            "extensions": [
+              ".json",
+              ".dscalar.nii"
+            ]
+          },
+          "morphometrics": {
+            "selectors": [
+              "dataset.dataset_description.DatasetType == 'derivative'"
+            ],
+            "entities": {
+              "ceagent": "optional",
+              "reconstruction": "optional",
+              "chunk": "optional",
+              "acquisition": "optional",
+              "run": "optional",
+              "subject": "required",
+              "session": "optional"
+            },
+            "suffixes": [
+              "morph"
+            ],
+            "extensions": [
+              ".tsv",
+              ".json"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

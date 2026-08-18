@@ -29,13 +29,24 @@
 //! | Sidecar bodies — `rules.sidecars` + `objects.metadata` | yes |
 //! | Layout-backed tree paths — a layout's `Roles` and `Examples` | yes |
 //! | Derivative paths for pipeline-invented vocabulary | **no** |
+//! | The surface family — `rules.files.deriv.structural_mri` | yes, for what it declares |
 //!
-//! That last row is not an oversight. No bundled overlay touches `rules.files` — they carry
-//! `objects.*` and `rules.tabular_data` only — and base `rules.files.deriv` declares none of
-//! `timeseries`, `xfm`, `boldref`, `mixing`, `components` or `classification`. There is nothing
-//! in any schema document to enumerate, so [`producers`] carries a small path recipe per
-//! producer, and `every_overlay_suffix_is_emitted_by_some_producer` turns a newly added overlay
-//! suffix into a failing test rather than a silent gap.
+//! The "no" row is not an oversight. A producer's own overlay carries `objects.*` and
+//! `rules.tabular_data` only, and base `rules.files.deriv` declares none of `timeseries`, `xfm`,
+//! `boldref`, `mixing`, `components` or `classification`. There is nothing in any schema document
+//! to enumerate, so [`producers`] carries a small path recipe per producer, and
+//! `every_overlay_suffix_is_emitted_by_some_producer` turns a newly added overlay suffix into a
+//! failing test rather than a silent gap.
+//!
+//! The surface family is the exception, and it shows what the rest is missing. The always-applied
+//! `bep011` overlay declares `rules.files` as well as vocabulary, so those paths *are* described
+//! by a rule group — and the guard on them is not the suffix census but
+//! `a_generated_fmriprep_trees_surfaces_are_part_of_bids`, which runs the real validator over the
+//! tree. Note what that means for the census: with the overlay applied to every load, its
+//! suffixes are in the baseline `Schema::load(None)` returns, so they never enter that test's
+//! `added` set at all. Correct rather than a hole — its premise is "nothing in any schema
+//! document to enumerate", and for this family that stopped being true. It still guards the
+//! vocabulary that is genuinely pipeline-invented.
 //!
 //! ## Two axes, and why they are kept apart
 //!

@@ -194,6 +194,77 @@ An overlay is ordinary BIDS and is all a BIDS-named derivative needs: fMRIPrep, 
 ship overlays and no term map. Overlay and term map are standards-track; the ingestion fragment and
 the layout are deliberately bidslake's own.
 
+One overlay is not a producer's: `overlays/bep011.json` is applied to every load of the embedded
+schema, the way `ingestion/base.json` is layered under every ingest, and is filtered out of the
+adapter names a caller can select. It exists because a *shared* vocabulary has no owner among the
+producers. fMRIPrep writes `_hemi-L_thickness.shape.gii` and FreeSurfer writes `surf/lh.thickness`,
+and those are the same quantity; before it, neither name was vocabulary the schema could state, so
+the same cortical thickness map answered to `suffix='thickness'` from one tool and only to a
+`file_path LIKE` from the other. Put in either producer's overlay it would have to be duplicated
+into both, and a caller indexing a `recon-all` tree would have to name a draft BEP to get thickness
+back.
+
+**It is a mirror, and mirroring is the whole discipline.** Its content is BEP-011 "Structural
+derivatives" (bids-standard/bids-specification#518) transcribed from the branch, expanded out of
+the `$ref`s a compiled render does not carry — 17 suffixes, three GIFTI/CIFTI extensions, and the
+`rules.files.deriv.structural_mri` groups. Nothing in it is improved relative to upstream, because
+the exit is a deletion: when `third_party/bids-schema` is bumped past BEP-011, an identical
+upstream render makes the overlay inert and an edited one makes it an `OverlayError::Conflict`
+naming the pointer that drifted. A paraphrase would turn that clean deletion into a merge.
+
+This is also the answer to *what may an overlay declare* that the Rejected Ideas below leave
+implicit. The bar is not the kind of term — it is whether the term is bidslake's invention. An
+entity for FIX's training set is refused because BIDS has no such concept and is not getting one;
+BEP-011's suffixes are adopted, unchanged, because BIDS is adopting them.
+
+Declaring `rules.files` surfaced that the validator was choosing rules on incomplete evidence.
+`SuffixRule::match_context` identifies a rule by suffix alone — faithfully, since the reference
+validator does the same — and the downstream checks are what narrow it. Only the entity check
+existed: `extensions` was parsed onto the rule struct and never read, and there was no
+`EXTENSION_MISMATCH`. That is invisible while every suffix belongs to one rule, and wrong as soon
+as one does not. BEP-011 gives `thickness` a `.shape.gii` rule requiring `hemisphere` and a
+`.dscalar.nii` rule that does not; with nothing distinguishing them, both scored zero and a GIFTI
+file was judged against whichever the walk reached first.
+
+So the crate now follows the reference validator's shape. Identification stays loose — a suffix
+rule is claimed by its suffix alone — and `hasMatch`'s two narrowing passes reduce what survives:
+first to the rules whose `datatypes` include the directory the file sits in, then to those whose
+entities and extension fit it. Both `extensionMismatch` and `datatypeMismatch` were added as
+checks, so the file is finally held to what the surviving rules actually say.
+
+**Each narrowing pass is discarded if it would eliminate everything**, and that guard is what makes
+the scheme safe rather than clever. The compiled schema renders an unspecialized parent rule with
+`datatypes: []` — matching nothing — beside the specializations carrying the real lists:
+`electrodes` has six rules, two empty parents plus `[eeg, ieeg]`, `[meg]` and `[emg]`. Without the
+guard a file whose datatype matches no rule loses every candidate; with it, narrowing that says
+nothing is simply not applied. The same guard is what lets `bep011.json` stay a verbatim mirror:
+BEP-011's rules inherit an entity list without `space`, `density` or `description`, so a real
+`_space-fsLR_den-32k_thickness.dscalar.nii` fits no rule on entities, that pass empties, and the
+file is judged on the rest rather than rejected over a gap in a draft.
+
+Two schema spellings need honouring that a literal membership test misses: `.*`
+(`objects.extensions.Any`, "any extension is allowed"), and the trailing slash on a pseudo-file
+extension (`.ds/`, `.ome.zarr/`), which names a directory while the parsed extension of the path
+has none. Missing the second reported every CTF and OME-Zarr recording in `bids-examples` as a
+mismatch.
+
+**One deliberate divergence remains, at the end.** Upstream checks every rule that survives
+narrowing and reports all of them, on the stated principle that a wrongly-named file deserves as
+much feedback as possible. This crate reports the quietest survivor instead. That principle is
+right for a wrong name and wrong for a right one: `sub-01_acq-crosstalk_meg.fif` is claimed by both
+`raw.meg.meg` and `raw.meg.crosstalk`, entities-and-extensions cannot separate them, and the first
+requires a `task` a crosstalk file has no business carrying — so reporting both fails `ds000248`, a
+canonical dataset. The integration tests here hold every vendored example to zero errors, a
+stronger claim than upstream makes and worth more than matching its noise.
+
+`bep011.json` is the first overlay to declare `rules.files`, which has a consequence worth stating:
+`bids-validator-rs` reads `bids_schema::SCHEMA_JSON` directly and shares no schema loading with the
+indexer, so the merge happens in `BidsSchema::bundled()` as well as `Schema::load_full`. Both, or
+the rules have no reader. It is not carried in `Schema::overlays()`: that list is what
+`bidslake_overlays` and `overlay_digest` record, and it answers what the *caller* augmented a
+catalog with — an entry every catalog gets would make the answer never "nothing". The full merged
+document is stamped as `effective_schema` regardless, so nothing about reproducibility rests on it.
+
 ### 1. An adapter is a named bundle of optional, single-purpose artifacts
 
 `--adapter <name>` resolves whichever of the three read-side artifacts bidslake ships under that
@@ -434,6 +505,15 @@ need it is rejected above.
 - Selecting the file that fills a role has no home. It cannot be the layout — a role describes its
   destination, not its source (*On roles as destinations, not sources*) — and no other document
   currently declares it.
-- `feat` is the only layout. fMRIPrep, MRIQC and QSIPrep have read-side artifacts but no write
-  direction, so code producing files in their conventions still hardcodes paths.
+- `feat` and `freesurfer` are the only layouts. fMRIPrep, MRIQC and QSIPrep have read-side
+  artifacts but no write direction, so code producing files in their conventions still hardcodes
+  paths.
+- **`invalidLocation` is the fourth `ruleCheck` and has no counterpart here**, so nothing asserts
+  that a file's `sub-`/`ses-` entities agree with the directories it sits in. Same shape as the two
+  that were added, and wants its own corpus measurement.
+- **Reporting only the quietest surviving rule hides detail in the wrong-name case.** It is the
+  right trade for the corpus, but a file that misses several rules by a little reports as missing
+  one by a little. If `MISSING_REQUIRED_ENTITY` and `ENTITY_NOT_IN_RULE` are ever split out as
+  distinct codes the way upstream has them, this is worth revisiting — reporting every survivor
+  *except* where one fits cleanly would get both.
 - A layout used to *produce* a dataset is not recorded as provenance anywhere.
