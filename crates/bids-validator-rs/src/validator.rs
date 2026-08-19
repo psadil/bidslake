@@ -100,6 +100,9 @@ pub async fn validate(
 
     // The `dataset` / `schema` / `subject` expression bindings are the same for every file,
     // so build them once here; each file's `EvalContext` borrows them.
+    // Every file's association resolution searches the same tree, so the filename parsing and
+    // per-directory bucketing are done once here rather than once per file.
+    let assoc_index = bids_core::inheritance::AssociationIndex::new(&dataset_ctx.tree);
     let dataset_value = dataset_ctx.dataset_context_value();
     let schema_value = dataset_ctx.schema_context_value(schema);
     let subject_value = dataset_ctx.subject_context_value();
@@ -118,7 +121,7 @@ pub async fn validate(
                 issues: Vec::new(),
                 ignored_codes: base_issues.ignored_codes.clone(),
             };
-            let mut context = BidsContext::new(file, &dataset_ctx, schema).await;
+            let mut context = BidsContext::new(file, &dataset_ctx, &assoc_index, schema).await;
 
             // Bind this file's fields and pair them with the shared dataset-scope bindings
             // into the `EvalContext` that rule expressions are evaluated against.

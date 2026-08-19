@@ -15,10 +15,9 @@
 //! `ceil((bodies + heads) / CONCURRENCY) × RTT` (see `CONCURRENCY` in [`crate::bids`]) —
 //! counting them as serial over-predicts by that factor.
 //!
-//! Two gaps worth knowing. [`Counter::Dirs`] is only emitted when the backend exposes a file
-//! tree, which the S3 client does not — so the directory term is missing on the one backend
-//! that is always latency-bound. And nothing counts `stat` calls, which is the other
-//! per-file round trip a regression could reintroduce.
+//! One gap worth knowing: [`Counter::Dirs`] is only emitted when the backend can report a
+//! directory count, which the S3 client cannot — so the directory term is missing on the one
+//! backend that is always latency-bound.
 //!
 //! State is process-global. The alternative — threading a handle through `parse` and its
 //! callees — cannot reach the phases that live in `main` (schema load, DDL, and the commit,
@@ -43,6 +42,10 @@ pub enum Phase {
     Ddl,
     /// The directory walk and the categorize loop over its result.
     Walk,
+    /// Recording size and mtime for every walked path (`stat_many`). Separate from
+    /// [`Phase::Walk`] because the two have different fixes: the walk is bounded by
+    /// serialized `readdir`s, this by how many stats are in flight at once.
+    Stat,
     /// The concurrent prefetch of file bodies and TSV headers.
     Prefetch,
     /// The serial per-file passes (prefetch excluded).
@@ -79,6 +82,7 @@ const PHASES: &[Phase] = &[
     Phase::SchemaLoad,
     Phase::Ddl,
     Phase::Walk,
+    Phase::Stat,
     Phase::Prefetch,
     Phase::Process,
     Phase::TabularReadCsv,
@@ -98,6 +102,7 @@ impl Phase {
             Phase::SchemaLoad => "schema",
             Phase::Ddl => "ddl",
             Phase::Walk => "walk",
+            Phase::Stat => "stat",
             Phase::Prefetch => "prefetch",
             Phase::Process => "process",
             Phase::TabularReadCsv => "  tabular read_csv",
@@ -134,6 +139,9 @@ pub enum Counter {
     Dirs,
     /// Files the walk recorded.
     Files,
+    /// Paths handed to `stat_many` — the other per-file round trip, and the one a
+    /// regression could reintroduce without any phase getting slower on local disk.
+    Stats,
     /// File bodies read whole, in Rust.
     BodiesRead,
     /// TSV headers read as a bounded prefix.
@@ -158,6 +166,7 @@ pub enum Counter {
 const COUNTERS: &[Counter] = &[
     Counter::Dirs,
     Counter::Files,
+    Counter::Stats,
     Counter::BodiesRead,
     Counter::HeadsRead,
     Counter::ImagingFiles,
@@ -174,6 +183,7 @@ impl Counter {
         match self {
             Counter::Dirs => "dirs",
             Counter::Files => "files",
+            Counter::Stats => "stats",
             Counter::BodiesRead => "bodies_read",
             Counter::HeadsRead => "headers_read",
             Counter::ImagingFiles => "data_files",
@@ -345,6 +355,7 @@ mod tests {
             Phase::SchemaLoad,
             Phase::Ddl,
             Phase::Walk,
+            Phase::Stat,
             Phase::Prefetch,
             Phase::Process,
             Phase::TabularReadCsv,
@@ -372,6 +383,7 @@ mod tests {
         let all_counters = [
             Counter::Dirs,
             Counter::Files,
+            Counter::Stats,
             Counter::BodiesRead,
             Counter::HeadsRead,
             Counter::ImagingFiles,

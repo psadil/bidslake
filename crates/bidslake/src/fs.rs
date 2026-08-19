@@ -291,10 +291,36 @@ impl BidsFileSystem for LocalFileSystem {
         Box::pin(async move {
             // Read at most `max_bytes` — a header line fits easily — rather than the
             // whole file, matching the S3 ranged read.
-            let mut file = tokio::fs::File::open(full_path).await?;
-            let mut buf = vec![0u8; max_bytes];
-            let n = file.read(&mut buf).await?;
-            buf.truncate(n);
+            //
+            // Looped, because `read` is permitted to return fewer bytes than asked for
+            // whenever it likes and does so routinely on a network filesystem. A single call
+            // silently truncated the header line, and the header line is not incidental here:
+            // it is the key the batched tabular ingest groups files by *and* the source of the
+            // column names, so a short read produced a wrong catalog rather than an error.
+            //
+            // `read_buf`-style accumulation rather than `read_to_end`, since the point is to
+            // stop at `max_bytes`. Reading stops early at EOF (`n == 0`).
+            let mut file = tokio::fs::File::open(&full_path)
+                .await
+                .with_context(|| format!("opening {}", full_path.display()))?;
+            let mut buf = Vec::with_capacity(max_bytes.min(64 * 1024));
+            let mut chunk = [0u8; 8192];
+            while buf.len() < max_bytes {
+                let want = chunk.len().min(max_bytes - buf.len());
+                let n = file
+                    .read(&mut chunk[..want])
+                    .await
+                    .with_context(|| format!("reading {}", full_path.display()))?;
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                // A complete first line is all any caller relies on, so stop as soon as one
+                // is in hand rather than filling the whole budget.
+                if buf.contains(&b'\n') {
+                    break;
+                }
+            }
             Ok(String::from_utf8_lossy(&buf).into_owned())
         })
     }

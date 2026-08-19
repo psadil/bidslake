@@ -298,7 +298,12 @@ async fn build_hed_schemas(
 
 impl BidsContext {
     /// Build a context for a specific file.
-    pub async fn new(file: &BidsFile, dataset: &DatasetContext, schema: &BidsSchema) -> Self {
+    pub async fn new(
+        file: &BidsFile,
+        dataset: &DatasetContext,
+        assoc_index: &bids_core::inheritance::AssociationIndex<'_>,
+        schema: &BidsSchema,
+    ) -> Self {
         // The walk no longer `stat`s every entry to carry a size — ingestion never
         // reads it, and validation is the one consumer, once per file, here.
         let size = file.size_bytes();
@@ -395,7 +400,7 @@ impl BidsContext {
         let hits = bids_schema::associations::resolve_associations(
             schema.associations(),
             file,
-            &dataset.tree,
+            assoc_index,
             &ctx_value,
         );
 

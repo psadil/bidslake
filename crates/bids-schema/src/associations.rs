@@ -10,8 +10,9 @@
 //! different schema.json, though both take [`crate::SCHEMA_JSON`].
 
 use crate::expression::{EvalContext, do_selectors_select};
-use bids_core::filetree::{BidsFile, FileTree};
-use bids_core::inheritance::{find_all_associated_files, find_associated_file};
+use bids_core::entities::read_entities;
+use bids_core::filetree::BidsFile;
+use bids_core::inheritance::{AssociationIndex, find_all_associated_files, find_associated_file};
 use serde_json::Value;
 
 /// One resolved association hit: which `meta.associations` entry matched, the file it points at,
@@ -29,19 +30,24 @@ pub struct ResolvedAssociation {
     pub multi: bool,
 }
 
-/// Resolve every `meta.associations` entry for `file` against `tree`.
+/// Resolve every `meta.associations` entry for `file` against `index`.
 ///
 /// `meta_associations` is the schema's `meta.associations` object; `file_ctx` is the file-level
-/// selector context from [`crate::context::FileContext::to_selector_value`].
+/// selector context from [`crate::context::FileContext::to_selector_value`]. `index` is built
+/// once per tree with [`AssociationIndex::new`] and reused across every file — building one per
+/// call would reparse every filename in the dataset for every file resolved.
 pub fn resolve_associations(
     meta_associations: &Value,
     file: &BidsFile,
-    tree: &FileTree,
+    index: &AssociationIndex<'_>,
     file_ctx: &Value,
 ) -> Vec<ResolvedAssociation> {
     let null = Value::Null;
     let eval_ctx = EvalContext::file_only(file_ctx, &null);
     let mut out = Vec::new();
+    // Parsed once for the whole call rather than inside each helper: every association entry
+    // that fires asks for the same source filename's entities.
+    let source_parts = read_entities(&file.name);
 
     let Some(assoc_obj) = meta_associations.as_object() else {
         return out;
@@ -92,7 +98,8 @@ pub fn resolve_associations(
         if !free_entities.is_empty() {
             for f in find_all_associated_files(
                 file,
-                tree,
+                index,
+                &source_parts,
                 target_suffix,
                 &target_extensions,
                 &free_entities,
@@ -105,9 +112,14 @@ pub fn resolve_associations(
                     multi: true,
                 });
             }
-        } else if let Some(f) =
-            find_associated_file(file, tree, target_suffix, &target_extensions, inherit)
-        {
+        } else if let Some(f) = find_associated_file(
+            file,
+            index,
+            &source_parts,
+            target_suffix,
+            &target_extensions,
+            inherit,
+        ) {
             out.push(ResolvedAssociation {
                 name: assoc_name.clone(),
                 target_file: f,
@@ -123,6 +135,7 @@ pub fn resolve_associations(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bids_core::filetree::FileTree;
     use std::path::PathBuf;
 
     fn file(path: &str) -> BidsFile {
@@ -173,7 +186,8 @@ mod tests {
 
         let index = crate::context::SchemaIndex::new(&schema);
         let bold_ctx = crate::context::FileContext::derive(&bold, &index).to_selector_value();
-        let bold_hits = resolve_associations(meta, &bold, &tree, &bold_ctx);
+        let assoc_index = AssociationIndex::new(&tree);
+        let bold_hits = resolve_associations(meta, &bold, &assoc_index, &bold_ctx);
         assert!(
             bold_hits
                 .iter()
@@ -183,7 +197,7 @@ mod tests {
         );
 
         let dwi_ctx = crate::context::FileContext::derive(&dwi, &index).to_selector_value();
-        let dwi_hits = resolve_associations(meta, &dwi, &tree, &dwi_ctx);
+        let dwi_hits = resolve_associations(meta, &dwi, &assoc_index, &dwi_ctx);
         assert!(
             dwi_hits.iter().any(|h| h.name == "bval"),
             "DWI should resolve its bval; got {:?}",

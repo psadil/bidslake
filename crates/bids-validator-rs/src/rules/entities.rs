@@ -124,7 +124,8 @@ mod tests {
         tree.files.push(file.clone());
         let mut issues = DatasetIssues::default();
         let ds_ctx = DatasetContext::new(tree, schema, None, &mut issues).await;
-        BidsContext::new(&file, &ds_ctx, schema).await
+        let assoc_index = bids_core::inheritance::AssociationIndex::new(&ds_ctx.tree);
+        BidsContext::new(&file, &ds_ctx, &assoc_index, schema).await
     }
 
     #[tokio::test]
