@@ -3271,6 +3271,14 @@ impl BidsParser {
 /// that keeps a statement to a few megabytes serves. Note the tradeoff runs both ways, so
 /// smaller is not safer — the batch also declares the file's full column list once per window,
 /// which for a table hundreds of columns wide is itself a large share of the statement.
+///
+/// Sizing it by the *cells* a window asks DuckDB to hold rather than by file count was tried
+/// (2026-08) on the theory that a 1,841-column confounds table should batch fewer files than a
+/// twelve-column events table. It does not pay: min-of-3 peak RSS on a generated wide-confounds
+/// tree went **up**, 883 MB to 971 MB, because more windows means more concurrent `read_csv`
+/// statements and their buffers. Narrowing the window all the way to one file per statement
+/// does cut peak RSS (to ~807 MB), but that is just unbatching the read, which is the 5×
+/// ingest win this path exists for.
 const BATCH_WINDOW_FILES: usize = 512;
 
 /// Split a tabular filename into its BIDS `(suffix, extension)` via the shared

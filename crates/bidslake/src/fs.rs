@@ -7,11 +7,10 @@
 //! dataset root.
 
 use anyhow::{Context as _, Result};
-use bids_core::filetree::FileTree;
 use futures::future::BoxFuture;
 use futures::stream::StreamExt as _;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
 /// How many stats are in flight at once, matching the body-read prefetch in `bids.rs`.
 ///
@@ -134,14 +133,6 @@ pub trait BidsFileSystem: Send + Sync {
 
     /// Get the root path/URI of the dataset
     fn root(&self) -> String;
-
-    /// The in-memory BIDS [`FileTree`] for this backend, if one exists on local
-    /// disk (populated once [`walk`](Self::walk) has run). Lets callers reuse the
-    /// `bids_core` inheritance helpers, which need the whole tree. Backends without
-    /// a local tree (S3) return `None`, and the caller falls back to its own path.
-    fn file_tree(&self) -> Option<Arc<FileTree>> {
-        None
-    }
 }
 
 /// The [`BidsFileSystem`] for a dataset on this machine — every input that is not an
@@ -164,9 +155,6 @@ pub struct LocalFileSystem {
     /// network filesystem. `None` in every production path; see
     /// [`with_walk_latency`](Self::with_walk_latency).
     walk_latency: Option<std::time::Duration>,
-    /// The tree produced by the last [`walk`](BidsFileSystem::walk), cached so
-    /// [`file_tree`](BidsFileSystem::file_tree) can hand it to bids-core inheritance.
-    tree: OnceLock<Arc<FileTree>>,
     /// `root` with symlinks resolved, computed at most once. Every absolute path
     /// this backend hands out is this joined with a dataset-relative path, which is
     /// also exactly what the walk stores in `BidsFile::absolute_path`.
@@ -184,7 +172,6 @@ impl LocalFileSystem {
         Self {
             root: root.into(),
             walk_latency: None,
-            tree: OnceLock::new(),
             canonical_root: OnceLock::new(),
         }
     }
@@ -246,36 +233,33 @@ impl BidsFileSystem for LocalFileSystem {
             // frame has.
             let root_for_msg = root.clone();
             let dirs = std::sync::atomic::AtomicU64::new(0);
-            let (tree, dirs) = tokio::task::spawn_blocking(move || {
-                // Counted here rather than by re-walking the finished tree: the count was
-                // previously taken with `tree.walk_directories().count()`, a second full
-                // traversal that ran whether or not anyone was reading the number.
-                let tree = bids_core::filetree::read_file_tree_observed(
-                    &root,
-                    &pseudo,
-                    apply_bidsignore,
-                    &|_| {
+            // `walk_paths`, not `read_file_tree`: an ingest never reads the tree. It used to
+            // build one, flatten it straight back into this list, and then hold it for the
+            // rest of the run — roughly 180 MB of duplicated path strings at half a million
+            // files, kept alive for a consumer that no longer existed.
+            //
+            // The directory count comes from the walk's own hook rather than from re-walking
+            // the finished tree, which was a second full traversal that ran whether or not
+            // timing was on.
+            let (paths, dirs) = tokio::task::spawn_blocking(move || {
+                let paths =
+                    bids_core::filetree::walk_paths(&root, &pseudo, apply_bidsignore, &|_| {
                         dirs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         if let Some(d) = latency {
                             std::thread::sleep(d);
                         }
-                    },
-                );
+                    });
                 let n = dirs.load(std::sync::atomic::Ordering::Relaxed);
-                (tree, n)
+                (paths, n)
             })
             .await?;
-            let tree = tree.with_context(|| format!("walking {}", root_for_msg.display()))?;
+            let paths = paths.with_context(|| format!("walking {}", root_for_msg.display()))?;
             crate::timing::count(crate::timing::Counter::Dirs, dirs);
-            // Flatten to the dataset-relative paths the pipeline expects (strip the
-            // leading `/` each tree path carries).
-            let paths: Vec<PathBuf> = tree
-                .walk_files()
-                .map(|f| PathBuf::from(f.path.trim_start_matches('/')))
-                .collect();
-            // Cache the tree so `file_tree()` can share it with bids-core inheritance.
-            let _ = self.tree.set(Arc::new(tree));
-            Ok(paths)
+            // Dataset-relative, as the rest of the pipeline expects (strip the leading `/`).
+            Ok(paths
+                .into_iter()
+                .map(|p| PathBuf::from(p.trim_start_matches('/')))
+                .collect())
         })
     }
 
@@ -378,9 +362,5 @@ impl BidsFileSystem for LocalFileSystem {
     fn root(&self) -> String {
         // Return as file:// URI for consistency with S3 URIs
         format!("file://{}", self.canonical_root().display())
-    }
-
-    fn file_tree(&self) -> Option<Arc<FileTree>> {
-        self.tree.get().cloned()
     }
 }

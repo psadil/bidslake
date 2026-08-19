@@ -24,11 +24,9 @@
 //! Run with `cargo bench` (requires `git submodule update --init`).
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use bids_core::filetree::FileTree;
 use bidslake::{
     bids::BidsParser,
     db::BidsDb,
@@ -232,10 +230,6 @@ impl BidsFileSystem for SlowFs {
 
     fn root(&self) -> String {
         self.inner.root()
-    }
-
-    fn file_tree(&self) -> Option<Arc<FileTree>> {
-        self.inner.file_tree()
     }
 }
 
