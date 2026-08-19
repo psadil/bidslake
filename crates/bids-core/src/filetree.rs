@@ -54,7 +54,20 @@ fn get_mut_subtree<'a>(tree: &'a mut FileTree, rel_path: &str) -> Option<&'a mut
 
     let mut current = tree;
     for part in parts {
-        let idx = current.directories.iter().position(|d| d.name == part)?;
+        // Searched from the back, which is the whole difference between linear and quadratic
+        // here. `read_file_tree` calls this once per walked entry, and `ignore::Walk` is a
+        // pre-order DFS: while its files are being yielded, a directory is the most recently
+        // pushed child of its parent, and so is every directory on the path from the root down
+        // to it. A forward scan therefore hit `position`'s worst case on *every* entry — every
+        // file under `sub-2000` compared 2,000 names at the root alone, making tree
+        // construction cost `entries × root_fanout`.
+        //
+        // Equivalent, not merely faster: a directory node is pushed exactly once (the walker
+        // yields each directory once), so names are unique among a parent's children and the
+        // first match and the last are the same one. The scan is still linear, so an entry
+        // arriving out of DFS order — or none at all, for a pruned pseudo-file's contents,
+        // which must still return `None` — behaves exactly as before.
+        let idx = current.directories.iter().rposition(|d| d.name == part)?;
         current = &mut current.directories[idx];
     }
     Some(current)
