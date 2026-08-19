@@ -1,8 +1,9 @@
 //! Schema-driven association resolution.
 //!
 //! [`resolve_associations`] evaluates the schema's `meta.associations` entries for one file
-//! against an in-memory [`FileTree`] and returns the associated files it finds. It is **pure and
-//! synchronous** — selector evaluation plus in-memory tree search; it reads no file content. The
+//! against an in-memory [`FileTree`](bids_core::filetree::FileTree) and returns the associated
+//! files it finds. It is **pure and synchronous** — selector evaluation plus in-memory tree
+//! search; it reads no file content. The
 //! caller (the validator's typed `BidsAssociations`, or bidslake's `file_associations` rows)
 //! builds whatever it needs on top of the returned hits.
 //!

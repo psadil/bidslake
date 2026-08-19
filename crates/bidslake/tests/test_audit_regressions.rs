@@ -145,16 +145,27 @@ async fn read_head_returns_a_whole_header_line() -> anyhow::Result<()> {
 /// measured at 1 ms/directory, a 43,500-file FreeSurfer tree took 16 s to walk serially and
 /// about 1 s concurrently.
 ///
-/// The assertion is deliberately loose. It is not measuring the speedup, it is failing if the
-/// walk ever becomes sequential again: serial would cost at least `dirs × delay` here, and the
-/// bound is a small fraction of that.
+/// The width is pinned rather than inherited, and that is what makes the assertion meaningful
+/// on a machine of any size. Left to the automatic choice it tracks `available_parallelism`, so
+/// the expected time depends on the host: this test was calibrated on an 18-core machine and
+/// then failed on a 4-core CI runner at 351 ms — a walk overlapping perfectly well, against a
+/// threshold that had quietly become the ideal. Pinning makes the prediction exact, and it
+/// costs nothing in fidelity because the injected delay is a *sleep*: eight sleeping threads
+/// overlap on two cores as readily as on eighteen, which is also true of the `readdir` latency
+/// they stand in for.
+///
+/// The assertion is still deliberately loose. It is not measuring the speedup, it is failing if
+/// the walk ever becomes sequential again: serial costs `dirs × delay`, the pinned width should
+/// cost an eighth of that, and the bound sits between them with room for a loaded runner.
 #[tokio::test]
 async fn the_walk_overlaps_its_directory_reads() -> anyhow::Result<()> {
     use bidslake::fs::{BidsFileSystem, LocalFileSystem};
     use std::time::{Duration, Instant};
 
     let dirs = 64;
+    let threads: u32 = 8;
     let delay = Duration::from_millis(20);
+    bids_core::filetree::set_walk_threads(threads as usize);
     let root = tempfile::tempdir()?;
     std::fs::write(
         root.path().join("dataset_description.json"),
@@ -170,9 +181,11 @@ async fn the_walk_overlaps_its_directory_reads() -> anyhow::Result<()> {
     let elapsed = started.elapsed();
 
     let serial = delay * dirs;
+    let overlapped = serial / threads;
     assert!(
-        elapsed < serial / 4,
-        "the walk looks sequential: {elapsed:?} against a serial cost of {serial:?}"
+        elapsed < serial / 2,
+        "the walk looks sequential: {elapsed:?} against a serial cost of {serial:?} \
+         (about {overlapped:?} expected at {threads} threads)"
     );
     Ok(())
 }

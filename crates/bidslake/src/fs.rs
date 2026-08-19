@@ -141,13 +141,9 @@ pub trait BidsFileSystem: Send + Sync {
 /// The [`BidsFileSystem`] for a dataset on this machine — every input that is not an
 /// `s3://` URI, and the only backend a build without the `s3` feature has.
 ///
-/// Two things it does that the trait does not promise. It is the one backend that can hand
-/// back a [`FileTree`], so `bids-core`'s inheritance and association helpers work here and
-/// fall back to per-path logic on S3; the tree is a by-product of
-/// [`walk`](BidsFileSystem::walk), so [`file_tree`](BidsFileSystem::file_tree) is `None`
-/// until a walk has run. And the root it *reports* is canonicalized while the root it
-/// *reads through* is the path as given: `read_to_string` and `stat_many` join onto the
-/// original, [`root`](BidsFileSystem::root) and
+/// One thing it does that the trait does not promise: the root it *reports* is canonicalized
+/// while the root it *reads through* is the path as given. `read_to_string` and `stat_many`
+/// join onto the original, [`root`](BidsFileSystem::root) and
 /// [`read_csv_source`](BidsFileSystem::read_csv_source) onto the symlink-resolved one. So a
 /// dataset reached through a symlinked path is cataloged under its real location — which is
 /// what makes a second ingest by either spelling land on the same `root_uri`, and so on the
