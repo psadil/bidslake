@@ -24,11 +24,9 @@
 //! Run with `cargo bench` (requires `git submodule update --init`).
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use bids_core::filetree::FileTree;
 use bidslake::{
     bids::BidsParser,
     db::BidsDb,
@@ -147,13 +145,20 @@ fn bench_ingest_s3(_c: &mut Criterion) {}
 
 /// A [`LocalFileSystem`] that sleeps `delay` before each Rust-side read
 /// (`read_to_string` / `read_head` — the reads the prefetch parallelizes) and before each
-/// stat, simulating network round-trip latency deterministically. `walk` and
-/// `read_csv_source` (DuckDB's, not the prefetch's) delegate without delay.
+/// stat, simulating network round-trip latency deterministically. `read_csv_source`
+/// (DuckDB's read, not the prefetch's) delegates without delay.
 ///
 /// The stat delay is what makes this bench able to see whether recording size and mtime is
 /// affordable on a parallel filesystem: serially it would cost `files × delay`, and the
 /// point of issuing them with bounded concurrency is that it costs about
 /// `files / STAT_CONCURRENCY × delay` instead.
+///
+/// The **walk** delay is charged by the inner backend rather than here, via
+/// [`LocalFileSystem::with_walk_latency`] — a walk's round trips are one `readdir` per
+/// directory, and they happen inside `bids_core`'s traversal where a wrapper cannot reach
+/// them. Until that was wired up this type delegated `walk` with no delay at all, so the
+/// largest single cost of a network ingest was invisible to the only benchmark that models
+/// one.
 struct SlowFs {
     inner: LocalFileSystem,
     delay: Duration,
@@ -180,14 +185,17 @@ impl BidsFileSystem for SlowFs {
     ) -> BoxFuture<'a, Result<Vec<Option<bidslake::fs::FileStat>>>> {
         let delay = self.delay;
         Box::pin(async move {
-            // One delay per file, applied inside the same concurrency the real backend
-            // uses -- so the bench measures the overlap rather than assuming it.
+            // One delay per file, applied inside the same concurrency the real backend uses --
+            // so the bench measures the overlap rather than assuming it. The width is
+            // `bidslake::fs::stat_concurrency()` itself: hardcoding a number here meant this
+            // bench overlapped 16 at a time no matter what the backend did, so changing the
+            // real width measured as exactly zero.
             futures::stream::iter(paths.iter().cloned())
                 .map(|p| async move {
                     tokio::time::sleep(delay).await;
                     self.inner.stat_many(std::slice::from_ref(&p)).await
                 })
-                .buffered(16)
+                .buffered(bidslake::fs::stat_concurrency())
                 .collect::<Vec<_>>()
                 .await
                 .into_iter()
@@ -222,10 +230,6 @@ impl BidsFileSystem for SlowFs {
 
     fn root(&self) -> String {
         self.inner.root()
-    }
-
-    fn file_tree(&self) -> Option<Arc<FileTree>> {
-        self.inner.file_tree()
     }
 }
 
@@ -274,9 +278,15 @@ fn bench_ingest_latency(c: &mut Criterion) {
     let dir = tempfile::tempdir().expect("tempdir");
     let n = 32;
     write_diffusion_tree(dir.path(), n);
-    // 5 ms/read over `3n` reads: concurrent (cap 16) ≈ ceil(3n/16)·5 ms on top of
-    // the fixed schema/DuckDB cost; a regression to sequential would add ~3n·5 ms
+    // 5 ms/read over `3n` reads: concurrent (cap `STAT_CONCURRENCY`) ≈ ceil(3n/16)·5 ms on
+    // top of the fixed schema/DuckDB cost; a regression to sequential would add ~3n·5 ms
     // (here ~480 ms), an unmistakable jump.
+    //
+    // The same delay is charged per directory of the walk (`2n + 1` of them: a root, `n`
+    // subject dirs and `n` `dwi/` dirs). The walk runs its `readdir`s across
+    // `bids_core::filetree`'s thread pool, so that term is about `(2n + 1) / threads · 5 ms`;
+    // serially it was `(2n + 1) · 5 ms`, which for a long time no benchmark could see because
+    // this type delegated `walk` with no delay injected at all.
     let delay = Duration::from_millis(5);
 
     let mut group = c.benchmark_group("ingest_latency");
@@ -284,7 +294,7 @@ fn bench_ingest_latency(c: &mut Criterion) {
     group.bench_function(format!("dwi_{n}subj_{}ms", delay.as_millis()), |b| {
         b.iter(|| {
             let fs = Box::new(SlowFs::new(
-                LocalFileSystem::new(dir.path().to_path_buf()),
+                LocalFileSystem::with_walk_latency(dir.path().to_path_buf(), delay),
                 delay,
             ));
             ingest_through(fs);

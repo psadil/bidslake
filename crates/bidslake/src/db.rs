@@ -315,12 +315,31 @@ impl BidsDb {
              base_schema_version TEXT, effective_schema JSON, overlay_digest TEXT)",
             [],
         )?;
+        // Replaced, not inserted-if-absent. The stamp describes *this catalog's* effective
+        // schema, and the tables it describes are created `IF NOT EXISTS` — so indexing one
+        // root plainly and a second with `--adapter fmriprep` leaves the catalog physically
+        // holding `fmriprep_confounds` while a first-run-only stamp still reports base-only
+        // and a NULL `overlay_digest`. Freezing it made the self-description a lie in exactly
+        // the case it exists to answer.
+        //
+        // What this records is the *most recent* run's schema, which is a superset of the
+        // catalog's tables only when each run's overlay set includes the last one's. A stamp
+        // that unioned every run's schema would be strictly better and is not what this is;
+        // `check_registry_shape` remains the check that the tables themselves agree.
+        self.conn.execute("DELETE FROM bidslake_schema", [])?;
         self.conn.execute(
             "INSERT INTO bidslake_schema (base_schema_version, effective_schema, overlay_digest) \
-             SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM bidslake_schema)",
+             VALUES (?, ?, ?)",
             params![base_schema_version, effective_schema, overlay_digest],
         )?;
 
+        // Cleared before the empty check so a run with no overlays drops the rows an earlier
+        // run left, rather than leaving them to describe a schema no longer in force — but
+        // only if the table is already there. A catalog indexed without overlays must not
+        // grow one (`test_overlay::without_overlay_confounds_is_skipped`).
+        if self.table_exists("bidslake_overlays")? {
+            self.conn.execute("DELETE FROM bidslake_overlays", [])?;
+        }
         if overlays.is_empty() {
             return Ok(());
         }
@@ -334,16 +353,27 @@ impl BidsDb {
             let sha = sha256_hex(content.as_bytes());
             self.conn.execute(
                 "INSERT INTO bidslake_overlays (idx, source, sha256, content) \
-                 SELECT ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM bidslake_overlays WHERE idx = ?)",
-                params![i as i32, &overlay.source, sha, content, i as i32],
+                 VALUES (?, ?, ?, ?)",
+                params![i as i32, &overlay.source, sha, content],
             )?;
         }
         Ok(())
     }
 
+    /// Whether `table` exists in this catalog. Used by the provenance stamps, which must
+    /// clear a stale row set without bringing a table into being for a catalog that has none.
+    fn table_exists(&self, table: &str) -> Result<bool> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM duckdb_tables() WHERE table_name = ?",
+            params![table],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
     /// Record provenance rows (`idx`, `source`, `sha256`, `content`) in a `bidslake_<kind>`
-    /// table so the catalog stays self-describing. No-op when empty; idempotent across
-    /// re-indexing (insert only if the idx is absent). `table` is a fixed internal name.
+    /// table so the catalog stays self-describing. No-op when empty; a re-index replaces the
+    /// previous run's rows rather than keeping them. `table` is a fixed internal name.
     fn stamp_provenance(&self, table: &str, items: &[(String, Value)]) -> Result<()> {
         if items.is_empty() {
             return Ok(());
@@ -355,15 +385,17 @@ impl BidsDb {
             ),
             [],
         )?;
+        // Replaced rather than inserted-if-the-idx-is-absent, for the reason `stamp_schema`
+        // gives: a stamp frozen at the first run describes a catalog that no longer exists.
+        // Clearing by table (not by idx) also drops a trailing entry when a later run applies
+        // fewer items than an earlier one.
+        self.conn.execute(&format!("DELETE FROM {table}"), [])?;
         for (i, (source, content)) in items.iter().enumerate() {
             let content_str = serde_json::to_string(content).unwrap_or_default();
             let sha = sha256_hex(content_str.as_bytes());
             self.conn.execute(
-                &format!(
-                    "INSERT INTO {table} (idx, source, sha256, content) \
-                     SELECT ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM {table} WHERE idx = ?)"
-                ),
-                params![i as i32, source, sha, content_str, i as i32],
+                &format!("INSERT INTO {table} (idx, source, sha256, content) VALUES (?, ?, ?, ?)"),
+                params![i as i32, source, sha, content_str],
             )?;
         }
         Ok(())
@@ -390,11 +422,49 @@ impl BidsDb {
     /// Replaces the former `tabular_files` table, whose `table_name`/`n_rows` are dropped:
     /// which table a file's rows landed in is recoverable by joining that table on `file_id`.
     pub fn record_file_status(&self, file_id: Uuid, status: TabularStatus) -> Result<()> {
-        let mut stmt = self
-            .conn
-            .prepare_cached("UPDATE file_registry SET status = ? WHERE file_id = ?")?;
-        stmt.execute(params![status.as_str(), file_id.to_string()])
-            .with_context(|| format!("recording file {file_id} as {}", status.as_str()))?;
+        self.record_file_statuses(std::slice::from_ref(&file_id), status)
+    }
+
+    /// [`Self::record_file_status`] for a whole batch, in one statement.
+    ///
+    /// One statement per *file* is what this replaces, and it was the single largest cost in
+    /// a raw-BIDS ingest — 64% of a 64k-file run, measured. Two things stack up per
+    /// execution, and batching removes both at once:
+    ///
+    /// * `prepare_cached` does not help. The catalog keeps changing inside the ingest's open
+    ///   transaction, so DuckDB invalidates the cached plan and `RebindPreparedStatement`
+    ///   re-runs the binder and the optimizer on every single execution.
+    /// * The predicate does not use the primary key. Profiles show `file_id = ?` resolving to
+    ///   a scan that filters 128-bit UUIDs column-segment by column-segment, so the cost of
+    ///   one update is proportional to the size of `file_registry` — making the pass
+    ///   quadratic in a dataset that is mostly tabular files.
+    ///
+    /// The scan does not go away here; it is amortized. One statement per batch window turns
+    /// `files × registry_rows` into `windows × registry_rows`.
+    ///
+    /// Literals rather than bound parameters because the list is variadic — the same shape
+    /// the batched `DELETE ... WHERE file_id IN (…)` in `flush_tabular` already uses, and
+    /// `sql_uuid_lit` renders a `Uuid` whose spelling has nothing for escaping to do.
+    pub fn record_file_statuses(&self, file_ids: &[Uuid], status: TabularStatus) -> Result<()> {
+        if file_ids.is_empty() {
+            return Ok(());
+        }
+        let id_list = file_ids
+            .iter()
+            .map(|id| schema::dynamic::sql_uuid_lit(*id))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "UPDATE file_registry SET status = {} WHERE file_id IN ({id_list})",
+            schema::dynamic::sql_lit(status.as_str())
+        );
+        self.conn.execute(&sql, []).with_context(|| {
+            format!(
+                "recording {} file(s) as {}",
+                file_ids.len(),
+                status.as_str()
+            )
+        })?;
         Ok(())
     }
 
@@ -591,6 +661,62 @@ impl BidsDb {
         Ok(())
     }
 
+    /// [`Self::insert`] for many rows of one table, in as few statements as possible.
+    ///
+    /// `INSERT OR IGNORE` rather than the single-row path's `WHERE NOT EXISTS` guard, because
+    /// a multi-row `VALUES` list cannot carry a correlated subquery per row. The two mean the
+    /// same thing where it matters — a row whose primary key is already present is left alone,
+    /// which is what lets the walk emit stub `participants`/`sessions` rows freely without
+    /// overwriting the richer ones `participants.tsv` supplies — and `OR IGNORE` additionally
+    /// tolerates duplicates *within* the batch, which the guarded form could not see.
+    ///
+    /// Batched because the single-row path costs a statement per row and, inside the ingest's
+    /// open transaction, `prepare_cached` does not help: the catalog keeps changing, so DuckDB
+    /// re-binds and re-optimizes on every execution. On a 1,000-subject FreeSurfer tree the
+    /// implicit-participant inserts alone were about a fifth of the run.
+    ///
+    /// Rows are shaped by [`Schema::row_values`], identically to [`Self::insert`], so a batched
+    /// write and a row-at-a-time one produce the same table.
+    pub fn insert_many_if_absent(
+        &self,
+        schema: &Schema,
+        table_name: &str,
+        rows: &[Value],
+    ) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        // Windowed so one statement's bind list stays a sane size; the row count per window is
+        // whatever keeps `rows × columns` in the low tens of thousands.
+        let width = schema.row_values(table_name, &rows[0])?.len().max(1);
+        let per_window = (32_768 / width).clamp(1, 1_000);
+        for window in rows.chunks(per_window) {
+            let mut params: Vec<Option<duckdb::types::Value>> = Vec::new();
+            let mut tuples: Vec<String> = Vec::with_capacity(window.len());
+            for row in window {
+                let values = schema.row_values(table_name, row)?;
+                tuples.push(format!(
+                    "({})",
+                    std::iter::repeat_n("?", values.len())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+                params.extend(values);
+            }
+            let sql = format!(
+                "INSERT OR IGNORE INTO {table_name} VALUES {}",
+                tuples.join(", ")
+            );
+            let refs: Vec<&dyn duckdb::ToSql> =
+                params.iter().map(|p| p as &dyn duckdb::ToSql).collect();
+            self.conn
+                .execute(&sql, refs.as_slice())
+                .map_err(duck)
+                .with_context(|| format!("inserting {} rows into {table_name}", window.len()))?;
+        }
+        Ok(())
+    }
+
     /// Insert one row, replacing any already under its primary key
     /// ([`Schema::insert_or_replace`]).
     pub fn insert_or_replace(&self, schema: &Schema, table_name: &str, data: &Value) -> Result<()> {
@@ -611,10 +737,29 @@ impl BidsDb {
     /// because this only runs for files the walk still finds. Pruning those is an integrity
     /// question, deliberately not one the write path answers.
     pub fn clear_file_rows(&self, table: &str, file_id: Uuid) -> Result<()> {
+        self.clear_file_rows_many(table, std::slice::from_ref(&file_id))
+    }
+
+    /// [`Self::clear_file_rows`] for many files, in one statement.
+    ///
+    /// These tables carry no index on `file_id`, so each `DELETE` scans; issuing one per file
+    /// therefore costs `files × rows_written_so_far`, against a table the same loop is
+    /// growing. Batching turns that into one scan per window. Literals rather than bound
+    /// parameters because the list is variadic, matching `flush_tabular`'s own batched
+    /// `DELETE`.
+    pub fn clear_file_rows_many(&self, table: &str, file_ids: &[Uuid]) -> Result<()> {
+        if file_ids.is_empty() {
+            return Ok(());
+        }
         // `table` is always an internal literal, never user input.
+        let id_list = file_ids
+            .iter()
+            .map(|id| schema::dynamic::sql_uuid_lit(*id))
+            .collect::<Vec<_>>()
+            .join(", ");
         self.conn.execute(
-            &format!("DELETE FROM {table} WHERE file_id = ?"),
-            params![file_id.to_string()],
+            &format!("DELETE FROM {table} WHERE file_id IN ({id_list})"),
+            [],
         )?;
         Ok(())
     }

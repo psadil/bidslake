@@ -58,6 +58,35 @@ JOIN all_files f ON f.dataset_id = p.dataset_id AND f.kind = 'data'
 WHERE p.age < 30 AND f.suffix = 'T1w';
 ```
 
+## Tuning for a network filesystem
+
+Indexing keeps a bounded number of filesystem operations in flight. The right number is a
+property of the filesystem, not of the machine, and it is **not monotonic** — past the point a
+server saturates, more concurrent requests queue and the ingest gets *slower*. On a busy shared
+mount these usually want turning down.
+
+Two dials, because the operations divide by which server answers them:
+
+| Dial | Covers | Flag | Environment |
+|---|---|---|---|
+| Metadata | directory reads, file stats | `--metadata-concurrency N` | `BIDSLAKE_METADATA_CONCURRENCY` |
+| Data | JSON sidecars, `.bval`/`.bvec`, adapter reads, TSV headers | `--read-concurrency N` | `BIDSLAKE_READ_CONCURRENCY` |
+
+Both default to 16, which is what they were fixed at before they were configurable, so a run
+that sets neither is unchanged. A flag beats the environment variable. The catalog is identical
+at any width — these change how fast an ingest runs, never what it produces.
+
+Tune by bisection against `BIDSLAKE_TIMING=1`, which prints a phase breakdown to stderr:
+`walk` and `stat` respond to the metadata dial, `prefetch` to the data one.
+
+```bash
+BIDSLAKE_TIMING=1 ./target/release/bidslake index -i dataset -o out.duckdb \
+    --metadata-concurrency 4 --read-concurrency 8
+```
+
+`BIDSLAKE_METADATA_CONCURRENCY` also tunes `bids-validator`, which walks the same trees through
+the same code and has no flags of its own.
+
 ## Documentation
 
 - **[The book](docs/introduction.md)** — orientation, vocabulary, the architecture decisions, and

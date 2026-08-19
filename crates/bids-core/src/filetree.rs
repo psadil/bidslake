@@ -54,10 +54,131 @@ fn get_mut_subtree<'a>(tree: &'a mut FileTree, rel_path: &str) -> Option<&'a mut
 
     let mut current = tree;
     for part in parts {
-        let idx = current.directories.iter().position(|d| d.name == part)?;
+        // Searched from the back, which is the whole difference between linear and quadratic
+        // here. `read_file_tree` calls this once per walked entry, and `ignore::Walk` is a
+        // pre-order DFS: while its files are being yielded, a directory is the most recently
+        // pushed child of its parent, and so is every directory on the path from the root down
+        // to it. A forward scan therefore hit `position`'s worst case on *every* entry — every
+        // file under `sub-2000` compared 2,000 names at the root alone, making tree
+        // construction cost `entries × root_fanout`.
+        //
+        // Equivalent, not merely faster: a directory node is pushed exactly once (the walker
+        // yields each directory once), so names are unique among a parent's children and the
+        // first match and the last are the same one. The scan is still linear, so an entry
+        // arriving out of DFS order — or none at all, for a pruned pseudo-file's contents,
+        // which must still return `None` — behaves exactly as before.
+        let idx = current.directories.iter().rposition(|d| d.name == part)?;
         current = &mut current.directories[idx];
     }
     Some(current)
+}
+
+/// One walker thread's entries, merged into the shared list when the thread finishes.
+///
+/// `ignore`'s parallel walker builds one closure per thread and drops it when that thread is
+/// done, which is the hook this uses: the lock is taken once per thread rather than once per
+/// entry.
+struct Batch<'a> {
+    local: Vec<(PathBuf, std::fs::FileType)>,
+    sink: &'a std::sync::Mutex<Vec<(PathBuf, std::fs::FileType)>>,
+}
+
+impl Drop for Batch<'_> {
+    fn drop(&mut self) {
+        if !self.local.is_empty() {
+            self.sink.lock().unwrap().append(&mut self.local);
+        }
+    }
+}
+
+/// Order two paths the way a sorted depth-first walk emits them.
+///
+/// Component-wise, which is what makes a parent sort before its children (its component list
+/// is a prefix of theirs) and siblings sort by name. Comparing the paths *as strings* would
+/// not: `/a-b` precedes `/a/b` because `-` < `/`, putting a subtree's sibling in the middle of
+/// it.
+///
+/// Written as a comparator over the two iterators rather than by collecting each path's
+/// components into a `Vec`, because the collecting version allocates twice per comparison —
+/// about 2.8M allocations sorting 80,000 paths, which cost more than the parallel walk saved.
+fn depth_first_order(a: &Path, b: &Path) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let mut ac = a.components();
+    let mut bc = b.components();
+    loop {
+        match (ac.next(), bc.next()) {
+            (Some(x), Some(y)) => match x.cmp(&y) {
+                Ordering::Equal => continue,
+                other => return other,
+            },
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+        }
+    }
+}
+
+/// An explicit walk width, or zero for "work it out".
+static WALK_THREADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Set how many threads the walk uses. Zero restores the automatic choice.
+///
+/// Exists because the right width is a property of the *filesystem*, not of this machine, and
+/// only the caller knows which filesystem it is about to walk. More is not monotonically
+/// better: a metadata server that is already saturated answers a hundred concurrent `readdir`s
+/// more slowly than sixteen, so on a busy shared mount this wants turning **down**.
+///
+/// Process-global rather than a parameter because the alternative is threading a width through
+/// every walk entry point and both binaries' call sites, to be set once at startup and never
+/// varied within a run.
+pub fn set_walk_threads(n: usize) {
+    WALK_THREADS.store(n, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// How many threads the walk uses.
+///
+/// A walk is bounded by `readdir` latency far more than by CPU, so this is not a core count so
+/// much as a count of round trips to keep outstanding: on a network filesystem a serial walk
+/// costs `directories × RTT`, which is minutes for a large tree.
+///
+/// The order is: an explicit [`set_walk_threads`], then `BIDSLAKE_METADATA_CONCURRENCY` — which
+/// is how a `bids-validator` run, having no flag of its own, is tuned for the same mount — then
+/// this machine's parallelism, capped because the returns flatten and a hundred threads on a
+/// shared metadata server is antisocial.
+fn walk_threads() -> usize {
+    let set = WALK_THREADS.load(std::sync::atomic::Ordering::Relaxed);
+    if set > 0 {
+        return set;
+    }
+    if let Some(n) = std::env::var("BIDSLAKE_METADATA_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&n| n > 0)
+    {
+        return n;
+    }
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(2, 16)
+}
+
+/// Whether any ancestor of `path` below `root` is a pseudo-file directory.
+///
+/// Tests the ancestors only, never the entry itself, so a pseudo-file directory is still
+/// yielded by the walk (it becomes a [`BidsFile`]) while everything beneath it is pruned.
+fn has_pseudo_ancestor(path: &Path, root: &Path, pseudo_exts: &[String]) -> bool {
+    if pseudo_exts.is_empty() {
+        return false;
+    }
+    let Ok(rel) = path.strip_prefix(root) else {
+        return false;
+    };
+    let mut components: Vec<_> = rel.components().collect();
+    components.pop(); // the entry itself
+    components
+        .iter()
+        .any(|c| is_pseudo_file(&c.as_os_str().to_string_lossy(), pseudo_exts))
 }
 
 /// Read a directory into a `FileTree`, respecting `.bidsignore` patterns unless
@@ -72,18 +193,37 @@ pub fn read_file_tree(
     pseudo_exts: &[String],
     apply_bidsignore: bool,
 ) -> Result<FileTree, std::io::Error> {
-    let mut root_tree = FileTree {
-        name: root
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default(),
-        path: "/".to_string(),
-        files: Vec::new(),
-        directories: Vec::new(),
-    };
+    read_file_tree_observed(root, pseudo_exts, apply_bidsignore, &|_| {})
+}
 
-    let root = &root.canonicalize()?;
-
+/// [`read_file_tree`], calling `on_dir` once for each directory the walk descends into.
+///
+/// The hook exists because a directory is where a walk spends its round trips: on a network
+/// filesystem the cost of the traversal is one `readdir` per directory, and nothing else about
+/// the walk is observable from outside it. Two callers want that.
+///
+/// Production counts. bidslake reports `dirs` in its timing breakdown, and counting here is
+/// what lets it stop re-walking the finished tree to find the same number — a traversal it was
+/// paying on every index, timing on or off.
+///
+/// Benchmarks inject latency. `bidslake::fs::LocalFileSystem::with_walk_latency` sleeps in this
+/// hook, which is the only way to model a network walk deterministically — and the only way to
+/// tell a serial walk from a parallel one, since a serial walk costs `dirs × delay` and a
+/// parallel one `dirs / threads × delay`.
+///
+/// `on_dir` is `Sync` so this signature does not have to change if the walk itself becomes
+/// parallel.
+/// Every entry the walk found, in sorted depth-first order, with the file type `readdir`
+/// already reported.
+///
+/// The shared core of [`walk_paths`] and [`read_file_tree_observed`]. See [`walk_paths`] for
+/// why the order is imposed here rather than inherited from the traversal.
+fn walk_entries(
+    root: &Path,
+    pseudo_exts: &[String],
+    apply_bidsignore: bool,
+    on_dir: &(dyn Fn(&Path) + Sync),
+) -> Result<Vec<(PathBuf, std::fs::FileType)>, std::io::Error> {
     let mut overrides = ignore::overrides::OverrideBuilder::new(root);
     for pattern in ALWAYS_IGNORE {
         overrides.add(pattern).unwrap();
@@ -107,30 +247,184 @@ pub fn read_file_tree(
         .git_exclude(false)
         .ignore(false)
         .overrides(always_ignore)
-        .sort_by_file_name(|a, b| a.cmp(b));
+        .threads(walk_threads());
     if apply_bidsignore {
         builder.add_custom_ignore_filename(".bidsignore");
     }
+    // Do not descend *below* a pseudo-file. A `.ds`/`.ome.zarr` directory is one opaque data
+    // file, so nothing inside it belongs to the tree; the serial walk used to read the whole
+    // subtree and then drop every entry, because no directory node existed to hang them on.
+    // The predicate tests the ancestors and not the entry itself, so the pseudo-file directory
+    // is still yielded — it has to be, it becomes a `BidsFile`.
+    {
+        let pseudo: Vec<String> = pseudo_exts.to_vec();
+        let root_owned = root.to_path_buf();
+        builder.filter_entry(move |entry| !has_pseudo_ancestor(entry.path(), &root_owned, &pseudo));
+    }
 
-    let walker = builder.build();
+    // The root is a directory the walk reads too — the walker yields it at depth 0 and the
+    // callers skip it, but its `readdir` is a round trip like any other, so it is charged
+    // like any other.
+    //
+    // What `on_dir` counts is round trips, not tree nodes: a pseudo-file directory is read
+    // (that is how its contents come to be pruned) and so is charged here, while in the tree
+    // it ends up a `BidsFile`. The two numbers agree for every dataset without pseudo-files.
+    on_dir(root);
 
-    for result in walker {
-        let entry = result.unwrap();
-        // although there is a min_depth option, it interacts poorly with the overrides
-        // so, we explicitly ignore the root here
-        if entry.depth() == 0 {
+    let collected: std::sync::Mutex<Vec<(PathBuf, std::fs::FileType)>> =
+        std::sync::Mutex::new(Vec::new());
+    let failures: std::sync::Mutex<Vec<std::io::Error>> = std::sync::Mutex::new(Vec::new());
+    let failures = &failures;
+    builder.build_parallel().run(|| {
+        // One batch per walker thread, merged when the thread's closure is dropped. Sending
+        // each entry individually — down a channel or straight into the shared `Vec` — put a
+        // synchronization point on the hot path of the walk and cost more than the extra
+        // threads bought.
+        let mut batch = Batch {
+            local: Vec::new(),
+            sink: &collected,
+        };
+        Box::new(move |result| {
+            match result {
+                Ok(entry) => {
+                    if let Some(ft) = entry.file_type() {
+                        if ft.is_dir() && entry.depth() > 0 {
+                            // Charged on the walker thread, so a per-directory cost overlaps
+                            // across threads exactly as the real `readdir`s do — which is what
+                            // lets a benchmark tell a parallel walk from a serial one.
+                            on_dir(entry.path());
+                        }
+                        batch.local.push((entry.path().to_path_buf(), ft));
+                    }
+                }
+                // The serial walk used to `unwrap()` here, so an unreadable directory aborted
+                // the process. Reported instead: the signature already returns `io::Error`.
+                Err(e) => failures.lock().unwrap().push(std::io::Error::other(e)),
+            }
+            ignore::WalkState::Continue
+        })
+    });
+
+    if let Some(e) = failures.lock().unwrap().pop() {
+        return Err(e);
+    }
+    let mut entries = collected.into_inner().unwrap();
+    entries.sort_by(|(a, _), (b, _)| depth_first_order(a, b));
+    Ok(entries)
+}
+
+/// Whether a walked entry is one of the dataset's *files*: a plain file, a symlink, or a
+/// pseudo-file directory. `None` for anything to be dropped (the root, dotfiles, ordinary
+/// directories).
+fn walked_file_name(
+    path: &Path,
+    root: &Path,
+    file_type: &std::fs::FileType,
+    pseudo_exts: &[String],
+) -> Option<String> {
+    if path == root {
+        return None;
+    }
+    let name = path.file_name()?.to_string_lossy().to_string();
+    // Prune dotfiles at every level (matches the TS validator's `.**` prune rule). The walker
+    // already prunes hidden *directories*, so this is the file case. `.bidsignore` is still
+    // consumed internally by the walker as a custom ignore source; it just isn't validated as
+    // a dataset file.
+    if name.starts_with('.') {
+        return None;
+    }
+    // Classified from the type `readdir` already reported — the walker caches it on the entry
+    // — rather than asking the path. Each of `Path::is_file`, `is_symlink` and `is_dir` is a
+    // fresh `stat`, and on a network filesystem every one is a serialized round trip for
+    // something already in hand.
+    //
+    // The walker runs with `follow_links(false)`, so `file_type()` reports a symlink as a
+    // symlink; symlinks are bucketed with files, which is why the test order checks
+    // `is_symlink()` before `is_dir()`.
+    let is_file = file_type.is_file()
+        || file_type.is_symlink()
+        || (file_type.is_dir() && is_pseudo_file(&name, pseudo_exts));
+    is_file.then_some(name)
+}
+
+/// The dataset's files as root-relative paths (each with a leading `/`), in sorted
+/// depth-first order — without building a [`FileTree`].
+///
+/// This is what an ingest wants. The tree is a structure the *validator* needs (it looks files
+/// up by path and reads their `absolute_path`); bidslake only ever flattened it straight back
+/// into a list of paths and then held the whole thing for the rest of the run — roughly 180 MB
+/// of duplicated path strings at half a million files, for nothing.
+///
+/// The order is imposed rather than inherited: `ignore`'s parallel walker has no `sort_by_*`,
+/// because entries arrive from several threads. Sorting by path *components* reproduces the
+/// serial walker's sorted depth-first pre-order exactly — a parent's component list is a
+/// prefix of its children's, so parents precede them and siblings order by name. Sorting the
+/// paths as strings would not: `/a-b` precedes `/a/b` because `-` < `/`.
+pub fn walk_paths(
+    root: &Path,
+    pseudo_exts: &[String],
+    apply_bidsignore: bool,
+    on_dir: &(dyn Fn(&Path) + Sync),
+) -> Result<Vec<String>, std::io::Error> {
+    let root = &root.canonicalize()?;
+    let entries = walk_entries(root, pseudo_exts, apply_bidsignore, on_dir)?;
+    Ok(entries
+        .iter()
+        .filter(|(path, ft)| walked_file_name(path, root, ft, pseudo_exts).is_some())
+        .map(|(path, _)| make_relative_path(path, root))
+        .collect())
+}
+
+/// [`read_file_tree`], calling `on_dir` once for each directory the walk descends into.
+///
+/// The hook exists because a directory is where a walk spends its round trips: on a network
+/// filesystem the cost of the traversal is one `readdir` per directory, and nothing else about
+/// the walk is observable from outside it. Two callers want that.
+///
+/// Production counts. bidslake reports `dirs` in its timing breakdown, and counting here is
+/// what lets it stop re-walking the finished tree to find the same number — a traversal it was
+/// paying on every index, timing on or off.
+///
+/// Benchmarks inject latency. `bidslake::fs::LocalFileSystem::with_walk_latency` sleeps in this
+/// hook, which is the only way to model a network walk deterministically — and the only way to
+/// tell a serial walk from a parallel one, since a serial walk costs `dirs × delay` and a
+/// parallel one `dirs / threads × delay`.
+///
+/// `on_dir` is `Sync` because the walk is parallel.
+pub fn read_file_tree_observed(
+    root: &Path,
+    pseudo_exts: &[String],
+    apply_bidsignore: bool,
+    on_dir: &(dyn Fn(&Path) + Sync),
+) -> Result<FileTree, std::io::Error> {
+    let mut root_tree = FileTree {
+        name: root
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        path: "/".to_string(),
+        files: Vec::new(),
+        directories: Vec::new(),
+    };
+
+    let root = &root.canonicalize()?;
+    let entries = walk_entries(root, pseudo_exts, apply_bidsignore, on_dir)?;
+
+    for (path, file_type) in &entries {
+        let Some(entry_name) = ({
+            // A directory still needs a node even though it is not a "file"; only the
+            // dropped-entry cases are shared with `walk_paths`.
+            if path == root {
+                continue;
+            }
+            let name = path.file_name().map(|n| n.to_string_lossy().to_string());
+            match name {
+                Some(n) if !n.starts_with('.') => Some(n),
+                _ => None,
+            }
+        }) else {
             continue;
-        }
-        let path = entry.path();
-
-        let entry_name = entry.file_name().to_string_lossy().to_string();
-
-        // Prune dotfiles and dot-directories at every level (matches the TS validator's `.**`
-        // prune rule). `.bidsignore` is still consumed internally by the walker as a custom
-        // ignore source; it just isn't validated as a dataset file.
-        if entry_name.starts_with('.') {
-            continue;
-        }
+        };
 
         let rel_path = make_relative_path(path, root);
         let parent_rel_path = make_relative_path(path.parent().unwrap_or(path), root);
@@ -143,26 +437,11 @@ pub fn read_file_tree(
             }
         };
 
-        // Classify from the type `readdir` already reported — walkdir caches it on the
-        // entry — rather than asking the path. Each of `Path::is_file`, `is_symlink` and
-        // `is_dir` is a fresh `stat`, and on a network filesystem every one is a serialized
-        // round trip for something already in hand.
-        //
-        // The walker runs with `follow_links(false)`, so `file_type()` reports a symlink as
-        // a symlink; symlinks are bucketed with files, which is why the test order below
-        // checks `is_symlink()` before `is_dir()`.
-        let Some(file_type) = entry.file_type() else {
-            // Only `None` for stdin, which a directory walk never yields.
-            continue;
-        };
-        if file_type.is_file()
-            || file_type.is_symlink()
-            || (file_type.is_dir() && is_pseudo_file(&entry_name, pseudo_exts))
-        {
+        if walked_file_name(path, root, file_type, pseudo_exts).is_some() {
             parent_tree.files.push(BidsFile {
                 name: entry_name,
                 path: rel_path,
-                absolute_path: entry.path().to_path_buf(),
+                absolute_path: path.clone(),
             });
         } else if file_type.is_dir() {
             parent_tree.directories.push(FileTree {

@@ -75,3 +75,36 @@ crosses BEP-011 itself: the merge is additive, so an upstream render carrying th
 makes the overlay inert, and one carrying them with any edit makes it an `OverlayError::Conflict`
 naming the pointer that drifted. Either is the signal to delete the overlay rather than reconcile
 it, and `bids_schema::overlay::always_applied_overlay`'s doc comment says so.
+
+## Validator issue output is nondeterministic run to run
+
+Two runs of the same binary over the same dataset emit the same issues in a different order: 107 of
+the 108 `bids-examples` datasets differ between two consecutive runs of an unmodified
+`bids-validator`. The multiset is identical every time, so nothing is lost or invented — only the
+sequence moves.
+
+The cost is that validator output cannot be diffed. Any CI check, any parity comparison against the
+TS validator, and any before/after review of a change has to normalize to a multiset first, which is
+easy to forget and easy to get subtly wrong; it also makes `--json` unstable for anything
+downstream. This was found while checking that the 2026-08 ingest performance work left validation
+unchanged — the sequence diff was useless and the comparison had to be redone as multisets.
+
+Two independent causes:
+
+* **`HashMap` iteration.** `fields: HashMap<String, RequirementLevel>` in
+  `crates/bids-validator-rs/src/rules/dataset_metadata.rs`, `.../rules/json.rs` and
+  `.../rules/sidecars.rs`, plus `dataset_metadata_rules: HashMap<String, DatasetMetadataRuleDef>` in
+  `crates/bids-validator-rs/src/schema.rs`. `RandomState` is seeded per process, so the
+  required/recommended presence checks fire in a different order on every run. This is what
+  reorders issues *within* one file — `HEDVersion`, `SourceDatasets` and `GeneratedBy` permute
+  against `/dataset_description.json`.
+* **`buffer_unordered(100)`** in `crates/bids-validator-rs/src/validator.rs`: each file's
+  `DatasetIssues` merges in completion order, so issues from different files interleave differently.
+
+Nothing sorts before output, so neither cause is absorbed downstream.
+
+The fix that covers both is to order `issues.issues` once before it is rendered, on a total key —
+`(location, code, subCode)` — since that is independent of which cause produced the disorder.
+Changing the four maps to `BTreeMap` addresses only the first, but is worth doing anyway: it makes
+the order rules are *evaluated* in reproducible, which is a property worth having on its own. Pin it
+with a test asserting two runs over one fixture are byte-identical.

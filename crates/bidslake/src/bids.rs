@@ -229,6 +229,21 @@ pub struct BidsParser {
     pending_recordings: Vec<PendingRecording>,
     /// Per-row tabular files deferred for batched ingestion (Lever 1b).
     pending_tabular: Vec<PendingTabular>,
+    /// Rows produced by adapter [`ContentReader`]s, accumulated per target table so the
+    /// `DELETE` + append pair is paid once per window rather than once per file. See
+    /// [`BidsParser::flush_reader_rows`].
+    pending_reader_rows: HashMap<String, PendingReaderRows>,
+    /// Matrix-engine files deferred for batched ingestion. See
+    /// [`BidsParser::flush_matrix`].
+    pending_matrix: Vec<PendingMatrix>,
+    /// The `TableSpec` each deferred matrix file routed to, one per table rather than one per
+    /// file — they are identical for every file sharing a table.
+    matrix_specs: HashMap<String, TableSpec>,
+    /// Stub `participants` rows for subjects seen only as a path component, deferred so the
+    /// whole set is one statement. See [`BidsParser::flush_implicit_entities`].
+    pending_participants: Vec<Value>,
+    /// Stub `sessions` rows, deferred for the same reason.
+    pending_sessions: Vec<Value>,
     /// A throwaway in-memory connection used to pre-flight `read_csv` on a file
     /// before the real INSERT. A malformed TSV (empty, truncated, or a non-gzip
     /// git-annex placeholder with a `.gz` name) makes `read_csv` error, and inside
@@ -418,7 +433,17 @@ impl<'a> SidecarIndex<'a> {
                     .iter()
                     .all(|(key, value)| entities.get(key) == Some(value))
             }));
-            scratch[start..].sort_by_key(|&i| self.sidecars[i].entities.len());
+            // Path is the secondary key, not decoration: entity count alone leaves two
+            // equally-specific sidecars in the same directory ordered by *arrival*, so
+            // nearest-wins would silently depend on walk order. Sorting on the path makes the
+            // winner a property of the dataset instead, which is also what lets the walk be
+            // parallelized without changing which value a merge produces.
+            scratch[start..].sort_by_key(|&i| {
+                (
+                    self.sidecars[i].entities.len(),
+                    self.sidecars[i].file_path.as_str(),
+                )
+            });
         }
 
         let mut merged = serde_json::Map::new();
@@ -496,6 +521,50 @@ struct PendingRecording {
 /// (`participants`/`sessions`/`scans`) need a per-file value the batch cannot derive from the
 /// rows themselves, so it travels with the file in [`Self::aux`]; and because batching moves
 /// their reads to after the walk has synthesized its stub rows, they insert with
+/// A matrix-engine file deferred for batched ingestion.
+///
+/// The per-file path issued three statements each — a preflight, a `DELETE` and an `INSERT` —
+/// and DuckDB re-planned all three, because the catalog keeps changing inside the ingest's open
+/// transaction. On a 1,000-subject FreeSurfer tree that is 9,000 files and about 70% of the run.
+struct PendingMatrix {
+    /// The target table; every file sharing it also shares its column mapping and its ordering
+    /// policy, so the table name is the whole batch key.
+    table: String,
+    /// Dataset-relative path, for diagnostics.
+    rel_path: String,
+    /// Ready-to-use `read_csv` source, joined back through the emitted `__src` column.
+    source: String,
+    /// This file's registry key, carried into the batch's join map.
+    file_key: Uuid,
+    /// Materialized concept values for this file, in `materialized_concepts` order. A non-BIDS
+    /// path encodes nothing in its name, so these come from the projection rather than the path.
+    concepts: Vec<Option<String>>,
+}
+
+/// Adapter-reader rows waiting to be written, for one target table.
+///
+/// Accumulated rather than written per file because each write pair costs two DuckDB
+/// statements, and DuckDB re-plans both on every execution — the catalog changes inside the
+/// ingest's open transaction, which invalidates any cached plan. Profiling a 43,500-file
+/// FreeSurfer tree put 64% of the run inside these two calls, and only ~7% of *that* in the
+/// actual insert; the rest was the binder and the optimizer. Batching amortizes the planning
+/// over a whole window.
+struct PendingReaderRows {
+    /// The files these rows came from, whose prior rows the flush deletes first. These
+    /// tables are per-row and carry no primary key, so a re-index would otherwise double
+    /// them.
+    file_ids: Vec<Uuid>,
+    /// The rows themselves, in arrival order.
+    rows: Vec<Value>,
+}
+
+/// How many accumulated rows force an early flush of one table.
+///
+/// A bound on memory, not on correctness: a window is deleted and appended as a unit, and a
+/// file's rows never span two windows, so flushing early is equivalent to flushing at the
+/// end. Sized so a wide FreeSurfer tree holds tens of MB, not the whole dataset.
+const READER_ROW_WINDOW: usize = 20_000;
+
 /// `INSERT OR REPLACE` so the file's own row wins (see [`BidsParser::flush_tabular`]).
 struct PendingTabular {
     spec: TableSpec,
@@ -575,6 +644,11 @@ impl BidsParser {
             datatype_dirs: HashSet::new(),
             pending_recordings: Vec::new(),
             pending_tabular: Vec::new(),
+            pending_reader_rows: HashMap::new(),
+            pending_matrix: Vec::new(),
+            matrix_specs: HashMap::new(),
+            pending_participants: Vec::new(),
+            pending_sessions: Vec::new(),
             validator: Connection::open_in_memory().expect("open in-memory validator connection"),
             seen_participants: HashSet::new(),
             seen_sessions: HashSet::new(),
@@ -924,16 +998,25 @@ impl BidsParser {
         let files: Vec<std::path::PathBuf> =
             self.fs.walk(&pseudo_exts, self.apply_bidsignore).await?;
         timing::count(Counter::Files, files.len() as u64);
-        if let Some(tree) = self.fs.file_tree() {
-            timing::count(Counter::Dirs, tree.walk_directories().count() as u64);
-        }
+        // `Counter::Dirs` is charged by the walk itself, which sees each directory once
+        // anyway. It used to be taken here by re-walking the finished tree — a second full
+        // traversal, and one that ran whether or not timing was on, because the argument to
+        // `timing::count` is evaluated either way.
+
+        // The stat pass is its own top-level phase, so the walk scope closes around the
+        // traversal and reopens for the categorize loop below. Charging both to
+        // `Phase::Walk` — which a nested second scope did — made the reported walk cost
+        // `walk + 2 × stat`, and the two want different fixes: the walk is bounded by
+        // serialized `readdir`s, the stat pass by how many are in flight.
+        drop(walk_phase);
 
         // One concurrent pass over everything the walk found. Free on S3 (the listing
         // already carried both) and ~2 µs per file locally; on a parallel filesystem it is
         // a metadata-server round trip each, which is why `stat_many` overlaps them rather
         // than paying them in turn. `--no-stat` skips it, leaving both columns NULL.
         if self.stat_files {
-            let _t = timing::scope(Phase::Walk);
+            let _t = timing::scope(Phase::Stat);
+            timing::count(Counter::Stats, files.len() as u64);
             let stats = self.fs.stat_many(&files).await?;
             self.file_stats = files
                 .iter()
@@ -941,6 +1024,8 @@ impl BidsParser {
                 .filter_map(|(p, st)| st.map(|st| (p.to_string_lossy().into_owned(), st)))
                 .collect();
         }
+
+        let walk_phase = timing::scope(Phase::Walk);
 
         for path in files {
             let file_name = path.file_name().unwrap().to_str().unwrap();
@@ -1004,7 +1089,18 @@ impl BidsParser {
         // Datasets can carry nested dataset_description.json files (e.g. under
         // derivatives/). Sort shallowest-first so the dataset root wins when we
         // resolve the dataset_id and insert the description.
-        dataset_description.sort_by_key(|p| p.components().count());
+        //
+        // Depth alone does not order them: `derivatives/fmriprep/` and `derivatives/mriqc/`
+        // sit at the same depth, and the first *parseable* one supplies the inferred
+        // `dataset_id`. Left to arrival order that is a walk-order dependency in the one place
+        // it is most visible — which dataset the catalog thinks it ingested — so the path
+        // breaks the tie.
+        dataset_description.sort_by(|a, b| {
+            a.components()
+                .count()
+                .cmp(&b.components().count())
+                .then_with(|| a.cmp(b))
+        });
 
         // Pass 0: read the descriptions to resolve the dataset_id, and to capture the
         // ROOT one — `resolve_root` compares it against what the catalog already holds,
@@ -1131,12 +1227,20 @@ impl BidsParser {
                 )
             })?;
 
+        // Before the tabular flush, which overwrites these stubs with the richer rows a
+        // `participants.tsv`/`_sessions.tsv` supplies.
+        self.flush_implicit_entities(db)?;
+
         // Lever 1b: ingest the deferred per-row tabular files in header-grouped
         // batches now that all of them are collected.
         {
             let _t = timing::scope(Phase::TabularReadCsv);
             self.flush_tabular(db).await?;
         }
+        // The adapter readers' rows, deferred for the same reason and flushed here so both
+        // deferred write paths land before the registry statuses are read back.
+        self.flush_reader_rows(db);
+        self.flush_matrix(db).await?;
 
         drop(process_phase);
         let finalize_phase = timing::scope(Phase::Finalize);
@@ -1543,8 +1647,9 @@ impl BidsParser {
         other_files: &[std::path::PathBuf],
     ) {
         use futures::stream::StreamExt;
-        /// Bounded so a huge dataset can't open thousands of sockets at once.
-        const CONCURRENCY: usize = 16;
+        // The data dial: bounded so a huge dataset cannot open thousands of sockets at once,
+        // and tunable because the ceiling that helps on one filesystem hurts on another.
+        let concurrency = crate::concurrency::data();
 
         let rel = |p: &std::path::PathBuf| p.to_string_lossy().to_string();
         // Full-body reads: JSON (sidecars + dataset_description), plus every other
@@ -1574,7 +1679,7 @@ impl BidsParser {
                     let c = fs.read_to_string(Path::new(&p)).await.ok();
                     (p, c)
                 })
-                .buffer_unordered(CONCURRENCY)
+                .buffer_unordered(concurrency)
                 .collect::<Vec<_>>();
             let hdr_fut = futures::stream::iter(tsv_paths)
                 .map(|p| async move {
@@ -1585,7 +1690,7 @@ impl BidsParser {
                         .and_then(|c| tsv_header_from_line(c.split('\n').next().unwrap_or("")));
                     (p, h)
                 })
-                .buffer_unordered(CONCURRENCY)
+                .buffer_unordered(concurrency)
                 .collect::<Vec<_>>();
             futures::join!(body_fut, hdr_fut)
         };
@@ -1682,7 +1787,6 @@ impl BidsParser {
     /// would otherwise re-issue an identical (guarded, no-op) insert.
     fn record_implicit_entities(
         &mut self,
-        db: &BidsDb,
         dataset_id: &str,
         sub: Option<&str>,
         ses: Option<&str>,
@@ -1701,15 +1805,11 @@ impl BidsParser {
             );
             participant_data.insert("participant_id".to_string(), Value::String(pid.clone()));
 
-            // A duplicate (e.g. from participants.tsv) is a no-op: the insert carries a
-            // `WHERE NOT EXISTS` primary-key guard (see `schema::dynamic`), so `?` only
-            // surfaces real failures.
-            db.insert(
-                &self.schema,
-                "participants",
-                &Value::Object(participant_data),
-            )
-            .with_context(|| format!("inserting implicit participant {pid}"))?;
+            // Deferred, not written here. A duplicate (e.g. from participants.tsv) is still a
+            // no-op — `flush_implicit_entities` writes with `INSERT OR IGNORE`, the batched
+            // form of the `WHERE NOT EXISTS` guard this used to rely on.
+            self.pending_participants
+                .push(Value::Object(participant_data));
         }
 
         if let Some(ses) = ses {
@@ -1727,8 +1827,7 @@ impl BidsParser {
                 session_data.insert("participant_id".to_string(), Value::String(pid.clone()));
 
                 // Duplicate is a no-op via the same guard.
-                db.insert(&self.schema, "sessions", &Value::Object(session_data))
-                    .with_context(|| format!("inserting implicit session {sid} for {pid}"))?;
+                self.pending_sessions.push(Value::Object(session_data));
             }
         }
         Ok(())
@@ -1763,7 +1862,6 @@ impl BidsParser {
         let entities = parts.entities;
 
         self.record_implicit_entities(
-            db,
             dataset_id,
             entities.get("sub").map(String::as_str),
             entities.get("ses").map(String::as_str),
@@ -1914,7 +2012,7 @@ impl BidsParser {
         // Register the subject/session the projection found, before the disposition is decided:
         // if a term map recognized a path and read a subject out of it, that subject is in the
         // tree whether or not this particular file earns a `scans` row.
-        self.record_implicit_entities(db, dataset_id, facts.get("sub"), facts.get("ses"))?;
+        self.record_implicit_entities(dataset_id, facts.get("sub"), facts.get("ses"))?;
 
         // The ingestion selectors run over the projected concepts. `path` is dataset-relative
         // with a leading slash, matching the tabular selector convention.
@@ -2002,7 +2100,7 @@ impl BidsParser {
                 );
                 return Ok(());
             };
-            self.ingest_matrix(db, dataset_id, rel_path, spec, &facts)
+            self.ingest_matrix(dataset_id, rel_path, spec, &facts)
                 .await?;
             self.walk_status
                 .insert(rel_path.to_string(), TabularStatus::Ingested);
@@ -2031,29 +2129,28 @@ impl BidsParser {
             declared,
         ) {
             Ok(batches) => {
-                for batch in &batches {
-                    // Clear this file's prior rows before re-inserting them. These tables are
-                    // per-row and so carry no primary key — nothing for an upsert to conflict
-                    // on — which means a re-index does not *fail*: it silently doubles the
-                    // table. Scoped per file, exactly as the batched tabular path scopes its own
-                    // pre-`DELETE` for the same class of table.
-                    if let Err(e) =
-                        db.clear_file_rows(&batch.table, self.file_key(dataset_id, rel_path))
-                    {
-                        eprintln!(
-                            "Warning: clearing previous {} rows for {rel_path}: {e}",
-                            batch.table
-                        );
+                // Accumulated, not written here. The prior rows of these files still have to
+                // be cleared before the new ones land — they are per-row tables and carry no
+                // primary key, so a re-index would silently double them rather than fail —
+                // but both halves are paid per *window* now. See `flush_reader_rows`.
+                let file_id = self.file_key(dataset_id, rel_path);
+                let mut ready: Vec<String> = Vec::new();
+                for batch in batches {
+                    let pending = self
+                        .pending_reader_rows
+                        .entry(batch.table.clone())
+                        .or_insert_with(|| PendingReaderRows {
+                            file_ids: Vec::new(),
+                            rows: Vec::new(),
+                        });
+                    pending.file_ids.push(file_id);
+                    pending.rows.extend(batch.rows);
+                    if pending.rows.len() >= READER_ROW_WINDOW {
+                        ready.push(batch.table);
                     }
-                    match db.append_rows(&self.schema, &batch.table, &batch.rows) {
-                        Ok(()) => {}
-                        Err(e) => {
-                            eprintln!(
-                                "Warning: insert into {} failed for {rel_path}: {e}",
-                                batch.table
-                            )
-                        }
-                    }
+                }
+                for table in ready {
+                    self.flush_reader_table(db, &table);
                 }
                 self.walk_status
                     .insert(rel_path.to_string(), TabularStatus::Ingested);
@@ -2593,12 +2690,126 @@ impl BidsParser {
                 } else {
                     TabularStatus::Ingested
                 };
-                for m in &members {
-                    db.record_file_status(self.file_key(&dataset_id, &m.rel_path), status)?;
+                // One statement for the window, not one per member: the predicate scans
+                // `file_registry` rather than using its primary key, so a per-file update
+                // makes this pass cost `files × registry_rows`.
+                let ids: Vec<Uuid> = members
+                    .iter()
+                    .map(|m| self.file_key(&dataset_id, &m.rel_path))
+                    .collect();
+                db.record_file_statuses(&ids, status)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Write one table's accumulated adapter-reader rows: delete the contributing files'
+    /// prior rows, then append the new ones.
+    ///
+    /// Deleting the whole window in one statement is what makes this cheap. It is also what
+    /// makes it *correct* to flush early: a file's rows are pushed in a single call, so no
+    /// file spans two windows, and delete-then-append over a window has the same effect as
+    /// delete-then-append over each of its files in turn.
+    ///
+    /// Errors are logged, not propagated — matching what the per-file writes did, so a table
+    /// an overlay names but the schema does not declare still leaves its file recorded
+    /// `ingested` rather than aborting the dataset.
+    fn flush_reader_table(&mut self, db: &BidsDb, table: &str) {
+        let Some(pending) = self.pending_reader_rows.get_mut(table) else {
+            return;
+        };
+        if pending.rows.is_empty() && pending.file_ids.is_empty() {
+            return;
+        }
+        let file_ids = std::mem::take(&mut pending.file_ids);
+        let rows = std::mem::take(&mut pending.rows);
+        if let Err(e) = db.clear_file_rows_many(table, &file_ids) {
+            eprintln!("Warning: clearing previous {table} rows: {e}");
+        }
+        if let Err(e) = db.append_rows(&self.schema, table, &rows) {
+            eprintln!("Warning: insert into {table} failed: {e}");
+        }
+    }
+
+    /// Ingest the deferred matrix files, one batch of statements per table window instead of
+    /// three statements per file.
+    ///
+    /// Grouped by table alone: a matrix file's SQL varies with its target table's column
+    /// mapping and ordering policy, and with two per-file values — its `file_id` and its
+    /// materialized concepts. The first is shared by every file in a group, and the last two
+    /// move into the batch's `VALUES` join map, exactly as `flush_tabular` carries a file's
+    /// identity through `__src`.
+    ///
+    /// A window whose batched read fails falls back to the per-file path rather than dropping
+    /// every file in it: `read_csv` over a list opens all of them, so one unreadable file would
+    /// otherwise cost its neighbours their rows.
+    async fn flush_matrix(&mut self, db: &BidsDb) -> Result<()> {
+        if self.pending_matrix.is_empty() {
+            return Ok(());
+        }
+        let pending = std::mem::take(&mut self.pending_matrix);
+        let specs = std::mem::take(&mut self.matrix_specs);
+
+        let mut groups: HashMap<&str, Vec<usize>> = HashMap::new();
+        for (i, p) in pending.iter().enumerate() {
+            groups.entry(p.table.as_str()).or_default().push(i);
+        }
+
+        for (table, idxs) in groups {
+            let Some(spec) = specs.get(table) else {
+                continue;
+            };
+            let preserve_order = self.schema.ingestion().ordered(table);
+            let concepts = self.schema.ingestion().materialized_concepts(table);
+
+            for window in idxs.chunks(BATCH_WINDOW_FILES) {
+                let members: Vec<&PendingMatrix> = window.iter().map(|&i| &pending[i]).collect();
+                let read_from = matrix_read_from(&members, preserve_order);
+                // One preflight for the window rather than one per file.
+                if !self.read_csv_ok(&read_from) {
+                    for m in &members {
+                        self.ingest_matrix_file(db, m, spec).await?;
+                    }
+                    continue;
+                }
+
+                let ids: Vec<Uuid> = members.iter().map(|m| m.file_key).collect();
+                db.clear_file_rows_many(table, &ids)?;
+
+                let sql = matrix_batch_sql(spec, &members, concepts, preserve_order, &read_from);
+                if let Err(e) = db.conn.execute(&sql, []) {
+                    eprintln!(
+                        "Warning: batched matrix insert into {table} failed ({} files): {e}",
+                        members.len()
+                    );
                 }
             }
         }
         Ok(())
+    }
+
+    /// Write the deferred stub `participants` and `sessions` rows.
+    ///
+    /// Must run **before** `flush_tabular`: a keyed tabular table is ingested with
+    /// `INSERT OR REPLACE` precisely so the row read from `participants.tsv` beats the stub the
+    /// walk synthesized, and that ordering is what decides the winner. Writing the stubs after
+    /// the flush would invert it.
+    fn flush_implicit_entities(&mut self, db: &BidsDb) -> Result<()> {
+        let participants = std::mem::take(&mut self.pending_participants);
+        db.insert_many_if_absent(&self.schema, "participants", &participants)?;
+        let sessions = std::mem::take(&mut self.pending_sessions);
+        db.insert_many_if_absent(&self.schema, "sessions", &sessions)?;
+        Ok(())
+    }
+
+    /// Flush every table's remaining accumulated reader rows. Run once, after the per-file
+    /// pass, beside the other deferred writes.
+    fn flush_reader_rows(&mut self, db: &BidsDb) {
+        let tables: Vec<String> = self.pending_reader_rows.keys().cloned().collect();
+        for table in tables {
+            self.flush_reader_table(db, &table);
+        }
+        self.pending_reader_rows.clear();
     }
 
     /// The BIDS datatype for a file, taken from *any* datatype directory in its
@@ -2674,6 +2885,11 @@ impl BidsParser {
         // Built once for the whole flush: every recording asks the same index which
         // sidecars apply to it.
         let index = SidecarIndex::new(&self.sidecars);
+        // Statuses are collected and written per outcome at the end, for the reason
+        // `record_file_statuses` documents: the update scans `file_registry`, so issuing one
+        // per recording costs `recordings × registry_rows`.
+        let mut ingested: Vec<Uuid> = Vec::new();
+        let mut skipped: Vec<Uuid> = Vec::new();
         for rec in &self.pending_recordings {
             let table = self
                 .ingest_recording(db, rec, &index)
@@ -2685,13 +2901,15 @@ impl BidsParser {
                     );
                     None
                 });
-            let status = if table.is_some() {
-                TabularStatus::Ingested
+            let id = self.file_key(&rec.dataset_id, &rec.rel_path);
+            if table.is_some() {
+                ingested.push(id);
             } else {
-                TabularStatus::Skipped
-            };
-            db.record_file_status(self.file_key(&rec.dataset_id, &rec.rel_path), status)?;
+                skipped.push(id);
+            }
         }
+        db.record_file_statuses(&ingested, TabularStatus::Ingested)?;
+        db.record_file_statuses(&skipped, TabularStatus::Skipped)?;
         Ok(())
     }
 
@@ -2820,8 +3038,7 @@ impl BidsParser {
     /// `None`, and a tree that needs this engine has no datatype directories — so there is no
     /// `file_associations` edge for such a view to join through.
     async fn ingest_matrix(
-        &self,
-        db: &BidsDb,
+        &mut self,
         dataset_id: &str,
         rel_path: &str,
         spec: &TableSpec,
@@ -2847,7 +3064,38 @@ impl BidsParser {
         }
 
         let source = self.fs.read_csv_source(Path::new(rel_path)).await?;
-        let file_key = sql_uuid_lit(self.file_key(dataset_id, rel_path));
+        // Deferred, not written here. See `flush_matrix`.
+        self.pending_matrix.push(PendingMatrix {
+            table: spec.table.clone(),
+            rel_path: rel_path.to_string(),
+            source,
+            file_key: self.file_key(dataset_id, rel_path),
+            concepts: self
+                .schema
+                .ingestion()
+                .materialized_concepts(&spec.table)
+                .iter()
+                .map(|c| facts.get(c).map(str::to_string))
+                .collect(),
+        });
+        self.matrix_specs
+            .entry(spec.table.clone())
+            .or_insert_with(|| spec.clone());
+        Ok(())
+    }
+
+    /// The per-file matrix ingest, kept as the fallback for a window whose batched read
+    /// DuckDB cannot open — one bad file would otherwise take its whole window's files with it,
+    /// where the per-file path skipped only the offender.
+    async fn ingest_matrix_file(
+        &self,
+        db: &BidsDb,
+        pending: &PendingMatrix,
+        spec: &TableSpec,
+    ) -> Result<()> {
+        let rel_path = &pending.rel_path;
+        let source = pending.source.clone();
+        let file_key = sql_uuid_lit(pending.file_key);
 
         // An order-preserving read needs a sequential scan, for the same reason the batched
         // tabular path does: `row_number()` is assigned in physical read order, and only a
@@ -2886,11 +3134,15 @@ impl BidsParser {
         // Materialized concepts as literals from the projection: a non-BIDS path encodes nothing
         // in its name, so a table that declares `concepts` has them written here rather than
         // derived from a path. Entities only, matching what `seed_row` puts on a reader's rows.
-        for concept in self.schema.ingestion().materialized_concepts(&spec.table) {
-            let value = facts
-                .get(concept)
-                .map_or_else(|| "NULL".to_string(), sql_lit);
-            selects.push(format!("{value} AS {}", quote_ident(concept)));
+        for (concept, value) in self
+            .schema
+            .ingestion()
+            .materialized_concepts(&spec.table)
+            .iter()
+            .zip(&pending.concepts)
+        {
+            let lit = value.as_deref().map_or_else(|| "NULL".to_string(), sql_lit);
+            selects.push(format!("{lit} AS {}", quote_ident(concept)));
         }
 
         // Re-index idempotency. A per-row table has no primary key, so a second ingest does not
@@ -3120,6 +3372,9 @@ impl BidsParser {
         // The entity, datatype and modality lookups depend only on the schema, so derive them
         // once here rather than re-walking the schema JSON for every file in the tree.
         let index = bids_schema::context::SchemaIndex::new(self.schema.raw());
+        // Likewise built once: every file's association search parses the same tree's filenames
+        // and walks the same directories.
+        let assoc_index = bids_core::inheritance::AssociationIndex::new(&tree);
 
         let mut out = Vec::new();
         for file in tree.walk_files() {
@@ -3132,9 +3387,12 @@ impl BidsParser {
                 continue;
             }
             let ctx_value = file_ctx.to_selector_value();
-            for h in
-                bids_schema::associations::resolve_associations(meta_assoc, file, &tree, &ctx_value)
-            {
+            for h in bids_schema::associations::resolve_associations(
+                meta_assoc,
+                file,
+                &assoc_index,
+                &ctx_value,
+            ) {
                 out.push(PendingAssociation {
                     source_file: file.path.trim_start_matches('/').to_string(),
                     target_file: h.target_file.path.trim_start_matches('/').to_string(),
@@ -3152,6 +3410,14 @@ impl BidsParser {
 /// that keeps a statement to a few megabytes serves. Note the tradeoff runs both ways, so
 /// smaller is not safer — the batch also declares the file's full column list once per window,
 /// which for a table hundreds of columns wide is itself a large share of the statement.
+///
+/// Sizing it by the *cells* a window asks DuckDB to hold rather than by file count was tried
+/// (2026-08) on the theory that a 1,841-column confounds table should batch fewer files than a
+/// twelve-column events table. It does not pay: min-of-3 peak RSS on a generated wide-confounds
+/// tree went **up**, 883 MB to 971 MB, because more windows means more concurrent `read_csv`
+/// statements and their buffers. Narrowing the window all the way to one file per statement
+/// does cut peak RSS (to ~807 MB), but that is just unbatching the read, which is the 5×
+/// ingest win this path exists for.
 const BATCH_WINDOW_FILES: usize = 512;
 
 /// Split a tabular filename into its BIDS `(suffix, extension)` via the shared
@@ -3533,6 +3799,101 @@ fn build_tabular_batch_select(
         selects = selects.join(", "),
     );
     (sql, extras.into_iter().map(str::to_string).collect())
+}
+
+/// The `FROM` clause for a batched matrix read: every member file in one `read_csv`, with the
+/// source path emitted as `__src` so the join map can attach each row's identity.
+///
+/// Blank lines are filtered inside this subquery, before `__grn` numbers the survivors, so a
+/// trailing newline contributes no phantom row — the same ordering the per-file path relies on.
+fn matrix_read_from(members: &[&PendingMatrix], preserve_order: bool) -> String {
+    let locals = members
+        .iter()
+        .map(|m| sql_lit(&m.source))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let read_opts = format!(
+        "header=false, auto_detect=false, columns={{'line': 'VARCHAR'}}, {}{}",
+        non_poisoning_read_flags_lines!(),
+        if preserve_order {
+            ", parallel=false"
+        } else {
+            ""
+        }
+    );
+    // `__grn` is a *global* row number rebased per file below, not a partitioned one: a window
+    // with `PARTITION BY` and no `ORDER BY` is free to number within a partition in any order,
+    // whereas a global number under `parallel=false` is assigned in physical read order, which
+    // is line order. This is the same construction the batched tabular path uses.
+    let grn = if preserve_order {
+        ", row_number() OVER () AS __grn"
+    } else {
+        ""
+    };
+    format!(
+        "(SELECT str_split_regex(trim(line), '\\s+') AS f, __src{grn} \
+          FROM read_csv([{locals}], {read_opts}, filename='__src') \
+          WHERE trim(line) <> '') AS raw"
+    )
+}
+
+/// The batched `INSERT` for one window of matrix files.
+///
+/// Mirrors the per-file statement it replaces column for column; the only difference is that
+/// `file_id` and the materialized concepts come from a joined `VALUES` map rather than being
+/// literals, because they are the two things that vary per file.
+fn matrix_batch_sql(
+    spec: &TableSpec,
+    members: &[&PendingMatrix],
+    concepts: &[String],
+    preserve_order: bool,
+    read_from: &str,
+) -> String {
+    let mut selects: Vec<String> = vec!["m.fid AS file_id".to_string()];
+    if preserve_order {
+        // Each file's first row becomes index 0.
+        selects.push(
+            "(raw.__grn - MIN(raw.__grn) OVER (PARTITION BY raw.__src))::BIGINT AS row_idx"
+                .to_string(),
+        );
+    }
+    // Field *i* is column *i*; DuckDB lists are 1-based.
+    for (i, c) in spec.columns.iter().enumerate() {
+        let q = quote_ident(&c.name);
+        let field = format!("raw.f[{}]", i + 1);
+        if needs_try_cast(&c.sql_type) {
+            selects.push(format!("TRY_CAST({field} AS {}) AS {q}", c.sql_type));
+        } else {
+            selects.push(format!("{field} AS {q}"));
+        }
+    }
+    for (i, concept) in concepts.iter().enumerate() {
+        selects.push(format!("m.c{i} AS {}", quote_ident(concept)));
+    }
+
+    let map_values = members
+        .iter()
+        .map(|m| {
+            let mut cells = vec![sql_lit(&m.source), sql_uuid_lit(m.file_key)];
+            cells.extend(
+                m.concepts
+                    .iter()
+                    .map(|v| v.as_deref().map_or_else(|| "NULL".to_string(), sql_lit)),
+            );
+            format!("({})", cells.join(", "))
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut map_cols = vec!["abs".to_string(), "fid".to_string()];
+    map_cols.extend((0..concepts.len()).map(|i| format!("c{i}")));
+
+    format!(
+        "INSERT INTO {} BY NAME SELECT {} FROM {read_from} \
+         JOIN (VALUES {map_values}) AS m({}) ON raw.__src = m.abs",
+        spec.table,
+        selects.join(", "),
+        map_cols.join(", "),
+    )
 }
 
 /// Parse a TSV file's header from its first line, read in Rust (via

@@ -173,6 +173,32 @@ enum Commands {
         /// catalog on a network filesystem would then spill over the network.
         #[arg(long)]
         temp_dir: Option<PathBuf>,
+
+        /// How many directory reads and file stats to keep in flight (default 16).
+        ///
+        /// The dial for a *metadata* server — the MDS on Lustre, whatever answers attributes
+        /// on NFS. More is not always faster: past the point that server saturates, extra
+        /// concurrent requests queue and the walk gets slower, so on a busy shared mount this
+        /// wants turning **down**. Tune it by bisection with `BIDSLAKE_TIMING=1` and watch the
+        /// `walk` and `stat` lines.
+        ///
+        /// `BIDSLAKE_METADATA_CONCURRENCY` sets the same thing per site, and is also what
+        /// tunes a `bids-validator` run, which walks the same trees but has no flags of its
+        /// own. This flag wins where both are given.
+        #[arg(long, value_name = "N")]
+        metadata_concurrency: Option<usize>,
+
+        /// How many file-body and header reads to keep in flight (default 16).
+        ///
+        /// The dial for *data* servers — the OSSes on Lustre — covering JSON sidecars,
+        /// `.bval`/`.bvec`, adapter-read files and TSV header sniffs. Separate from
+        /// `--metadata-concurrency` because the two saturate independently: throttling reads
+        /// to protect a metadata server, or widening them and hammering it, are both mistakes
+        /// a single dial would force.
+        ///
+        /// `BIDSLAKE_READ_CONCURRENCY` sets the same thing per site; this flag wins.
+        #[arg(long, value_name = "N")]
+        read_concurrency: Option<usize>,
     },
 
     /// Print the DuckDB schema bidslake would build from the BIDS schema (plus any
@@ -325,7 +351,12 @@ async fn main() -> Result<()> {
             managed,
             source_dataset,
             temp_dir,
+            metadata_concurrency,
+            read_concurrency,
         } => {
+            // Before anything walks or reads: the walk's width lives in `bids-core`, which has
+            // no view of this CLI, so it is pushed there rather than pulled.
+            bidslake::concurrency::configure(metadata_concurrency, read_concurrency);
             let schema_path_str = schema_path
                 .as_deref()
                 .map(|p| {

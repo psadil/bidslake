@@ -7,19 +7,24 @@
 //! dataset root.
 
 use anyhow::{Context as _, Result};
-use bids_core::filetree::FileTree;
 use futures::future::BoxFuture;
 use futures::stream::StreamExt as _;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
-/// How many stats are in flight at once, matching the body-read prefetch in `bids.rs`.
+/// How many stats are in flight at once — the metadata dial, shared with the directory walk.
 ///
 /// The number that matters is not local throughput — a local stat is ~2 µs — but network
 /// latency. On a parallel filesystem each stat is a round trip to a metadata server, and
 /// serially that is minutes per million files; overlapping them is what makes recording
-/// size and mtime affordable there at all.
-const STAT_CONCURRENCY: usize = 16;
+/// size and mtime affordable there at all. It is not monotonic, though, which is why it is
+/// tunable: past the point a metadata server saturates, more concurrent stats make it slower.
+///
+/// Public so the latency benchmark overlaps exactly as many as the real backend does; a bench
+/// that hardcodes its own width measures its own constant instead of this one.
+pub fn stat_concurrency() -> usize {
+    crate::concurrency::metadata()
+}
 
 /// A local absolute path as the `root_uri` the catalog stores.
 ///
@@ -131,35 +136,24 @@ pub trait BidsFileSystem: Send + Sync {
 
     /// Get the root path/URI of the dataset
     fn root(&self) -> String;
-
-    /// The in-memory BIDS [`FileTree`] for this backend, if one exists on local
-    /// disk (populated once [`walk`](Self::walk) has run). Lets callers reuse the
-    /// `bids_core` inheritance helpers, which need the whole tree. Backends without
-    /// a local tree (S3) return `None`, and the caller falls back to its own path.
-    fn file_tree(&self) -> Option<Arc<FileTree>> {
-        None
-    }
 }
 
 /// The [`BidsFileSystem`] for a dataset on this machine — every input that is not an
 /// `s3://` URI, and the only backend a build without the `s3` feature has.
 ///
-/// Two things it does that the trait does not promise. It is the one backend that can hand
-/// back a [`FileTree`], so `bids-core`'s inheritance and association helpers work here and
-/// fall back to per-path logic on S3; the tree is a by-product of
-/// [`walk`](BidsFileSystem::walk), so [`file_tree`](BidsFileSystem::file_tree) is `None`
-/// until a walk has run. And the root it *reports* is canonicalized while the root it
-/// *reads through* is the path as given: `read_to_string` and `stat_many` join onto the
-/// original, [`root`](BidsFileSystem::root) and
+/// One thing it does that the trait does not promise: the root it *reports* is canonicalized
+/// while the root it *reads through* is the path as given. `read_to_string` and `stat_many`
+/// join onto the original, [`root`](BidsFileSystem::root) and
 /// [`read_csv_source`](BidsFileSystem::read_csv_source) onto the symlink-resolved one. So a
 /// dataset reached through a symlinked path is cataloged under its real location — which is
 /// what makes a second ingest by either spelling land on the same `root_uri`, and so on the
 /// same `file_id` for every file, rather than duplicating the dataset.
 pub struct LocalFileSystem {
     root: PathBuf,
-    /// The tree produced by the last [`walk`](BidsFileSystem::walk), cached so
-    /// [`file_tree`](BidsFileSystem::file_tree) can hand it to bids-core inheritance.
-    tree: OnceLock<Arc<FileTree>>,
+    /// A delay charged once per directory during the walk, for benchmarks that model a
+    /// network filesystem. `None` in every production path; see
+    /// [`with_walk_latency`](Self::with_walk_latency).
+    walk_latency: Option<std::time::Duration>,
     /// `root` with symlinks resolved, computed at most once. Every absolute path
     /// this backend hands out is this joined with a dataset-relative path, which is
     /// also exactly what the walk stores in `BidsFile::absolute_path`.
@@ -176,8 +170,22 @@ impl LocalFileSystem {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
-            tree: OnceLock::new(),
+            walk_latency: None,
             canonical_root: OnceLock::new(),
+        }
+    }
+
+    /// A backend that sleeps `per_dir` before recording each directory it walks.
+    ///
+    /// For benchmarks only. A walk's cost on a parallel filesystem is one metadata round trip
+    /// per directory, and that is the one part of an ingest no other injection point can reach
+    /// — `stat_many` and the body reads happen after the walk has already finished. Charging
+    /// the delay inside the walk loop is also what makes the serial-versus-parallel question
+    /// measurable: a serial walk costs `dirs × per_dir`, a parallel one `dirs / threads × per_dir`.
+    pub fn with_walk_latency(root: impl Into<PathBuf>, per_dir: std::time::Duration) -> Self {
+        Self {
+            walk_latency: Some(per_dir),
+            ..Self::new(root)
         }
     }
 
@@ -207,6 +215,7 @@ impl BidsFileSystem for LocalFileSystem {
     ) -> BoxFuture<'_, Result<Vec<PathBuf>>> {
         let root = self.root.clone();
         let pseudo: Vec<String> = pseudo_exts.to_vec();
+        let latency = self.walk_latency;
         Box::pin(async move {
             // Delegate to the shared `bids-core` walker: it applies `.bidsignore`
             // (including nested ones) unless `apply_bidsignore` is false, plus
@@ -222,20 +231,34 @@ impl BidsFileSystem for LocalFileSystem {
             // produces. The root is the one fact the caller needs and the only one this
             // frame has.
             let root_for_msg = root.clone();
-            let tree = tokio::task::spawn_blocking(move || {
-                bids_core::filetree::read_file_tree(&root, &pseudo, apply_bidsignore)
+            let dirs = std::sync::atomic::AtomicU64::new(0);
+            // `walk_paths`, not `read_file_tree`: an ingest never reads the tree. It used to
+            // build one, flatten it straight back into this list, and then hold it for the
+            // rest of the run — roughly 180 MB of duplicated path strings at half a million
+            // files, kept alive for a consumer that no longer existed.
+            //
+            // The directory count comes from the walk's own hook rather than from re-walking
+            // the finished tree, which was a second full traversal that ran whether or not
+            // timing was on.
+            let (paths, dirs) = tokio::task::spawn_blocking(move || {
+                let paths =
+                    bids_core::filetree::walk_paths(&root, &pseudo, apply_bidsignore, &|_| {
+                        dirs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if let Some(d) = latency {
+                            std::thread::sleep(d);
+                        }
+                    });
+                let n = dirs.load(std::sync::atomic::Ordering::Relaxed);
+                (paths, n)
             })
-            .await?
-            .with_context(|| format!("walking {}", root_for_msg.display()))?;
-            // Flatten to the dataset-relative paths the pipeline expects (strip the
-            // leading `/` each tree path carries).
-            let paths: Vec<PathBuf> = tree
-                .walk_files()
-                .map(|f| PathBuf::from(f.path.trim_start_matches('/')))
-                .collect();
-            // Cache the tree so `file_tree()` can share it with bids-core inheritance.
-            let _ = self.tree.set(Arc::new(tree));
-            Ok(paths)
+            .await?;
+            let paths = paths.with_context(|| format!("walking {}", root_for_msg.display()))?;
+            crate::timing::count(crate::timing::Counter::Dirs, dirs);
+            // Dataset-relative, as the rest of the pipeline expects (strip the leading `/`).
+            Ok(paths
+                .into_iter()
+                .map(|p| PathBuf::from(p.trim_start_matches('/')))
+                .collect())
         })
     }
 
@@ -268,7 +291,7 @@ impl BidsFileSystem for LocalFileSystem {
                         .unwrap_or(None)
                     }
                 })
-                .buffered(STAT_CONCURRENCY)
+                .buffered(stat_concurrency())
                 .collect::<Vec<_>>()
                 .await;
             Ok(stats)
@@ -291,10 +314,36 @@ impl BidsFileSystem for LocalFileSystem {
         Box::pin(async move {
             // Read at most `max_bytes` — a header line fits easily — rather than the
             // whole file, matching the S3 ranged read.
-            let mut file = tokio::fs::File::open(full_path).await?;
-            let mut buf = vec![0u8; max_bytes];
-            let n = file.read(&mut buf).await?;
-            buf.truncate(n);
+            //
+            // Looped, because `read` is permitted to return fewer bytes than asked for
+            // whenever it likes and does so routinely on a network filesystem. A single call
+            // silently truncated the header line, and the header line is not incidental here:
+            // it is the key the batched tabular ingest groups files by *and* the source of the
+            // column names, so a short read produced a wrong catalog rather than an error.
+            //
+            // `read_buf`-style accumulation rather than `read_to_end`, since the point is to
+            // stop at `max_bytes`. Reading stops early at EOF (`n == 0`).
+            let mut file = tokio::fs::File::open(&full_path)
+                .await
+                .with_context(|| format!("opening {}", full_path.display()))?;
+            let mut buf = Vec::with_capacity(max_bytes.min(64 * 1024));
+            let mut chunk = [0u8; 8192];
+            while buf.len() < max_bytes {
+                let want = chunk.len().min(max_bytes - buf.len());
+                let n = file
+                    .read(&mut chunk[..want])
+                    .await
+                    .with_context(|| format!("reading {}", full_path.display()))?;
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                // A complete first line is all any caller relies on, so stop as soon as one
+                // is in hand rather than filling the whole budget.
+                if buf.contains(&b'\n') {
+                    break;
+                }
+            }
             Ok(String::from_utf8_lossy(&buf).into_owned())
         })
     }
@@ -312,9 +361,5 @@ impl BidsFileSystem for LocalFileSystem {
     fn root(&self) -> String {
         // Return as file:// URI for consistency with S3 URIs
         format!("file://{}", self.canonical_root().display())
-    }
-
-    fn file_tree(&self) -> Option<Arc<FileTree>> {
-        self.tree.get().cloned()
     }
 }

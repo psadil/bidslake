@@ -3,7 +3,7 @@
 //! Metadata in JSON sidecars is inherited from parent directories to children.
 //! This module walks up the file tree to find and merge sidecar files.
 
-use crate::entities::read_entities;
+use crate::entities::{BidsFileParts, read_entities};
 use crate::filetree::{BidsFile, FileTree};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -195,18 +195,91 @@ fn search_dirs(path_parts: &[&str], inherit: bool) -> Vec<String> {
     dir_paths
 }
 
+/// Every file in a tree, pre-parsed and bucketed by directory and BIDS suffix.
+///
+/// Built once per tree and reused for every source file, which is what makes association
+/// resolution scale. Resolving one file walks its ancestor directories and, in each, looked at
+/// *every* file there — calling [`read_entities`] on each name before discovering that its
+/// suffix did not match. With `a` association entries firing per file and `w` files per
+/// directory that is `a × w` filename parses per source file, so a directory of `w` files cost
+/// `a × w²` to resolve; fMRIPrep widens directories without adding subjects, and a 200-subject
+/// tree measured 8× the per-association cost of a raw one for exactly this reason.
+///
+/// Here each name is parsed once for the whole run, and the suffix bucket means a lookup
+/// touches only plausible candidates.
+///
+/// Order is preserved. [`find_associated_file`] returns the first hit in a directory and
+/// [`FileTree`]'s builders sort each directory's files by name, so a bucket keeps the order it
+/// was filled in and resolution stays deterministic.
+pub struct AssociationIndex<'a> {
+    /// Directory path (`"/"`, `"/sub-01/func"`, …) → suffix → candidates, in tree order.
+    by_dir: HashMap<&'a str, HashMap<&'a str, Vec<Candidate<'a>>>>,
+}
+
+/// One indexed file: the node itself plus its parsed name.
+struct Candidate<'a> {
+    file: &'a BidsFile,
+    parts: BidsFileParts,
+}
+
+impl<'a> AssociationIndex<'a> {
+    /// Index every directory of `tree`, parsing each filename once.
+    pub fn new(tree: &'a FileTree) -> Self {
+        let mut by_dir: HashMap<&'a str, HashMap<&'a str, Vec<Candidate<'a>>>> = HashMap::new();
+        for dir in tree.walk_directories() {
+            let entry = by_dir.entry(dir.path.as_str()).or_default();
+            for file in &dir.files {
+                let parts = read_entities(&file.name);
+                // The key borrows from `file.name`, which outlives the index, rather than
+                // from `parts`, which moves into the vector on the next line.
+                let suffix_key: &'a str = suffix_slice(&file.name, &parts);
+                entry
+                    .entry(suffix_key)
+                    .or_default()
+                    .push(Candidate { file, parts });
+            }
+        }
+        Self { by_dir }
+    }
+
+    /// Candidates in `dir_path` whose suffix is `suffix`, in tree order.
+    fn candidates(&self, dir_path: &str, suffix: &str) -> &[Candidate<'a>] {
+        self.by_dir
+            .get(dir_path)
+            .and_then(|m| m.get(suffix))
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+}
+
+/// The suffix as a subslice of `name`, so it can key the index without allocating.
+///
+/// [`read_entities`] returns an owned `String`; the bytes are nevertheless a slice of the
+/// filename, because the suffix is the last `_`-separated part of the stem and the parser only
+/// splits. Falls back to an empty slice when the parsed suffix is not literally present, which
+/// keeps this total rather than trusting that invariant.
+fn suffix_slice<'a>(name: &'a str, parts: &BidsFileParts) -> &'a str {
+    if parts.suffix.is_empty() {
+        return "";
+    }
+    match name.find(&parts.suffix) {
+        Some(i) => &name[i..i + parts.suffix.len()],
+        None => "",
+    }
+}
+
 /// Find an associated file for a given source file.
 ///
 /// This is used for association types defined in `meta.associations` in the schema,
 /// such as events files, channels files, etc.
 pub fn find_associated_file(
     source: &BidsFile,
-    tree: &FileTree,
+    index: &AssociationIndex<'_>,
+    source_parts: &BidsFileParts,
     target_suffix: Option<&str>,
     target_extensions: &[&str],
     inherit: bool,
 ) -> Option<BidsFile> {
-    let source_parts = read_entities(&source.name);
     let suffix = target_suffix.unwrap_or(&source_parts.suffix);
 
     let path_parts: Vec<&str> = source.path.split('/').filter(|s| !s.is_empty()).collect();
@@ -214,43 +287,39 @@ pub fn find_associated_file(
     let dir_paths = search_dirs(&path_parts, inherit);
 
     for dir_path in &dir_paths {
-        let dir_tree = if dir_path == "/" {
-            Some(tree)
-        } else {
-            tree.subtree(dir_path)
-        };
+        for candidate in index.candidates(dir_path, suffix) {
+            // A file is not its own association. The first directory searched is the source's
+            // own, and an entry whose target differs from the source only by selector — the
+            // schema's `events` and `physio` entries select on `extension != '.json'` alone —
+            // otherwise matches the source itself on suffix, extension and entities. Skipping
+            // it here rather than at the caller matters: this search returns the *first* hit,
+            // so discarding a self-match afterwards would hide a real one behind it.
+            if candidate.file.path == source.path {
+                continue;
+            }
+            let cand_parts = &candidate.parts;
 
-        if let Some(dir) = dir_tree {
-            for candidate in &dir.files {
-                let cand_parts = read_entities(&candidate.name);
+            // Check extension
+            let ext_match = target_extensions.is_empty()
+                || target_extensions.iter().any(|e| *e == cand_parts.extension);
+            if !ext_match {
+                continue;
+            }
 
-                // Check suffix
-                if cand_parts.suffix != suffix {
-                    continue;
-                }
-
-                // Check extension
-                let ext_match = target_extensions.is_empty()
-                    || target_extensions.iter().any(|e| *e == cand_parts.extension);
-                if !ext_match {
-                    continue;
-                }
-
-                // Check entities: candidate must have subset of source entities
-                let mut entity_match = true;
-                for (key, value) in &cand_parts.entities {
-                    match source_parts.entities.get(key) {
-                        Some(src_val) if src_val == value => continue,
-                        _ => {
-                            entity_match = false;
-                            break;
-                        }
+            // Check entities: candidate must have subset of source entities
+            let mut entity_match = true;
+            for (key, value) in &cand_parts.entities {
+                match source_parts.entities.get(key) {
+                    Some(src_val) if src_val == value => continue,
+                    _ => {
+                        entity_match = false;
+                        break;
                     }
                 }
+            }
 
-                if entity_match {
-                    return Some(candidate.clone());
-                }
+            if entity_match {
+                return Some(candidate.file.clone());
             }
         }
     }
@@ -265,13 +334,13 @@ pub fn find_associated_file(
 /// with varying `space` entities should be collected.
 pub fn find_all_associated_files(
     source: &BidsFile,
-    tree: &FileTree,
+    index: &AssociationIndex<'_>,
+    source_parts: &BidsFileParts,
     target_suffix: Option<&str>,
     target_extensions: &[&str],
     free_entities: &[&str],
     inherit: bool,
 ) -> Vec<BidsFile> {
-    let source_parts = read_entities(&source.name);
     let suffix = target_suffix.unwrap_or(&source_parts.suffix);
 
     let path_parts: Vec<&str> = source.path.split('/').filter(|s| !s.is_empty()).collect();
@@ -281,45 +350,37 @@ pub fn find_all_associated_files(
     let mut results = Vec::new();
 
     for dir_path in &dir_paths {
-        let dir_tree = if dir_path == "/" {
-            Some(tree)
-        } else {
-            tree.subtree(dir_path)
-        };
+        for candidate in index.candidates(dir_path, suffix) {
+            // Not its own association; see `find_associated_file`.
+            if candidate.file.path == source.path {
+                continue;
+            }
+            let cand_parts = &candidate.parts;
 
-        if let Some(dir) = dir_tree {
-            for candidate in &dir.files {
-                let cand_parts = read_entities(&candidate.name);
+            let ext_match = target_extensions.is_empty()
+                || target_extensions.iter().any(|e| *e == cand_parts.extension);
+            if !ext_match {
+                continue;
+            }
 
-                if cand_parts.suffix != suffix {
-                    continue;
+            // Check entities: candidate entities must match source,
+            // EXCEPT for "free" entities which are allowed to differ.
+            let mut entity_match = true;
+            for (key, value) in &cand_parts.entities {
+                if free_entities.contains(&key.as_str()) {
+                    continue; // Skip free entities
                 }
-
-                let ext_match = target_extensions.is_empty()
-                    || target_extensions.iter().any(|e| *e == cand_parts.extension);
-                if !ext_match {
-                    continue;
-                }
-
-                // Check entities: candidate entities must match source,
-                // EXCEPT for "free" entities which are allowed to differ.
-                let mut entity_match = true;
-                for (key, value) in &cand_parts.entities {
-                    if free_entities.contains(&key.as_str()) {
-                        continue; // Skip free entities
-                    }
-                    match source_parts.entities.get(key) {
-                        Some(src_val) if src_val == value => continue,
-                        _ => {
-                            entity_match = false;
-                            break;
-                        }
+                match source_parts.entities.get(key) {
+                    Some(src_val) if src_val == value => continue,
+                    _ => {
+                        entity_match = false;
+                        break;
                     }
                 }
+            }
 
-                if entity_match {
-                    results.push(candidate.clone());
-                }
+            if entity_match {
+                results.push(candidate.file.clone());
             }
         }
     }
