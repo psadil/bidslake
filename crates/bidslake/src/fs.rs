@@ -12,16 +12,19 @@ use futures::stream::StreamExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-/// How many stats are in flight at once, matching the body-read prefetch in `bids.rs`.
-///
-/// Public so the latency benchmark overlaps exactly as many as the real backend does; a bench
-/// that hardcodes its own width measures its own constant instead of this one.
+/// How many stats are in flight at once — the metadata dial, shared with the directory walk.
 ///
 /// The number that matters is not local throughput — a local stat is ~2 µs — but network
 /// latency. On a parallel filesystem each stat is a round trip to a metadata server, and
 /// serially that is minutes per million files; overlapping them is what makes recording
-/// size and mtime affordable there at all.
-pub const STAT_CONCURRENCY: usize = 16;
+/// size and mtime affordable there at all. It is not monotonic, though, which is why it is
+/// tunable: past the point a metadata server saturates, more concurrent stats make it slower.
+///
+/// Public so the latency benchmark overlaps exactly as many as the real backend does; a bench
+/// that hardcodes its own width measures its own constant instead of this one.
+pub fn stat_concurrency() -> usize {
+    crate::concurrency::metadata()
+}
 
 /// A local absolute path as the `root_uri` the catalog stores.
 ///
@@ -292,7 +295,7 @@ impl BidsFileSystem for LocalFileSystem {
                         .unwrap_or(None)
                     }
                 })
-                .buffered(STAT_CONCURRENCY)
+                .buffered(stat_concurrency())
                 .collect::<Vec<_>>()
                 .await;
             Ok(stats)

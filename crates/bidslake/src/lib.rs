@@ -165,6 +165,7 @@ pub const BUILD: &str = env!("BIDSLAKE_BUILD");
 
 pub mod bids;
 pub mod compact;
+pub mod concurrency;
 pub mod db;
 pub mod fs;
 pub mod links;

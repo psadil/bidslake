@@ -118,13 +118,45 @@ fn depth_first_order(a: &Path, b: &Path) -> std::cmp::Ordering {
     }
 }
 
+/// An explicit walk width, or zero for "work it out".
+static WALK_THREADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Set how many threads the walk uses. Zero restores the automatic choice.
+///
+/// Exists because the right width is a property of the *filesystem*, not of this machine, and
+/// only the caller knows which filesystem it is about to walk. More is not monotonically
+/// better: a metadata server that is already saturated answers a hundred concurrent `readdir`s
+/// more slowly than sixteen, so on a busy shared mount this wants turning **down**.
+///
+/// Process-global rather than a parameter because the alternative is threading a width through
+/// every walk entry point and both binaries' call sites, to be set once at startup and never
+/// varied within a run.
+pub fn set_walk_threads(n: usize) {
+    WALK_THREADS.store(n, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// How many threads the walk uses.
 ///
 /// A walk is bounded by `readdir` latency far more than by CPU, so this is not a core count so
 /// much as a count of round trips to keep outstanding: on a network filesystem a serial walk
-/// costs `directories × RTT`, which is minutes for a large tree. Capped because the returns
-/// flatten and a hundred threads on a shared metadata server is antisocial.
+/// costs `directories × RTT`, which is minutes for a large tree.
+///
+/// The order is: an explicit [`set_walk_threads`], then `BIDSLAKE_METADATA_CONCURRENCY` — which
+/// is how a `bids-validator` run, having no flag of its own, is tuned for the same mount — then
+/// this machine's parallelism, capped because the returns flatten and a hundred threads on a
+/// shared metadata server is antisocial.
 fn walk_threads() -> usize {
+    let set = WALK_THREADS.load(std::sync::atomic::Ordering::Relaxed);
+    if set > 0 {
+        return set;
+    }
+    if let Some(n) = std::env::var("BIDSLAKE_METADATA_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&n| n > 0)
+    {
+        return n;
+    }
     std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)

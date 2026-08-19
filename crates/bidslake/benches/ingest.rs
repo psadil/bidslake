@@ -187,15 +187,15 @@ impl BidsFileSystem for SlowFs {
         Box::pin(async move {
             // One delay per file, applied inside the same concurrency the real backend uses --
             // so the bench measures the overlap rather than assuming it. The width is
-            // `bidslake::fs::STAT_CONCURRENCY` itself: hardcoding a number here meant this
+            // `bidslake::fs::stat_concurrency()` itself: hardcoding a number here meant this
             // bench overlapped 16 at a time no matter what the backend did, so changing the
-            // real constant measured as exactly zero.
+            // real width measured as exactly zero.
             futures::stream::iter(paths.iter().cloned())
                 .map(|p| async move {
                     tokio::time::sleep(delay).await;
                     self.inner.stat_many(std::slice::from_ref(&p)).await
                 })
-                .buffered(bidslake::fs::STAT_CONCURRENCY)
+                .buffered(bidslake::fs::stat_concurrency())
                 .collect::<Vec<_>>()
                 .await
                 .into_iter()

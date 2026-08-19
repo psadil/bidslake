@@ -1647,8 +1647,9 @@ impl BidsParser {
         other_files: &[std::path::PathBuf],
     ) {
         use futures::stream::StreamExt;
-        /// Bounded so a huge dataset can't open thousands of sockets at once.
-        const CONCURRENCY: usize = 16;
+        // The data dial: bounded so a huge dataset cannot open thousands of sockets at once,
+        // and tunable because the ceiling that helps on one filesystem hurts on another.
+        let concurrency = crate::concurrency::data();
 
         let rel = |p: &std::path::PathBuf| p.to_string_lossy().to_string();
         // Full-body reads: JSON (sidecars + dataset_description), plus every other
@@ -1678,7 +1679,7 @@ impl BidsParser {
                     let c = fs.read_to_string(Path::new(&p)).await.ok();
                     (p, c)
                 })
-                .buffer_unordered(CONCURRENCY)
+                .buffer_unordered(concurrency)
                 .collect::<Vec<_>>();
             let hdr_fut = futures::stream::iter(tsv_paths)
                 .map(|p| async move {
@@ -1689,7 +1690,7 @@ impl BidsParser {
                         .and_then(|c| tsv_header_from_line(c.split('\n').next().unwrap_or("")));
                     (p, h)
                 })
-                .buffer_unordered(CONCURRENCY)
+                .buffer_unordered(concurrency)
                 .collect::<Vec<_>>();
             futures::join!(body_fut, hdr_fut)
         };
