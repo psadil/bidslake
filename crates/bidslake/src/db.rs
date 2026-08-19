@@ -661,6 +661,62 @@ impl BidsDb {
         Ok(())
     }
 
+    /// [`Self::insert`] for many rows of one table, in as few statements as possible.
+    ///
+    /// `INSERT OR IGNORE` rather than the single-row path's `WHERE NOT EXISTS` guard, because
+    /// a multi-row `VALUES` list cannot carry a correlated subquery per row. The two mean the
+    /// same thing where it matters — a row whose primary key is already present is left alone,
+    /// which is what lets the walk emit stub `participants`/`sessions` rows freely without
+    /// overwriting the richer ones `participants.tsv` supplies — and `OR IGNORE` additionally
+    /// tolerates duplicates *within* the batch, which the guarded form could not see.
+    ///
+    /// Batched because the single-row path costs a statement per row and, inside the ingest's
+    /// open transaction, `prepare_cached` does not help: the catalog keeps changing, so DuckDB
+    /// re-binds and re-optimizes on every execution. On a 1,000-subject FreeSurfer tree the
+    /// implicit-participant inserts alone were about a fifth of the run.
+    ///
+    /// Rows are shaped by [`Schema::row_values`], identically to [`Self::insert`], so a batched
+    /// write and a row-at-a-time one produce the same table.
+    pub fn insert_many_if_absent(
+        &self,
+        schema: &Schema,
+        table_name: &str,
+        rows: &[Value],
+    ) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        // Windowed so one statement's bind list stays a sane size; the row count per window is
+        // whatever keeps `rows × columns` in the low tens of thousands.
+        let width = schema.row_values(table_name, &rows[0])?.len().max(1);
+        let per_window = (32_768 / width).clamp(1, 1_000);
+        for window in rows.chunks(per_window) {
+            let mut params: Vec<Option<duckdb::types::Value>> = Vec::new();
+            let mut tuples: Vec<String> = Vec::with_capacity(window.len());
+            for row in window {
+                let values = schema.row_values(table_name, row)?;
+                tuples.push(format!(
+                    "({})",
+                    std::iter::repeat_n("?", values.len())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+                params.extend(values);
+            }
+            let sql = format!(
+                "INSERT OR IGNORE INTO {table_name} VALUES {}",
+                tuples.join(", ")
+            );
+            let refs: Vec<&dyn duckdb::ToSql> =
+                params.iter().map(|p| p as &dyn duckdb::ToSql).collect();
+            self.conn
+                .execute(&sql, refs.as_slice())
+                .map_err(duck)
+                .with_context(|| format!("inserting {} rows into {table_name}", window.len()))?;
+        }
+        Ok(())
+    }
+
     /// Insert one row, replacing any already under its primary key
     /// ([`Schema::insert_or_replace`]).
     pub fn insert_or_replace(&self, schema: &Schema, table_name: &str, data: &Value) -> Result<()> {
