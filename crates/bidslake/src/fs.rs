@@ -15,11 +15,14 @@ use std::sync::{Arc, OnceLock};
 
 /// How many stats are in flight at once, matching the body-read prefetch in `bids.rs`.
 ///
+/// Public so the latency benchmark overlaps exactly as many as the real backend does; a bench
+/// that hardcodes its own width measures its own constant instead of this one.
+///
 /// The number that matters is not local throughput — a local stat is ~2 µs — but network
 /// latency. On a parallel filesystem each stat is a round trip to a metadata server, and
 /// serially that is minutes per million files; overlapping them is what makes recording
 /// size and mtime affordable there at all.
-const STAT_CONCURRENCY: usize = 16;
+pub const STAT_CONCURRENCY: usize = 16;
 
 /// A local absolute path as the `root_uri` the catalog stores.
 ///
@@ -157,6 +160,10 @@ pub trait BidsFileSystem: Send + Sync {
 /// same `file_id` for every file, rather than duplicating the dataset.
 pub struct LocalFileSystem {
     root: PathBuf,
+    /// A delay charged once per directory during the walk, for benchmarks that model a
+    /// network filesystem. `None` in every production path; see
+    /// [`with_walk_latency`](Self::with_walk_latency).
+    walk_latency: Option<std::time::Duration>,
     /// The tree produced by the last [`walk`](BidsFileSystem::walk), cached so
     /// [`file_tree`](BidsFileSystem::file_tree) can hand it to bids-core inheritance.
     tree: OnceLock<Arc<FileTree>>,
@@ -176,8 +183,23 @@ impl LocalFileSystem {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
+            walk_latency: None,
             tree: OnceLock::new(),
             canonical_root: OnceLock::new(),
+        }
+    }
+
+    /// A backend that sleeps `per_dir` before recording each directory it walks.
+    ///
+    /// For benchmarks only. A walk's cost on a parallel filesystem is one metadata round trip
+    /// per directory, and that is the one part of an ingest no other injection point can reach
+    /// — `stat_many` and the body reads happen after the walk has already finished. Charging
+    /// the delay inside the walk loop is also what makes the serial-versus-parallel question
+    /// measurable: a serial walk costs `dirs × per_dir`, a parallel one `dirs / threads × per_dir`.
+    pub fn with_walk_latency(root: impl Into<PathBuf>, per_dir: std::time::Duration) -> Self {
+        Self {
+            walk_latency: Some(per_dir),
+            ..Self::new(root)
         }
     }
 
@@ -207,6 +229,7 @@ impl BidsFileSystem for LocalFileSystem {
     ) -> BoxFuture<'_, Result<Vec<PathBuf>>> {
         let root = self.root.clone();
         let pseudo: Vec<String> = pseudo_exts.to_vec();
+        let latency = self.walk_latency;
         Box::pin(async move {
             // Delegate to the shared `bids-core` walker: it applies `.bidsignore`
             // (including nested ones) unless `apply_bidsignore` is false, plus
@@ -222,11 +245,28 @@ impl BidsFileSystem for LocalFileSystem {
             // produces. The root is the one fact the caller needs and the only one this
             // frame has.
             let root_for_msg = root.clone();
-            let tree = tokio::task::spawn_blocking(move || {
-                bids_core::filetree::read_file_tree(&root, &pseudo, apply_bidsignore)
+            let dirs = std::sync::atomic::AtomicU64::new(0);
+            let (tree, dirs) = tokio::task::spawn_blocking(move || {
+                // Counted here rather than by re-walking the finished tree: the count was
+                // previously taken with `tree.walk_directories().count()`, a second full
+                // traversal that ran whether or not anyone was reading the number.
+                let tree = bids_core::filetree::read_file_tree_observed(
+                    &root,
+                    &pseudo,
+                    apply_bidsignore,
+                    &|_| {
+                        dirs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if let Some(d) = latency {
+                            std::thread::sleep(d);
+                        }
+                    },
+                );
+                let n = dirs.load(std::sync::atomic::Ordering::Relaxed);
+                (tree, n)
             })
-            .await?
-            .with_context(|| format!("walking {}", root_for_msg.display()))?;
+            .await?;
+            let tree = tree.with_context(|| format!("walking {}", root_for_msg.display()))?;
+            crate::timing::count(crate::timing::Counter::Dirs, dirs);
             // Flatten to the dataset-relative paths the pipeline expects (strip the
             // leading `/` each tree path carries).
             let paths: Vec<PathBuf> = tree

@@ -16,7 +16,8 @@
 
 use std::path::Path;
 
-use bidslake::schema::{AppliedOverlay, Schema};
+use bids_schema::term_map::{TermMap, bundled_term_map};
+use bidslake::schema::{AppliedOverlay, Ingestion, Schema};
 use bidslake::{bids::BidsParser, db::BidsDb, fs::LocalFileSystem};
 use bidslake_synth::{Plan, Producer, Scale};
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -89,5 +90,75 @@ fn bench_ingest_raw_tables(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_ingest_wide_tabular, bench_ingest_raw_tables);
+/// The full artifact set a bundled adapter applies: overlay, term map and ingestion fragment.
+///
+/// Assembled here rather than with `Schema::load` because a layout adapter is exactly the case
+/// `Schema::load` cannot express — and until this benchmark existed, nothing in the repo
+/// measured one. Both existing benchmark files build a base schema, so a FreeSurfer or FEAT
+/// tree routed nowhere: the term-map dispatch, the `read`-disposition content readers and the
+/// batched writes that serve them had no regression guard at all.
+fn adapter_schema(name: &str) -> Schema {
+    let overlays: Vec<AppliedOverlay> = bids_schema::overlay::bundled_overlay(name)
+        .map(|content| AppliedOverlay {
+            source: name.to_string(),
+            content,
+        })
+        .into_iter()
+        .collect();
+    let term_maps: Vec<TermMap> = bundled_term_map(name).into_iter().collect();
+    let mut sources = vec![bids_schema::bundled_ingestion_source("base").expect("base ingestion")];
+    if let Some(ing) = bids_schema::bundled_ingestion_source(name) {
+        sources.push(ing);
+    }
+    let ingestion = Ingestion::from_sources(&sources).expect("ingestion merges");
+    Schema::load_full(None, &overlays, ingestion, &term_maps).expect("adapter schema loads")
+}
+
+/// Ingest a layout tree through its adapter, as `bidslake index --adapter <name>` does.
+fn ingest_adapter_once(path: &Path, schema: &Schema, term_map_name: &str) {
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    rt.block_on(async {
+        let db = BidsDb::new(":memory:").expect("open db");
+        db.create_tables(schema).expect("create tables");
+        let fs = Box::new(LocalFileSystem::new(path.to_path_buf()));
+        // Rebuilt per iteration rather than cloned: `TermMap` is not `Clone`, and loading a
+        // bundled one is a parse of a small document that the measured ingest dwarfs.
+        let term_maps: Vec<TermMap> = bundled_term_map(term_map_name).into_iter().collect();
+        let mut parser =
+            BidsParser::new(fs, None, schema.clone(), None, true, true).with_term_maps(term_maps);
+        parser.parse(&db).await.expect("parse");
+    });
+}
+
+/// A FreeSurfer `recon-all` tree read through the `freesurfer` adapter.
+///
+/// The shape this covers that nothing else does: every file is claimed by a term map rather
+/// than by a BIDS filename, and the `.stats` files are `read` in Rust and written through the
+/// content-reader path — which is per-file work that the BIDS tabular path never touches.
+fn bench_ingest_freesurfer_adapter(c: &mut Criterion) {
+    let schema = adapter_schema("freesurfer");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let layout = bids_schema::layout::bundled_layout("freesurfer").expect("bundled layout");
+    let manifest = Plan::producer(Producer::Layout(Box::new(layout)))
+        .scale(Scale {
+            subjects: 8,
+            ..Scale::default()
+        })
+        .write(dir.path(), &schema)
+        .expect("writes");
+
+    let mut group = c.benchmark_group("ingest_adapter");
+    group.sample_size(10);
+    group.bench_function(format!("freesurfer_{}files", manifest.files.len()), |b| {
+        b.iter(|| ingest_adapter_once(dir.path(), &schema, "freesurfer"))
+    });
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_ingest_wide_tabular,
+    bench_ingest_raw_tables,
+    bench_ingest_freesurfer_adapter
+);
 criterion_main!(benches);

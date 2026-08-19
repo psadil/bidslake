@@ -963,14 +963,10 @@ impl BidsParser {
         let files: Vec<std::path::PathBuf> =
             self.fs.walk(&pseudo_exts, self.apply_bidsignore).await?;
         timing::count(Counter::Files, files.len() as u64);
-        // Guarded, not merely counted: the argument is evaluated whether or not timing is
-        // on, and walking every directory node to count them is not free at half a million
-        // files. `timing::enabled` exists for exactly this shape of call site.
-        if timing::enabled()
-            && let Some(tree) = self.fs.file_tree()
-        {
-            timing::count(Counter::Dirs, tree.walk_directories().count() as u64);
-        }
+        // `Counter::Dirs` is charged by the walk itself, which sees each directory once
+        // anyway. It used to be taken here by re-walking the finished tree — a second full
+        // traversal, and one that ran whether or not timing was on, because the argument to
+        // `timing::count` is evaluated either way.
 
         // The stat pass is its own top-level phase, so the walk scope closes around the
         // traversal and reopens for the categorize loop below. Charging both to

@@ -136,3 +136,43 @@ async fn read_head_returns_a_whole_header_line() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+/// The directory walk issues its `readdir`s concurrently.
+///
+/// This is the one cost no other injection point can reach: `stat_many` and the body reads
+/// both happen after the walk has finished, so a serial walk was invisible to every benchmark
+/// in the repo. On a parallel filesystem it is also the largest single term of an ingest —
+/// measured at 1 ms/directory, a 43,500-file FreeSurfer tree took 16 s to walk serially and
+/// about 1 s concurrently.
+///
+/// The assertion is deliberately loose. It is not measuring the speedup, it is failing if the
+/// walk ever becomes sequential again: serial would cost at least `dirs × delay` here, and the
+/// bound is a small fraction of that.
+#[tokio::test]
+async fn the_walk_overlaps_its_directory_reads() -> anyhow::Result<()> {
+    use bidslake::fs::{BidsFileSystem, LocalFileSystem};
+    use std::time::{Duration, Instant};
+
+    let dirs = 64;
+    let delay = Duration::from_millis(20);
+    let root = tempfile::tempdir()?;
+    std::fs::write(
+        root.path().join("dataset_description.json"),
+        br#"{"Name": "walk-overlap", "BIDSVersion": "1.8.0"}"#,
+    )?;
+    for i in 0..dirs {
+        std::fs::create_dir_all(root.path().join(format!("sub-{i:03}")))?;
+    }
+
+    let fs = LocalFileSystem::with_walk_latency(root.path().to_path_buf(), delay);
+    let started = Instant::now();
+    fs.walk(&[], true).await?;
+    let elapsed = started.elapsed();
+
+    let serial = delay * dirs;
+    assert!(
+        elapsed < serial / 4,
+        "the walk looks sequential: {elapsed:?} against a serial cost of {serial:?}"
+    );
+    Ok(())
+}
