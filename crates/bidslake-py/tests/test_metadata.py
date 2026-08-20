@@ -145,7 +145,7 @@ def test_associations_carry_their_type(associations):
 
 
 def test_associations_can_be_filtered_by_kind(ds001_bold):
-    events = ds001_bold.get_associated(kind="events")
+    events = ds001_bold.get_associated(association_type="events")
 
     # Set equality rather than `all(...)`: an empty result would satisfy `all` while
     # meaning the filter had matched nothing at all.

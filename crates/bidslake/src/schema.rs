@@ -86,7 +86,8 @@
 //!   BrainVision `.vhdr`+`.vmrk`+`.eeg` — still get a row each.)
 //! - **`all_files`** (VIEW) — `file_registry` widened with the BIDS-concept columns
 //!   (see below). The query surface; `WHERE kind = 'data'` narrows it to primary data
-//!   files, which is what `bidslake-py`'s `get()` iterates.
+//!   files. (`bidslake-py`'s `get()` iterates the whole view, every kind, unless the
+//!   caller narrows it.)
 //! - **`participants`** — one row per subject. PK `(dataset_id, participant_id)`.
 //!   Columns from the BIDS participants schema (`age`, `sex`, `handedness`, …).
 //!   From `participants.tsv` and implicit `sub-` entities.

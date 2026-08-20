@@ -66,14 +66,14 @@ async fn channels_association_from_meg_pseudo_file() -> anyhow::Result<()> {
 #[case("bvec")]
 #[tokio::test]
 async fn inherited_gradients_resolve_to_every_image_below(
-    #[case] kind: &str,
+    #[case] association_type: &str,
 ) -> anyhow::Result<()> {
     let db = ingest(bids_example("ds114")).await?;
 
     let (n, targets): (i64, i64) = db.conn.query_row(
         "SELECT COUNT(*), COUNT(DISTINCT target_file_path) FROM file_associations \
          WHERE association_type = ?",
-        [kind],
+        [association_type],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
 
@@ -81,7 +81,7 @@ async fn inherited_gradients_resolve_to_every_image_below(
     assert_eq!(
         (n, targets),
         (20, 1),
-        "{kind}: one edge per image, all sharing the one inherited target"
+        "{association_type}: one edge per image, all sharing the one inherited target"
     );
     Ok(())
 }
@@ -92,19 +92,21 @@ async fn inherited_gradients_resolve_to_every_image_below(
 #[case("bval")]
 #[case("bvec")]
 #[tokio::test]
-async fn an_inherited_gradient_target_resolves_to_an_id(#[case] kind: &str) -> anyhow::Result<()> {
+async fn an_inherited_gradient_target_resolves_to_an_id(
+    #[case] association_type: &str,
+) -> anyhow::Result<()> {
     let db = ingest(bids_example("ds114")).await?;
 
     let dangling: i64 = db.conn.query_row(
         "SELECT COUNT(*) FROM file_associations \
          WHERE association_type = ? AND target_file_id IS NULL",
-        [kind],
+        [association_type],
         |r| r.get(0),
     )?;
 
     assert_eq!(
         dangling, 0,
-        "{kind}: inherited target should resolve to an id"
+        "{association_type}: inherited target should resolve to an id"
     );
     Ok(())
 }

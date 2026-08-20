@@ -2922,17 +2922,17 @@ impl BidsParser {
         index: &SidecarIndex<'_>,
     ) -> Result<Option<String>> {
         // Suffix → target table, from the schema-derived recording set.
-        let Some(kind) = self.schema.recordings().get(rec.suffix.as_str()) else {
+        let Some(recording_spec) = self.schema.recordings().get(rec.suffix.as_str()) else {
             return Ok(None);
         };
-        let table = kind.table.as_str();
+        let table = recording_spec.table.as_str();
         // Typed columns if the schema declares any for this table (`physio`,
         // `physio_events`), empty otherwise — which is what makes `stim`/`motion` bare.
         let columns: Vec<ColumnSpec> = self.recording_columns(table);
 
         // Column names, in file order: from the associated channels file (motion) or
         // the merged sidecar `Columns` (physio/stim/physioevents).
-        let colnames = match kind.names {
+        let colnames = match recording_spec.names {
             ColumnNames::Channels => self.channel_columns(db, rec)?,
             ColumnNames::Sidecar => self.sidecar_columns(rec, index),
         };

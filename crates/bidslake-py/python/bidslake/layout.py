@@ -694,7 +694,7 @@ class BidsLake:
         return self._rows_for(file_id, "events", order_by="onset")
 
     def _associated_for(
-        self, dataset_id: str, root_uri: str, file_id: str, kind: str | None
+        self, dataset_id: str, root_uri: str, file_id: str, association_type: str | None
     ) -> list[BidsFile]:
         # `target_file_id` is NULL for a reference to a file this dataset does not ship —
         # a dangling `IntendedFor`, kept deliberately. Those still come back, as a path
@@ -704,9 +704,9 @@ class BidsLake:
             "FROM file_associations WHERE source_file_id = ?"
         )
         params: list[Any] = [file_id]
-        if kind is not None:
+        if association_type is not None:
             sql += " AND association_type = ?"
-            params.append(kind)
+            params.append(association_type)
         df = self._query(sql, params)
         out: list[BidsFile] = []
         for row in df.iter_rows(named=True):
