@@ -100,7 +100,7 @@ async fn all_tabular_data_is_in_the_database() {
         // file the walk saw, so an unqualified `SELECT file_path FROM file_registry` would be
         // compared against a set derived from the very same walk, and could only fail if
         // registration itself broke — which `test_file_registry.rs` already covers. A `.tsv`
-        // that reached no reader at all still gets a registry row, with `kind = 'tabular'` and
+        // that reached no reader at all still gets a registry row, with
         // a NULL status; that is exactly the silent drop this test exists to catch.
         let recorded: HashSet<String> = db
             .conn

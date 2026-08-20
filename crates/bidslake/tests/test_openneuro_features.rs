@@ -40,10 +40,10 @@ async fn sbref_images_are_data_files_with_their_metadata_on_the_image() -> Resul
 
     let (data, sidecar_files, with_metadata): (i64, i64, i64) = db.conn.query_row(
         "SELECT (SELECT COUNT(*) FROM all_files \
-                  WHERE suffix='sbref' AND datatype='func' AND kind='data' \
+                  WHERE suffix='sbref' AND datatype='func' \
                     AND extension='.nii.gz'), \
                 (SELECT COUNT(*) FROM all_files \
-                  WHERE suffix='sbref' AND kind='sidecar' AND extension='.json'), \
+                  WHERE suffix='sbref' AND extension='.json'), \
                 (SELECT COUNT(*) FROM sidecars s JOIN all_files f USING (file_id) \
                   WHERE f.suffix='sbref')",
         [],
@@ -72,21 +72,21 @@ async fn fmap_files_carry_their_derived_datatype_and_suffix() -> Result<()> {
     let db = ingest(bids_example("ds000117")).await?;
 
     let mut stmt = db.conn.prepare(
-        "SELECT kind, suffix, extension, COUNT(*) FROM all_files \
+        "SELECT suffix, extension, COUNT(*) FROM all_files \
          WHERE datatype = 'fmap' GROUP BY ALL ORDER BY ALL",
     )?;
-    let rows: Vec<(String, String, String, i64)> = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+    let rows: Vec<(String, String, i64)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<Result<_, _>>()?;
     assert_eq!(
         rows,
         vec![
-            ("data".into(), "magnitude1".into(), ".nii".into(), 15),
-            ("data".into(), "magnitude2".into(), ".nii".into(), 16),
-            ("data".into(), "phasediff".into(), ".nii".into(), 16),
-            ("sidecar".into(), "phasediff".into(), ".json".into(), 16),
+            ("magnitude1".into(), ".nii".into(), 15),
+            ("magnitude2".into(), ".nii".into(), 16),
+            ("phasediff".into(), ".json".into(), 16),
+            ("phasediff".into(), ".nii".into(), 16),
         ],
-        "datatype/suffix/kind come from the path grammar, not a LIKE on it"
+        "datatype/suffix/extension come from the path grammar, not a LIKE on it"
     );
     Ok(())
 }

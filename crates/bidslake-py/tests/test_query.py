@@ -22,7 +22,7 @@ from sqlalchemy import select, true
 BOLD = {"dataset_id": "eyetracking_fmri", "suffix": "bold", "extension": ".nii.gz"}
 
 #: The anatomical every run in the session shares, found by a *subset* of the run's key.
-ANAT = ("anat", ("sub", "ses"), {"suffix": "T1w"}, None)
+ANAT = ("anat", ("sub", "ses"), {"suffix": "T1w", "extension": ".nii.gz"}, None)
 
 
 def _units(lake, *roles, **anchor):
@@ -41,7 +41,7 @@ def _units(lake, *roles, **anchor):
     return lake.sql(
         select(*cols)
         .select_from(frm)
-        .where(a.c.kind == "data", *[a.c[k] == v for k, v in anchor.items()])
+        .where(a.c.extension == ".nii.gz", *[a.c[k] == v for k, v in anchor.items()])
         .order_by(a.c.file_path)
     )
 
@@ -109,14 +109,20 @@ def test_an_ambiguous_sibling_counts_above_one(lake):
     Joining the *runs* on session alone is the mistake in miniature: each run matches
     both, and nothing about a single arbitrary answer would look wrong downstream.
     """
-    df = _units(lake, ("run", ("sub", "ses"), {"suffix": "bold"}, None), **BOLD)
+    df = _units(
+        lake, ("run", ("sub", "ses"), {"suffix": "bold", "extension": ".nii.gz"}, None), **BOLD
+    )
 
     assert df["run__n"].to_list() == [2, 2]
 
 
 def test_narrowing_the_join_resolves_the_ambiguity(lake):
     """Same query, one more entity in the join — the one that separates the runs."""
-    df = _units(lake, ("run", ("sub", "ses", "run"), {"suffix": "bold"}, None), **BOLD)
+    df = _units(
+        lake,
+        ("run", ("sub", "ses", "run"), {"suffix": "bold", "extension": ".nii.gz"}, None),
+        **BOLD,
+    )
 
     assert df["run__n"].to_list() == [1, 1]
 
@@ -153,41 +159,45 @@ def test_a_null_safe_join_matches_the_right_row(sessionless_units):
     )
 
 
-# -- the `where` defaults ----------------------------------------------------
+# -- the `where` discriminator -----------------------------------------------
 
 
-#: The same sibling query with `kind` left to its default and stated explicitly, and the
-#: extension each should therefore match.
-KIND_CASES = {
-    "default": ({"suffix": "bold"}, ".nii.gz"),
-    "sidecar": ({"suffix": "bold", "kind": "sidecar"}, ".json"),
+#: The same sibling query with `extension` pinned each way and left unpinned: the match
+#: count per unit, and the extension a resolved match must carry.
+EXTENSION_CASES = {
+    "image": ({"suffix": "bold", "extension": ".nii.gz"}, [1, 1], ".nii.gz"),
+    "sidecar": ({"suffix": "bold", "extension": ".json"}, [1, 1], ".json"),
+    "unpinned": ({"suffix": "bold"}, [2, 2], None),
 }
 
 
-@pytest.fixture(scope="module", params=list(KIND_CASES))
-def sibling_by_kind(request: pytest.FixtureRequest, lake):
-    where, extension = KIND_CASES[request.param]
+@pytest.fixture(scope="module", params=list(EXTENSION_CASES))
+def sibling_by_extension(request: pytest.FixtureRequest, lake):
+    where, counts, extension = EXTENSION_CASES[request.param]
     df = _units(lake, ("f", ("sub", "ses", "task", "run"), where, None), **BOLD)
-    return df, extension
+    return df, counts, extension
 
 
-def test_kind_data_is_the_default_and_is_overridable(sibling_by_kind):
-    """Without it every sibling also matches its own JSON sidecar and reads as ambiguous.
+def test_an_unpinned_role_reads_as_ambiguous(sibling_by_extension):
+    """An undiscriminating role matches the image and its sidecar, and says so.
 
-    It is a default rather than a rule because the sidecar is sometimes the thing wanted.
+    `all_files` is the whole registry: an image and its `.json` sidecar share every
+    entity, so a role whose `where` pins no discriminating column matches both and reads
+    as ambiguous (`__n == 2`) rather than silently picking one.
     """
-    df, _ = sibling_by_kind
+    df, counts, _ = sibling_by_extension
 
-    assert df["f__n"].to_list() == [1, 1]
+    assert df["f__n"].to_list() == counts
 
 
-def test_the_matched_kind_is_the_one_asked_for(sibling_by_kind):
+def test_the_match_is_what_the_extension_pin_says(sibling_by_extension):
     """Counting one is not enough on its own.
 
-    It would also count one if the default had matched the sidecar and the override the
-    image.
+    It would also count one if the image pin had matched the sidecar and vice versa.
     """
-    df, extension = sibling_by_kind
+    df, _, extension = sibling_by_extension
+    if extension is None:
+        pytest.skip("the unpinned case resolves nothing to check")
 
     assert {p.endswith(extension) for p in df["f__file_path"]} == {True}
 
@@ -198,7 +208,11 @@ def test_none_in_where_means_is_null(lake, run, expected):
 
     Here the same shape: the session's T1w carries no `run`, and the BOLD beside it does.
     """
-    df = _units(lake, ("f", ("sub", "ses"), {"suffix": "T1w", "run": run}, None), **BOLD)
+    df = _units(
+        lake,
+        ("f", ("sub", "ses"), {"suffix": "T1w", "extension": ".nii.gz", "run": run}, None),
+        **BOLD,
+    )
 
     assert df["f__n"].to_list() == expected
 
@@ -223,7 +237,7 @@ def via_scoped(lake):
     df = lake.sql(
         select(*cols)
         .select_from(frm)
-        .where(a.c.kind == "data", a.c.dataset_id == "ds001", a.c.suffix == "bold")
+        .where(a.c.extension == ".nii.gz", a.c.dataset_id == "ds001", a.c.suffix == "bold")
     )
     assert df.height > 0, "fixture assumption: ds001 has BOLD data files"
     return df
@@ -263,7 +277,9 @@ def test_many_siblings_are_still_one_query(lake):
     Cost scales with roles, not with roles x units. Eight of them still compile to a single
     statement.
     """
-    roles = [(f"r{i}", ("sub", "ses"), {"suffix": "T1w"}, None) for i in range(8)]
+    roles = [
+        (f"r{i}", ("sub", "ses"), {"suffix": "T1w", "extension": ".nii.gz"}, None) for i in range(8)
+    ]
 
     df = _units(lake, *roles, **BOLD)
 
@@ -329,7 +345,7 @@ def test_to_local_path_takes_a_upath_as_well_as_a_str(lake, unit_row):
 ROLES = (
     ANAT,  # resolves
     ("nope", ("sub", "ses"), {"suffix": "T1w", "desc": "x"}, None),  # missing
-    ("both", ("sub", "ses"), {"suffix": "bold"}, None),  # both runs -> 2
+    ("both", ("sub", "ses"), {"suffix": "bold", "extension": ".nii.gz"}, None),  # both runs -> 2
 )
 
 

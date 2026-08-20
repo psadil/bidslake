@@ -16,7 +16,7 @@ async fn every_ds001_bold_resolves_its_events_sibling() -> Result<()> {
     let db = ingest(bids_example("ds001")).await?;
 
     let (bolds, resolved, mismatched): (i64, i64, i64) = db.conn.query_row(
-        "SELECT (SELECT COUNT(*) FROM all_files WHERE kind='data' AND suffix='bold'), \
+        "SELECT (SELECT COUNT(*) FROM all_files WHERE extension='.nii.gz' AND suffix='bold'), \
                 (SELECT COUNT(*) FROM file_associations a \
                    JOIN all_files f ON f.file_id = a.source_file_id \
                   WHERE f.suffix='bold' AND a.association_type='events' \

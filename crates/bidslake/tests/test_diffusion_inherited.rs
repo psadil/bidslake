@@ -225,12 +225,12 @@ async fn an_orphan_gradient_file_is_stored_but_describes_nothing() -> anyhow::Re
     assert_eq!(rows, 0, "but describe no image");
     assert_eq!(images, 0);
 
-    let kind: String = db.conn.query_row(
-        "SELECT kind FROM file_registry WHERE file_path LIKE '%.bval'",
+    let registered: i64 = db.conn.query_row(
+        "SELECT COUNT(*) FROM file_registry WHERE file_path LIKE '%.bval'",
         [],
         |r| r.get(0),
     )?;
-    assert_eq!(kind, "gradient");
+    assert_eq!(registered, 1, "the orphan .bval has its own registry row");
     Ok(())
 }
 

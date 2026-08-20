@@ -30,7 +30,6 @@ _NON_CONCEPT = frozenset(
         "dataset_id",
         "root_uri",
         "file_path",
-        "kind",
         "status",
         "other_data",
         "HED",

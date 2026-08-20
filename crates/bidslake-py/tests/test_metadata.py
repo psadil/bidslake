@@ -10,12 +10,12 @@ from bidslake import BidsFile
 def bold_metadata(lake):
     """The sidecar metadata of a ds210 task-rest BOLD image.
 
-    `kind="data"`, because `get()` yields sidecars too and the query has no ORDER BY:
+    `extension=".nii.gz"`, because `get()` yields sidecars too and the query has no ORDER BY:
     ds210's inherited `task-rest_echo-3_bold.json` can come back first, and a sidecar
     carries no metadata of its own — against an empty dict every assertion below is
     trivially satisfied.
     """
-    f = next(lake.get(task="rest", suffix="bold", dataset_id="ds210", kind="data"))
+    f = next(lake.get(task="rest", suffix="bold", dataset_id="ds210", extension=".nii.gz"))
     md = f.metadata
     assert md, "fixture assumption: this image has sidecar metadata"
     return md
@@ -51,12 +51,12 @@ def sidecarless_file(lake):
     """
     ids = set(
         lake.sql(
-            "SELECT a.file_id FROM all_files a WHERE a.kind = 'data' "
+            "SELECT a.file_id FROM all_files a WHERE a.extension = '.nii.gz' "
             "AND NOT EXISTS (SELECT 1 FROM sidecars s WHERE s.file_id = a.file_id)"
         )["file_id"].to_list()
     )
     assert ids, "fixture assumption: some data file in the catalog has no sidecar"
-    return next(f for f in lake.get(kind="data") if f.file_id in ids)
+    return next(f for f in lake.get(extension=".nii.gz") if f.file_id in ids)
 
 
 def test_metadata_is_empty_without_a_sidecar(sidecarless_file):

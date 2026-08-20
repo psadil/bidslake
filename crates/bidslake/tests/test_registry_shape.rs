@@ -126,12 +126,34 @@ fn reindexing_with_the_same_adapters_is_allowed() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A catalog built with more than it needs is fine: only a *missing* column is a problem.
+/// A catalog built with more adapters than a later run names is fine: `projected` is the
+/// one legitimately optional physical column, so only a *missing* column is a problem.
 #[test]
 fn narrowing_is_allowed() -> anyhow::Result<()> {
     let db = BidsDb::new(":memory:")?;
     db.create_tables(&schema_for(&["fmriprep", "freesurfer"])?)?;
     db.create_tables(&Schema::load(None)?)?;
+    Ok(())
+}
+
+/// A registry column this build does not write — a catalog written by an older bidslake,
+/// e.g. one whose registry still carried the removed `kind` — is refused up front, by
+/// name. Left unchecked it would instead die at flush time in the staged upsert's
+/// positional arity mismatch, with nothing naming the actual difference.
+#[test]
+fn an_extra_registry_column_is_refused_by_name() -> anyhow::Result<()> {
+    let db = BidsDb::new(":memory:")?;
+    db.create_tables(&Schema::load(None)?)?;
+    db.conn
+        .execute("ALTER TABLE file_registry ADD COLUMN kind TEXT", [])?;
+
+    let err = db
+        .create_tables(&Schema::load(None)?)
+        .expect_err("an extra physical column is another release's registry shape");
+    assert!(
+        err.to_string().contains("kind"),
+        "message should name the extra column: {err}"
+    );
     Ok(())
 }
 

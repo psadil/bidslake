@@ -50,7 +50,7 @@ def test_root_override_wins_over_base_dir(lake_db):
 def resolved_tabular_path(lake):
     """The location of one ingested tabular file, resolved through the catalog."""
     rows = lake.all_files.pl().filter(
-        (pl.col("kind") == "tabular") & (pl.col("status") == "ingested")
+        (pl.col("extension").is_in([".tsv", ".tsv.gz"])) & (pl.col("status") == "ingested")
     )
     assert rows.height > 0, "fixture assumption: the catalog holds ingested tabular files"
     row = rows.sort("dataset_id", "file_path").row(0, named=True)

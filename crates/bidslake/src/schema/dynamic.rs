@@ -588,10 +588,10 @@ impl Schema {
     /// Generate `file_registry` — one row per file the walk saw — and the `all_files` view
     /// over it (docs/adr/0006).
     ///
-    /// The registry holds identity and classification only. The BIDS-concept columns live on
-    /// the **view**, not here, which is what makes widening the concept set a
-    /// `CREATE OR REPLACE VIEW` rather than a table rebuild — and it leaves the base table free
-    /// of generated columns, so the bulk staged upsert can write it.
+    /// The registry holds identity only. The BIDS-concept columns live on the **view**, not
+    /// here, which is what makes widening the concept set a `CREATE OR REPLACE VIEW` rather
+    /// than a table rebuild — and it leaves the base table free of generated columns, so the
+    /// bulk staged upsert can write it.
     fn generate_file_registry_def(&mut self) {
         let table = "file_registry";
         // `file_id` is a 64-bit hash of the three identity columns (see `bids::file_id`),
@@ -602,13 +602,12 @@ impl Schema {
             "dataset_id TEXT".to_string(),
             "root_uri TEXT".to_string(),
             "file_path TEXT".to_string(),
-            "kind TEXT".to_string(),
             // The fate of a file bidslake tried to *read*, absorbed from the former
             // `tabular_files` table: `ingested` (its rows are in a data table), `on_disk` (a
             // compressed recording deliberately left as a file), `skipped` (a tabular file
             // the schema does not describe) or `failed` (a batch insert errored, so this run
             // stored none of its rows). NULL for a file there was never any reading to
-            // report on — `kind` is what says an image is an image.
+            // report on — an image, say, has no reading to record.
             "status TEXT".to_string(),
             // What the walk observed about the file itself, as opposed to what its name or
             // contents say. Both NULL when the run was given `--no-stat`, and on a backend
@@ -628,7 +627,6 @@ impl Schema {
             ("dataset_id", "TEXT"),
             ("root_uri", "TEXT"),
             ("file_path", "TEXT"),
-            ("kind", "TEXT"),
             ("status", "TEXT"),
             ("size_bytes", "UBIGINT"),
             ("mtime_ns", "BIGINT"),
@@ -663,11 +661,11 @@ impl Schema {
 
         // `all_files`: the whole registry, widened with the BIDS-concept columns.
         //
-        // Every kind, not just data files, because the concepts are computed from `file_path`
-        // and are just as meaningful for a `*_events.tsv` or a sidecar as for the image they
-        // sit beside — and because the per-row data tables key on *tabular* files, so this is
-        // the relation they join through to answer "which subject/task is this row from?".
-        // Filtering to data files here would leave that question unanswerable for them.
+        // Every walked file, not just data files, because the concepts are computed from
+        // `file_path` and are just as meaningful for a `*_events.tsv` or a sidecar as for the
+        // image they sit beside — and because the per-row data tables key on *tabular* files,
+        // so this is the relation they join through to answer "which subject/task is this row
+        // from?". Filtering to data files here would leave that question unanswerable for them.
         //
         let concepts: Vec<String> = self
             .generated_bids_columns(project)
@@ -681,9 +679,9 @@ impl Schema {
                 concepts.join(",\n         ")
             ),
         );
-        // The one view. "Just the data files" is `WHERE kind = 'data'`, which is short
-        // enough not to earn a second view that could drift from this one's concept
-        // expressions.
+        // The one view. "Just the data files" is an `extension`/`datatype` predicate spelled
+        // by the caller — short enough not to earn a second view that could drift from this
+        // one's concept expressions.
     }
 
     /// Generate one table from a schema-derived [`TableSpec`]: DDL, the write-path

@@ -312,7 +312,6 @@ struct PendingAssociation {
 struct RegistryEntry {
     /// Relative to this run's ingest root.
     file_path: String,
-    kind: Kind,
     /// What a term map projected onto this file, if one claimed it — the same value an
     /// [`ImagingFile`] carries, kept so a non-data projected file still answers concept
     /// queries through the registry.
@@ -741,13 +740,7 @@ impl BidsParser {
     /// `root_uri` comes from the run rather than the file: a run walks exactly one root, and
     /// that root is what this file's `file_path` is relative to. Together with `dataset_id`
     /// they give `file_id`, which is the key every satellite table points at.
-    fn registry_row(
-        &self,
-        dataset_id: &str,
-        file_path: &str,
-        kind: Kind,
-        projected: Option<&Value>,
-    ) -> Value {
+    fn registry_row(&self, dataset_id: &str, file_path: &str, projected: Option<&Value>) -> Value {
         let mut row = serde_json::Map::new();
         row.insert(
             "file_id".to_string(),
@@ -765,7 +758,6 @@ impl BidsParser {
             "file_path".to_string(),
             Value::String(file_path.to_string()),
         );
-        row.insert("kind".to_string(), Value::String(kind.as_str().to_string()));
         // What the walk observed about the file itself. Absent for a file the backend could
         // not stat, and for every file under `--no-stat`: left out of the row rather than
         // written as a JSON null, so the column is NULL by the write path's own default and
@@ -805,10 +797,9 @@ impl BidsParser {
     ///
     /// A path in both lists is a **promoted** metadata-only record — a sidecar whose data file
     /// the dataset does not ship (MRIQC), which `promote_orphan_sidecars` turns into a data
-    /// file after the walk already classified it as a sidecar. The data-file row wins, so the
-    /// registry agrees with `scans` about what it is. Filtered rather than left to the upsert
-    /// to resolve, because both rows share a `file_id` and which one landed last would
-    /// otherwise depend on ordering.
+    /// file after the walk already registered it. The data-file copy wins. Filtered rather
+    /// than left to the upsert to resolve, because both rows share a `file_id` and which one
+    /// landed last would otherwise depend on ordering.
     fn registry_rows(&self, dataset_id: &str) -> Vec<Value> {
         let data_paths: HashSet<&str> = self
             .imaging_files
@@ -820,16 +811,13 @@ impl BidsParser {
             self.registry_extra
                 .iter()
                 .filter(|e| !data_paths.contains(e.file_path.as_str()))
-                .map(|e| self.registry_row(dataset_id, &e.file_path, e.kind, e.projected.as_ref())),
+                .map(|e| self.registry_row(dataset_id, &e.file_path, e.projected.as_ref())),
         );
-        rows.extend(self.imaging_files.iter().map(|f| {
-            self.registry_row(
-                &f.dataset_id,
-                &f.file_path,
-                Kind::Data,
-                f.projected.as_ref(),
-            )
-        }));
+        rows.extend(
+            self.imaging_files
+                .iter()
+                .map(|f| self.registry_row(&f.dataset_id, &f.file_path, f.projected.as_ref())),
+        );
         rows
     }
 
@@ -1202,8 +1190,9 @@ impl BidsParser {
 
         // A metadata-only derivative (MRIQC's IQM sidecars, …) ships no data file for its
         // records, so promote those sidecars to data files before anything is written. Runs
-        // here, at the end of the walk, because it changes a file's `kind` and the registry
-        // below must record the outcome rather than the guess.
+        // here, at the end of the walk, because orphanhood is decided against the complete
+        // data-file set, and the registry write below folds `imaging_files` in — the
+        // promoted file's row must be settled first.
         self.promote_orphan_sidecars();
 
         // The registry, before any table that points at it (docs/adr/0006) — including the
@@ -1333,7 +1322,7 @@ impl BidsParser {
         // Which images they describe is `file_associations`' answer, and the `diffusion`
         // view's (docs/adr/0003).
         //
-        // Split by kind and written in two batches rather than a call per file, because each
+        // Split by bvals-vs-bvecs and written in two batches rather than a call per file: each
         // call is one staged upsert: per file that would be a temp table per file, which costs
         // more than the row-at-a-time path it replaces.
         //
@@ -1867,14 +1856,10 @@ impl BidsParser {
             entities.get("ses").map(String::as_str),
         )?;
 
-        // What this file *is*, for its registry row. A BIDS-named file's datatype is its
-        // immediate parent directory; a term-mapped one never reaches here (it returned
-        // above), so `kind_of` sees `None` for anything outside a datatype directory.
-        let kind = kind_of(
-            rel_path,
-            &extension,
-            bids_core::datatype::parent_datatype(rel_path, &self.datatypes),
-        );
+        // A BIDS-named file's datatype is its immediate parent directory; a term-mapped one
+        // never reaches here (it returned above), so this is `None` for anything outside a
+        // datatype directory. Feeds the primary-data test below.
+        let datatype = bids_core::datatype::parent_datatype(rel_path, &self.datatypes);
 
         // JSON (sidecars + `dataset_description.json`) is handled directly: it is neither
         // read into a data table nor cataloged, but drives inheritance and associations.
@@ -1882,13 +1867,13 @@ impl BidsParser {
         // the registry, since `sidecars` is keyed by the *data file* a sidecar describes and
         // so leaves the JSON itself unaddressable (docs/adr/0006).
         if file_name == "dataset_description.json" {
-            self.register(rel_path, kind, None);
+            self.register(rel_path, None);
             self.process_dataset_description(path, db, dataset_id)
                 .await?;
             return Ok(());
         }
         if file_name.ends_with(".json") {
-            self.register(rel_path, kind, None);
+            self.register(rel_path, None);
             self.process_json_file(path, db, dataset_id, rel_path, &entities)
                 .await?;
             return Ok(());
@@ -1906,7 +1891,7 @@ impl BidsParser {
         //
         // A data file's registry row comes from `imaging_files` at the flush, so it is not
         // registered here.
-        if kind == Kind::Data {
+        if is_primary_data(&extension, datatype) {
             self.imaging_files.push(ImagingFile {
                 dataset_id: dataset_id.to_string(),
                 file_path: rel_path.to_string(), // Use rel_path not file_name
@@ -1944,7 +1929,7 @@ impl BidsParser {
         // catalog deliberately (FEAT hides `report.html`/`pyfix.log`). Everything else the
         // walk saw is in the dataset and so is in the manifest.
         if !matches!(disposition, Some((Disposition::Ignore, _))) {
-            self.register(rel_path, kind, None);
+            self.register(rel_path, None);
         }
 
         match disposition {
@@ -1988,10 +1973,9 @@ impl BidsParser {
     /// Data files are not registered here — they go through `imaging_files`, which
     /// `promote_orphan_sidecars` and the inheritance pass also read, and are folded into the
     /// registry at the flush by [`Self::registry_rows`].
-    fn register(&mut self, rel_path: &str, kind: Kind, projected: Option<Value>) {
+    fn register(&mut self, rel_path: &str, projected: Option<Value>) {
         self.registry_extra.push(RegistryEntry {
             file_path: rel_path.to_string(),
-            kind,
             projected,
         });
     }
@@ -2047,17 +2031,6 @@ impl BidsParser {
             _ => None,
         };
 
-        // What the projection says this file is. A term-mapped path is a data file when the
-        // mapping gave it a datatype (`mri/wmparc.mgz` → `anat`) and something else when it
-        // did not (`scripts/recon-all.log` → `other`), which is the same rule the BIDS path
-        // uses — `kind_of` takes the datatype rather than deriving it precisely so both
-        // paths can share it.
-        let kind = kind_of(
-            rel_path,
-            facts.extension.as_deref().unwrap_or(""),
-            facts.datatype.as_deref(),
-        );
-
         // `read` and `catalog` both register the file in the standard `scans` registry,
         // carrying the projection so the registry row answers "what is this file?" the
         // way the term map said it would. Without it a cataloged projected file reaches
@@ -2074,7 +2047,7 @@ impl BidsParser {
             // `ignore` is the deliberate opt-out and gets no row at all; a file no rule
             // claimed still belongs in the manifest.
             Some(Disposition::Ignore) => {}
-            None => self.register(rel_path, kind, projected_json(&facts)),
+            None => self.register(rel_path, projected_json(&facts)),
         }
 
         let Some(disposition) = disposition else {
@@ -3955,50 +3928,16 @@ fn tsv_header_from_line(line: &str) -> Option<(String, Vec<String>)> {
 /// flush skip its validator dry-run, so each file is read once rather than twice.
 const HEADER_READ_OPTS: &str = concat!("header=true, ", non_poisoning_read_flags!());
 
-/// What a file *is* — the `kind` column of the file registry, and what a consumer filters
-/// `all_files` on (docs/adr/0006).
+/// The extensions of a data file's *companions* — the sidecar, tabular and gradient files
+/// that sit beside it. Claimed before the datatype is consulted, so a `.json` or `.tsv`
+/// beside a `.nii.gz` is never a second data file (the companion rule, docs/adr/0006).
 ///
-/// Deliberately coarse, and bidslake's own vocabulary rather than one borrowed from BIDS, which
-/// has no data/metadata/table axis to lend: `rules.files` cannot separate a data file from its
-/// sidecar, the one distinction `kind` exists to draw (ADR 0006).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kind {
-    /// A primary data file — an image, a recording, a surface. `all_files WHERE kind = 'data'`
-    /// is exactly these rows.
-    Data,
-    /// A JSON metadata file. Its *contents* reach `sidecars` under the path of the data file
-    /// it describes; its registry row is the sidecar file itself, under its own path.
-    Sidecar,
-    /// A table of rows (`.tsv`, `.tsv.gz`), whose rows reach a data table.
-    Tabular,
-    /// A diffusion companion (`.bval`/`.bvec`), whose values reach `diffusion`.
-    Gradient,
-    /// `dataset_description.json` — dataset metadata rather than file metadata.
-    Description,
-    /// Everything else the walk saw and no `ignore` rule claimed: READMEs, CHANGES, code,
-    /// stimuli. Recorded so the registry is a manifest of the dataset rather than of the files
-    /// bidslake happened to understand.
-    Other,
-}
-
-impl Kind {
-    /// The lowercase literal written to `file_registry.kind`, and therefore what a query
-    /// compares against (`WHERE kind = 'data'`).
-    ///
-    /// A stored vocabulary, not a display name: these six strings are already in every catalog
-    /// bidslake has written and in every query anyone has saved against one, so changing a
-    /// spelling changes what those queries match rather than how a row prints.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Kind::Data => "data",
-            Kind::Sidecar => "sidecar",
-            Kind::Tabular => "tabular",
-            Kind::Gradient => "gradient",
-            Kind::Description => "description",
-            Kind::Other => "other",
-        }
-    }
-}
+/// `pub` so the integration tests and their `count_data_files` helper build SQL
+/// `extension NOT IN (…)` predicates from this same list: ingest control flow and test
+/// queries share one spelling of the rule rather than a test guarding two copies (the
+/// hand-copied-list drift a deleted corpus test once existed to catch — see the note in
+/// the test module).
+pub const COMPANION_EXTENSIONS: &[&str] = &[".json", ".tsv", ".tsv.gz", ".bval", ".bvec"];
 
 /// The stable identity of one file in the catalog: the first **128 bits** of
 /// `SHA-256(dataset_id \x1f root_uri \x1f file_path)`, stored as a `UUID`.
@@ -4041,30 +3980,21 @@ pub fn file_id(dataset_id: &str, root_uri: &str, file_path: &str) -> Uuid {
     uuid::Builder::from_custom_bytes(bytes).into_uuid()
 }
 
-/// Classify a walked file.
+/// Whether a walked file is a primary data file — an image, a recording, a surface.
 ///
 /// `datatype` is the file's datatype however it was arrived at — the immediate parent directory
 /// for a BIDS-named file, or the projection for a term-mapped one. Taking it as an argument is
 /// what lets one function serve both paths: a FreeSurfer `mri/wmparc.mgz` sits under no datatype
 /// directory, but its term map states `datatype: anat`, and it is a data file either way.
 ///
-/// The order matters and encodes the companion rule: the four companion extensions are claimed
-/// before `datatype.is_some()` is consulted, so a `.json` beside a `.nii.gz` is a sidecar rather
-/// than a second data file.
+/// The companion test comes first: a [`COMPANION_EXTENSIONS`] file describes the data file it
+/// sits beside, so a `.json` beside a `.nii.gz` is a sidecar rather than a second data file,
+/// whatever directory it is in.
 ///
 /// Note: for multi-file recordings (e.g. BrainVision `.vhdr`+`.vmrk`+`.eeg`) each component is a
 /// separate data file and gets its own row; filter by extension for the primary header.
-fn kind_of(rel_path: &str, extension: &str, datatype: Option<&str>) -> Kind {
-    if rel_path == "dataset_description.json" {
-        return Kind::Description;
-    }
-    match extension {
-        ".json" => Kind::Sidecar,
-        ".tsv" | ".tsv.gz" => Kind::Tabular,
-        ".bval" | ".bvec" => Kind::Gradient,
-        _ if datatype.is_some() => Kind::Data,
-        _ => Kind::Other,
-    }
+fn is_primary_data(extension: &str, datatype: Option<&str>) -> bool {
+    !COMPANION_EXTENSIONS.contains(&extension) && datatype.is_some()
 }
 
 /// Compile `.bidsignore` file content into a [`Gitignore`] matcher.
@@ -4092,7 +4022,7 @@ pub fn build_bidsignore(content: &str) -> Result<Gitignore> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BidsParser, Kind, build_bidsignore, file_id, kind_of};
+    use super::{BidsParser, build_bidsignore, file_id, is_primary_data};
     use proptest::prelude::*;
     use rstest::rstest;
     use std::path::Path;
@@ -4323,11 +4253,13 @@ mod tests {
     // datatype-directory rule against bids-schema's. There is one implementation now
     // (`bids_core::datatype`), and its cases went with it.
 
-    // `kind_of_agrees_with_is_datafile` lived here too, walking the corpus to compare `kind_of`
-    // against the `is_datafile` it replaced. Both sides called the same `parent_datatype`, so
-    // the datatype half cancelled and the only detectable divergence was between `is_datafile`'s
-    // hand-copied companion-extension list and the `kind_of` arms it was copied from. The
-    // extension table below is that comparison, written out.
+    // `kind_of_agrees_with_is_datafile` lived here too, walking the corpus to compare the
+    // then-`kind_of` classifier against the `is_datafile` it replaced. The only detectable
+    // divergence was between two hand-copied companion-extension lists — which is why today's
+    // `is_primary_data` reads [`COMPANION_EXTENSIONS`], the one spelling of that list, shared
+    // with the integration tests' SQL predicates. The rstest below is the comparison, written
+    // out. (`kind_of` and the six-value `file_registry.kind` column it fed were removed; the
+    // primary-data bit is the part of that classification the walk still needs.)
 
     /// `file_id` is a *stored* primary key that every satellite foreign-keys to, so it must
     /// be reproducible from the three identity columns and nothing else. Pin the exact value:
@@ -4407,62 +4339,45 @@ mod tests {
         }
     }
 
-    /// The case `is_datafile` cannot express, and the reason `kind_of` takes `datatype` as an
-    /// argument rather than deriving it: a FreeSurfer tree has no datatype *directories*, so a
-    /// term-mapped path is a data file only by virtue of what the projection says it is.
+    /// The case a datatype-directory rule cannot express, and the reason `is_primary_data`
+    /// takes `datatype` as an argument rather than deriving it: a FreeSurfer tree has no
+    /// datatype *directories*, so a term-mapped path is a data file only by virtue of what
+    /// the projection says it is.
     #[test]
-    fn kind_of_reads_a_projected_datatype() {
-        // What `data/term-maps/freesurfer.json` projects for this path.
-        assert_eq!(
-            kind_of("sub-01/mri/wmparc.mgz", ".mgz", Some("anat")),
-            Kind::Data
-        );
+    fn a_projected_datatype_makes_a_data_file() {
+        // What `data/term-maps/freesurfer.json` projects for `sub-01/mri/wmparc.mgz`.
+        assert!(is_primary_data(".mgz", Some("anat")));
         // Without the projection the same path is not a data file — `mri` is not a BIDS
-        // datatype directory, which is exactly what `is_datafile` could only answer "no" to.
-        assert_eq!(kind_of("sub-01/mri/wmparc.mgz", ".mgz", None), Kind::Other);
+        // datatype directory.
+        assert!(!is_primary_data(".mgz", None));
     }
 
-    /// The non-`Data` kinds, including the ordering that makes a sidecar beside a data file a
-    /// sidecar rather than a second data file.
+    /// The companion rule, written out: a companion extension is never a data file even
+    /// beside a datatype, and a datatype makes a data file of anything else — including a
+    /// dot-less adapter file (FEAT's `melodic_mix`), whose extension reaches the test as `""`.
     #[rstest]
-    #[case("dataset_description.json", ".json", None, Kind::Description)]
+    #[case::image(".nii.gz", Some("anat"), true)]
+    #[case::recording_header(".vhdr", Some("eeg"), true)]
+    #[case::extensionless_adapter_data("", Some("anat"), true)]
     // A companion wins over the datatype it sits beside.
-    #[case::companion_beats_datatype(
-        "sub-01/anat/sub-01_T1w.json",
-        ".json",
-        Some("anat"),
-        Kind::Sidecar
-    )]
-    #[case(
-        "sub-01/func/sub-01_task-x_events.tsv",
-        ".tsv",
-        Some("func"),
-        Kind::Tabular
-    )]
-    #[case(
-        "sub-01/func/sub-01_task-x_physio.tsv.gz",
-        ".tsv.gz",
-        Some("func"),
-        Kind::Tabular
-    )]
-    #[case("sub-01/dwi/sub-01_dwi.bval", ".bval", Some("dwi"), Kind::Gradient)]
-    #[case("sub-01/dwi/sub-01_dwi.bvec", ".bvec", Some("dwi"), Kind::Gradient)]
-    #[case("participants.tsv", ".tsv", None, Kind::Tabular)]
-    #[case("README", "", None, Kind::Other)]
-    #[case("CHANGES", "", None, Kind::Other)]
-    // A nested description is NOT the dataset's own; only the exact root path is.
-    #[case::nested_description(
-        "derivatives/fmriprep/dataset_description.json",
-        ".json",
-        None,
-        Kind::Sidecar
-    )]
-    fn kind_of_classifies_companions_and_documentation(
-        #[case] path: &str,
+    #[case::sidecar_beside_an_image(".json", Some("anat"), false)]
+    #[case::events(".tsv", Some("func"), false)]
+    #[case::physio(".tsv.gz", Some("func"), false)]
+    #[case::bval(".bval", Some("dwi"), false)]
+    #[case::bvec(".bvec", Some("dwi"), false)]
+    // No datatype, no data file: root-level tabular/JSON files and documentation.
+    #[case::participants(".tsv", None, false)]
+    #[case::dataset_description(".json", None, false)]
+    #[case::readme("", None, false)]
+    fn is_primary_data_encodes_the_companion_rule(
         #[case] ext: &str,
         #[case] datatype: Option<&str>,
-        #[case] want: Kind,
+        #[case] want: bool,
     ) {
-        assert_eq!(kind_of(path, ext, datatype), want, "on {path}");
+        assert_eq!(
+            is_primary_data(ext, datatype),
+            want,
+            "on {ext:?}/{datatype:?}"
+        );
     }
 }

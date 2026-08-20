@@ -51,7 +51,6 @@ fn a_bad_row_names_the_table_and_its_keys() {
                 "dataset_id": "ds",
                 "root_uri": "file:///tmp/ds",
                 "file_path": "sub-01/anat/sub-01_T1w.nii.gz",
-                "kind": "data",
             })],
         )
         .unwrap_err();
@@ -90,7 +89,6 @@ fn a_good_row_still_writes() {
             "dataset_id": "ds",
             "root_uri": "file:///tmp/ds",
             "file_path": "sub-01/anat/sub-01_T1w.nii.gz",
-            "kind": "data",
         })],
     )
     .unwrap();

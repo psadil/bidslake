@@ -127,7 +127,7 @@ class BidsLake:
 
     @property
     def all_files(self) -> Table:
-        """One row per file the walk saw — every kind, with its BIDS concepts.
+        """One row per file the walk saw, with its BIDS concepts.
 
         The dataset's manifest: data files, sidecars, tabular files, gradients, and the
         documentation a dataset ships. Every file-keyed table joins this on `file_id`.
@@ -188,9 +188,11 @@ class BidsLake:
 
     @property
     def files(self) -> Table:
-        """One row per data file, widened with sidecar/participant/dataset columns.
+        """One row per walked file, widened with sidecar/participant/dataset columns.
 
-        Hides the joins (sidecars and scans by `file_id`; files↔participants by
+        The whole registry — narrow with `extension`/`datatype` when you mean only the
+        primary data files (a non-data file's `sidecar__*`/`scan__*` columns are simply
+        NULL). Hides the joins (sidecars and scans by `file_id`; files↔participants by
         `sub`/path-prefix). Joined-table columns are namespaced
         `sidecar__*`/`participant__*`/`dataset__*`/`scan__*` (BIDS's own `__` convention) so
         they never collide with the registry's own columns.
@@ -405,11 +407,10 @@ class BidsLake:
         """Yield `BidsFile` for rows of `table` matching `filters`.
 
         **Every file the walk saw**, not only the imaging ones: a `*_bold.nii.gz` and the
-        `*_bold.json` beside it are both rows here. Narrow with `kind="data"` when you mean
-        the primary data files, or with `extension` when you mean one format. There is one
+        `*_bold.json` beside it are both rows here. Narrow with `extension` when you mean
+        one format, or `datatype` when you mean the files under a datatype. There is one
         registry, and which slice of it you want is yours to say:
 
-            lake.get(task="rest", suffix="bold", kind="data")
             lake.get(task="rest", suffix="bold", extension=".nii.gz")
 
         Args:
@@ -464,7 +465,7 @@ class BidsLake:
             lake.sql(
                 select(AllFiles.file_path, Sidecars.RepetitionTime)
                 .join(Sidecars, Sidecars.file_id == AllFiles.file_id)
-                .where(AllFiles.task == "rest", AllFiles.kind == "data")
+                .where(AllFiles.task == "rest", AllFiles.extension == ".nii.gz")
             )
 
         That the statement is *compiled* here rather than executed is the whole reason
@@ -744,7 +745,7 @@ class BidsLake:
         parts = ["s.*", scan_sel, sidecar_sel, participant_sel, dataset_sel]
         select = ", ".join(p for p in parts if p)
         return (
-            f"SELECT {select} FROM (SELECT * FROM {ALL_FILES} WHERE kind = 'data') s "
+            f"SELECT {select} FROM (SELECT * FROM {ALL_FILES}) s "
             "LEFT JOIN scans sn ON sn.file_id = s.file_id "
             "LEFT JOIN sidecars sc ON sc.file_id = s.file_id "
             "LEFT JOIN dataset_description dd ON dd.dataset_id = s.dataset_id "

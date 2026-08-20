@@ -110,7 +110,7 @@ async fn test_bids_inheritance() -> Result<()> {
     // Verify Foreign Key relationship
     // Check that we can join scans and sidecars
     let join_count: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM all_files s JOIN sidecars m USING (file_id) WHERE s.kind = 'data'",
+        "SELECT COUNT(*) FROM all_files s JOIN sidecars m USING (file_id)",
         [],
         |r| r.get(0),
     )?;

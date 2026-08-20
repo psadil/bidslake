@@ -29,10 +29,13 @@ def test_every_catalog_table_has_a_model(lake) -> None:
 @pytest.fixture(scope="module")
 def bold_paths_two_ways(lake):
     """The same query written as a statement and as text."""
-    stmt = select(AllFiles.file_path).where(AllFiles.suffix == "bold", AllFiles.kind == "data")
+    stmt = select(AllFiles.file_path).where(
+        AllFiles.suffix == "bold", AllFiles.extension == ".nii.gz"
+    )
     from_stmt = lake.sql(stmt)
     from_text = lake.sql(
-        "SELECT file_path FROM all_files WHERE suffix = ? AND kind = ?", ["bold", "data"]
+        "SELECT file_path FROM all_files WHERE suffix = ? AND extension = ?",
+        ["bold", ".nii.gz"],
     )
     assert from_stmt.height > 0, "fixture assumption: the catalog holds BOLD data files"
     return from_stmt, from_text
@@ -54,7 +57,7 @@ def join_result(lake):
     stmt = (
         select(AllFiles.file_path, Sidecars.RepetitionTime)
         .join(Sidecars, Sidecars.file_id == AllFiles.file_id)
-        .where(AllFiles.suffix == "bold", AllFiles.kind == "data")
+        .where(AllFiles.suffix == "bold", AllFiles.extension == ".nii.gz")
     )
     return lake.sql(stmt)
 
@@ -73,13 +76,13 @@ def test_or_and_comparison(lake) -> None:
     The three calls make one claim — the disjunction is exactly the two branches.
     """
     stmt = select(AllFiles.file_path).where(
-        AllFiles.kind == "data",
+        AllFiles.extension == ".nii.gz",
         or_(AllFiles.suffix == "bold", AllFiles.suffix == "T1w"),
     )
 
     both = lake.sql(stmt).height
-    bold = len(list(lake.get(suffix="bold", kind="data")))
-    t1w = len(list(lake.get(suffix="T1w", kind="data")))
+    bold = len(list(lake.get(suffix="bold", extension=".nii.gz")))
+    t1w = len(list(lake.get(suffix="T1w", extension=".nii.gz")))
 
     assert both == bold + t1w
 

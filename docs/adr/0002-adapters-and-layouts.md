@@ -346,9 +346,9 @@ tables, so `fs_stats` states that one name. It stays a reader for a second reaso
 names are in the file, on the `# ColHeaders` line, and matching them by name survives a FreeSurfer
 release reordering a column where positions would quietly mis-assign.
 
-Two structural guards bound the dispatch. Primary data files are recognized by structure (`kind_of`
-over the parent datatype) and short-circuit *before* it, so imaging files are cataloged by structure
-rather than by policy. And `datatype` is deliberately left unbound at the BIDS dispatch, so a
+Two structural guards bound the dispatch. Primary data files are recognized by structure
+(`is_primary_data` over the parent datatype) and short-circuit *before* it, so imaging files are
+cataloged by structure rather than by policy. And `datatype` is deliberately left unbound at the BIDS dispatch, so a
 configured adapter's datatype-keyed rules cannot claim ordinary BIDS files.
 
 ### 5. Every artifact is validated on its own against a hand-written metaschema

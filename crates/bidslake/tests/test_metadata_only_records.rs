@@ -56,8 +56,8 @@ async fn mriqc_iqm_sidecars_become_records() -> anyhow::Result<()> {
     let schema = Schema::load_with_overlays(None, &[mriqc_overlay()])?;
     let db = ingest_with_schema(dir.path(), schema).await?;
 
-    // Each IQM sidecar is now a record in its own right: a registry row of kind `data`
-    // (which the sidecars FK requires) and a sidecars row carrying its metrics.
+    // Each IQM sidecar is now a record in its own right: a registry row counted as a data
+    // file (which the sidecars FK requires) and a sidecars row carrying its metrics.
     assert_eq!(
         count_data_files(&db)?,
         2,
@@ -84,7 +84,7 @@ async fn mriqc_iqm_sidecars_become_records() -> anyhow::Result<()> {
     // The record is queryable by BIDS concept, so a consumer can ask for
     // "the bold IQMs of sub-01" rather than parsing paths.
     let (sub, datatype, suffix, extension): (String, String, String, String) = db.conn.query_row(
-        "SELECT sub, datatype, suffix, extension FROM all_files WHERE kind = 'data' AND file_path LIKE '%bold.json'",
+        "SELECT sub, datatype, suffix, extension FROM all_files WHERE file_path LIKE '%bold.json'",
         [],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
@@ -149,8 +149,10 @@ async fn sidecars_with_their_data_file_are_not_promoted() -> anyhow::Result<()> 
 
     let db = ingest(dir.path()).await?;
     assert_eq!(count_data_files(&db)?, 1, "only the .nii.gz is a record");
+    // The record is the file that owns the `sidecars` row — the image, never the `.json`
+    // (whose metrics are stored against the image's id).
     let path: String = db.conn.query_row(
-        "SELECT file_path FROM all_files WHERE kind = 'data'",
+        "SELECT file_path FROM all_files JOIN sidecars USING (file_id)",
         [],
         |r| r.get(0),
     )?;

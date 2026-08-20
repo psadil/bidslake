@@ -67,9 +67,6 @@
 //! - **`file_registry`** — **the manifest**: one row per file the walk saw, whatever
 //!   bidslake did with it. PK `file_id`, plus `(dataset_id, root_uri, file_path)` — the
 //!   triple that id hashes — and:
-//!   - **`kind`** — what the file *is*: `data` (an image, a recording, a surface),
-//!     `sidecar`, `tabular`, `gradient` (`.bval`/`.bvec`), `description`
-//!     (`dataset_description.json`), or `other` (READMEs, code, stimuli).
 //!   - **`status`** — what became of a file bidslake tried to *read*:
 //!     `ingested`/`on_disk`/`skipped`/`failed`, or NULL for a file there was never any
 //!     reading to report on.
@@ -85,9 +82,9 @@
 //!   concept column flags them. (Recordings that are genuinely several files — e.g.
 //!   BrainVision `.vhdr`+`.vmrk`+`.eeg` — still get a row each.)
 //! - **`all_files`** (VIEW) — `file_registry` widened with the BIDS-concept columns
-//!   (see below). The query surface; `WHERE kind = 'data'` narrows it to primary data
-//!   files. (`bidslake-py`'s `get()` iterates the whole view, every kind, unless the
-//!   caller narrows it.)
+//!   (see below). The query surface; every walked file is a row, and "just the data
+//!   files" is an `extension`/`datatype` predicate spelled by the caller
+//!   (`bidslake-py`'s `get()` likewise iterates the whole view unless narrowed).
 //! - **`participants`** — one row per subject. PK `(dataset_id, participant_id)`.
 //!   Columns from the BIDS participants schema (`age`, `sex`, `handedness`, …).
 //!   From `participants.tsv` and implicit `sub-` entities.
@@ -100,7 +97,7 @@
 //! - **`sidecars`** — the JSON-sidecar metadata for each imaging file after BIDS
 //!   inheritance (dataset-/subject-level sidecars merged, more-specific wins).
 //!   PK `file_id` referencing `file_registry` — the *data* file's id, not the sidecar's
-//!   (the sidecar has its own registry row, under its own path, as `kind = 'sidecar'`).
+//!   (the sidecar has its own registry row, under its own path).
 //!   Very wide — a column per BIDS metadata field, verbatim-named (`RepetitionTime`,
 //!   `EchoTime`, …), plus `other_data`.
 //! - **`events`** — task-event rows from `*_events.tsv` (`onset`, `duration`,
@@ -193,7 +190,7 @@
 //! ```sql
 //! SELECT dataset_id, sub, ses, run, file_path
 //! FROM all_files
-//! WHERE kind = 'data' AND task = 'rest' AND datatype = 'func' AND suffix = 'bold';
+//! WHERE extension = '.nii.gz' AND task = 'rest' AND datatype = 'func' AND suffix = 'bold';
 //! ```
 //!
 //! A satellite stores none of these, so reach them by joining on `file_id`:

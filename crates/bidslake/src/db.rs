@@ -214,20 +214,25 @@ impl BidsDb {
         Ok(())
     }
 
-    /// Refuse to index into a catalog whose file registry is narrower than this run
-    /// needs.
+    /// Refuse to index into a catalog whose file registry does not match this run's shape —
+    /// narrower than the run needs, or wider than the run writes.
     ///
     /// Tables are created `IF NOT EXISTS`, so `file_registry` keeps the shape the *first*
     /// run gave it — while datasets are meant to accumulate across runs (ADR 0002). A
-    /// second run needing a physical column the registry lacks would drop it silently.
+    /// second run needing a physical column the registry lacks would drop it silently. A
+    /// column the *catalog* has that this run does not write (a registry written by an older
+    /// bidslake — e.g. the removed `kind`) would instead break the staged upsert, whose
+    /// `INSERT … SELECT *` is positional: an arity error at flush time, long after the walk,
+    /// with nothing naming the actual mismatch. Both directions are refused here, up front.
     ///
-    /// Only the *physical* shape is frozen, which in practice is one column: `projected`,
-    /// present only when a term map is configured. The BIDS-concept columns are select items
+    /// Only the *physical* shape is frozen. The BIDS-concept columns are select items
     /// of the `all_files` view, emitted `CREATE OR REPLACE`, so a wider run redefines them
     /// retroactively for rows already stored and needs no refusal (ADR 0006).
     ///
-    /// The remedy is that the adapter set describes the **catalog**, not the dataset being
-    /// added: name every adapter the catalog uses on every run, or index into a fresh one.
+    /// The remedy for a missing column is that the adapter set describes the **catalog**,
+    /// not the dataset being added: name every adapter the catalog uses on every run, or
+    /// index into a fresh one. For an extra column the catalog predates this bidslake's
+    /// registry shape, and the remedy is to re-index into a new catalog.
     fn check_registry_shape(&self, schema: &Schema) -> Result<()> {
         let exists: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM duckdb_tables() WHERE table_name = 'file_registry'",
@@ -244,23 +249,44 @@ impl BidsDb {
             .query_map([], |r| r.get::<_, String>(0))?
             .filter_map(|r| r.ok())
             .collect();
-        let missing: Vec<String> = schema
-            .write_columns("file_registry")
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|c| !have.contains(c))
+        let want = schema.write_columns("file_registry").unwrap_or_default();
+        let missing: Vec<String> = want
+            .iter()
+            .filter(|c| !have.contains(*c))
+            .cloned()
             .collect();
-        if missing.is_empty() {
-            return Ok(());
+        if !missing.is_empty() {
+            anyhow::bail!(
+                "this catalog's `file_registry` has no column for {}, so what this run would \
+                 record there is dropped. Tables are created only if absent, so the registry \
+                 keeps the shape of the run that created it. The adapter set describes the \
+                 catalog rather than one dataset: pass every adapter this catalog uses on \
+                 every index run (order then does not matter), or index into a new catalog.",
+                missing.join(", ")
+            )
         }
-        anyhow::bail!(
-            "this catalog's `file_registry` has no column for {}, so what this run would \
-             record there is dropped. Tables are created only if absent, so the registry \
-             keeps the shape of the run that created it. The adapter set describes the \
-             catalog rather than one dataset: pass every adapter this catalog uses on \
-             every index run (order then does not matter), or index into a new catalog.",
-            missing.join(", ")
-        )
+        let want: std::collections::HashSet<&String> = want.iter().collect();
+        // `projected` is the one legitimately optional physical column: a catalog built with
+        // term maps stays openable by a plain run (the pinned narrowing allowance, with the
+        // caveat ADR 0006 records). Anything else extra is another release's registry shape.
+        let mut extra: Vec<&String> = have
+            .iter()
+            .filter(|c| !want.contains(c) && c.as_str() != "projected")
+            .collect();
+        if !extra.is_empty() {
+            extra.sort();
+            anyhow::bail!(
+                "this catalog's `file_registry` carries {}, which this bidslake does not \
+                 write — the catalog was built by an older release with a different registry \
+                 shape. Re-index into a new catalog.",
+                extra
+                    .iter()
+                    .map(|c| format!("`{c}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+        Ok(())
     }
 
     /// Record which BIDS schema version (and bidslake build) produced this

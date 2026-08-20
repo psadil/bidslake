@@ -50,7 +50,7 @@ async fn test_scans_file_path_with_root_uri() -> Result<()> {
     // Get some file_path entries from scans table
     let mut stmt = db
         .conn
-        .prepare("SELECT file_path FROM all_files WHERE kind = 'data' LIMIT 5")?;
+        .prepare("SELECT file_path FROM all_files WHERE extension = '.nii.gz' LIMIT 5")?;
     let file_paths: Vec<String> = stmt
         .query_map([], |row| row.get(0))?
         .collect::<Result<Vec<_>, _>>()?;
@@ -103,7 +103,7 @@ async fn test_scans_file_path_with_root_uri() -> Result<()> {
         .query_row("SELECT count(*) FROM scans", [], |r| r.get(0))?;
     assert_eq!(scans, 0, "no scans.tsv, so no scans rows");
     let registered: i64 = db.conn.query_row(
-        "SELECT count(*) FROM all_files WHERE kind = 'data'",
+        "SELECT count(*) FROM all_files WHERE extension = '.nii.gz'",
         [],
         |r| r.get(0),
     )?;
@@ -161,7 +161,7 @@ async fn a_scans_row_lands_at_the_composed_path(#[case] expected: &str) -> Resul
     let db = common::ingest(&root).await?;
 
     let n: i64 = db.conn.query_row(
-        "SELECT count(*) FROM all_files WHERE kind = 'data' AND file_path = ?",
+        "SELECT count(*) FROM all_files WHERE file_path = ?",
         [expected],
         |r| r.get(0),
     )?;
@@ -179,7 +179,7 @@ async fn scans_tsv_file_path_is_composed_from_its_directory() -> Result<()> {
 
     // The failure mode: a row at the bare `filename` value, alongside the real one.
     let bare: i64 = db.conn.query_row(
-        "SELECT count(*) FROM all_files WHERE kind = 'data' AND file_path IN \
+        "SELECT count(*) FROM all_files WHERE file_path IN \
          ('anat/sub-01_T1w.nii.gz', 'func/sub-01_task-rest_bold.nii.gz')",
         [],
         |r| r.get(0),

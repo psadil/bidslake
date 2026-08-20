@@ -3,8 +3,8 @@
 //! `file_registry` is one row per file the walk saw, and the thing every file-keyed table
 //! points at. `all_files` is that registry widened with the generated BIDS-concept columns —
 //! which live on the *view* rather than the base table, so widening the concept set is a
-//! `CREATE OR REPLACE VIEW` rather than a table rebuild. "Just the data files" is
-//! `WHERE kind = 'data'`, not a second view.
+//! `CREATE OR REPLACE VIEW` rather than a table rebuild. "Just the data files" is an
+//! `extension`/`datatype` predicate spelled by the caller, not a second view.
 
 mod common;
 
@@ -65,8 +65,8 @@ fn all_files_is_a_view_over_the_registry() -> anyhow::Result<()> {
 /// makes widening the concept set free.
 ///
 /// The registry itself holds three kinds of column and no others: **identity** (`file_id`
-/// and the three parts it hashes), **classification** (`kind`, `status` — what bidslake
-/// decided about the file), and **observation** (`size_bytes`, `mtime_ns` — what the
+/// and the three parts it hashes), **classification** (`status` — what became of a file
+/// bidslake tried to read), and **observation** (`size_bytes`, `mtime_ns` — what the
 /// filesystem said, as opposed to what the name or contents say). Nothing derived from the
 /// BIDS vocabulary belongs here; that is the view's job.
 #[test]
@@ -84,7 +84,6 @@ fn concepts_live_on_the_view_not_the_registry() -> anyhow::Result<()> {
             "dataset_id",
             "root_uri",
             "file_path",
-            "kind",
             "status",
             "size_bytes",
             "mtime_ns"
@@ -108,46 +107,40 @@ fn concepts_live_on_the_view_not_the_registry() -> anyhow::Result<()> {
     ] {
         assert!(view.contains(&concept.to_string()), "view lacks {concept}");
     }
-    assert!(
-        view.contains(&"kind".to_string()),
-        "`kind` is how a consumer narrows the view to data files, so it must be on it"
-    );
     Ok(())
 }
 
 /// The view's concept expressions compute — including `modality`, which keys off the view's
-/// own `datatype` alias rather than re-matching the path — and they compute for **every** kind,
-/// not just data files.
+/// own `datatype` alias rather than re-matching the path — and they compute for **every**
+/// walked file, not just data files.
 ///
 /// That last part is why there is one view rather than a data-file-filtered one: the per-row
-/// tables (`events`, `*_channels`, …) key on *tabular* files, so a view restricted to
-/// `kind = 'data'` would leave them with no relation to join for "which subject is this row
-/// from?".
+/// tables (`events`, `*_channels`, …) key on *tabular* files, so a view restricted to data
+/// files would leave them with no relation to join for "which subject is this row from?".
 #[tokio::test]
-async fn the_view_computes_concepts_for_every_kind() -> anyhow::Result<()> {
+async fn the_view_computes_concepts_for_every_file() -> anyhow::Result<()> {
     let db = fresh()?;
     let mut insert = db.conn.prepare(
-        "INSERT INTO file_registry (file_id, dataset_id, root_uri, file_path, kind, status) \
-         VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO file_registry (file_id, dataset_id, root_uri, file_path, status) \
+         VALUES (?, ?, ?, ?, ?)",
     )?;
-    for (id, path, kind) in [
-        (1u128, "sub-01/func/sub-01_task-x_run-2_bold.nii.gz", "data"),
-        (2, "sub-01/anat/sub-01_T1w.json", "sidecar"),
-        (3, "README", "other"),
+    for (id, path) in [
+        (1u128, "sub-01/func/sub-01_task-x_run-2_bold.nii.gz"),
+        (2, "sub-01/anat/sub-01_T1w.json"),
+        (3, "README"),
         // An id with every bit set. `UUID` is `PhysicalType::INT128` internally and DuckDB
         // flips the top bit so `ORDER BY uuid` agrees with `ORDER BY uuid::varchar`, so the
         // extremes of the range are worth one row rather than none.
-        (u128::MAX, "sub-02/dwi/sub-02_dwi.nii.gz", "data"),
+        (u128::MAX, "sub-02/dwi/sub-02_dwi.nii.gz"),
         // The case the single view exists for: a per-row table keys on this, and it is not
         // a data file.
-        (5, "sub-01/func/sub-01_task-x_run-2_events.tsv", "tabular"),
+        (5, "sub-01/func/sub-01_task-x_run-2_events.tsv"),
     ] {
         insert.execute(duckdb::params![
             Uuid::from_u128(id).to_string(),
             "ds",
             "file:///r",
             path,
-            kind,
             "cataloged"
         ])?;
     }
@@ -159,7 +152,7 @@ async fn the_view_computes_concepts_for_every_kind() -> anyhow::Result<()> {
         "the view is every file, not a filtered subset"
     );
     let data: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM all_files WHERE kind = 'data'",
+        "SELECT COUNT(*) FROM all_files WHERE extension = '.nii.gz'",
         [],
         |r| r.get(0),
     )?;
@@ -248,29 +241,28 @@ async fn every_walked_file_has_a_registry_row() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The file classes that used to be unrecorded, now addressable by their own path and
-/// carrying the `kind` that says what they are.
+/// The file classes that used to be unrecorded — sidecars, gradients, documentation,
+/// root-level tabular files — now addressable by their own path.
 #[rstest]
-#[case("%_bold.json", "sidecar")]
-#[case("%.bval", "gradient")]
-#[case("%.bvec", "gradient")]
-#[case("README", "other")]
-#[case("participants.tsv", "tabular")]
-#[case("dataset_description.json", "description")]
+#[case("%_bold.json")]
+#[case("%.bval")]
+#[case("%.bvec")]
+#[case("README")]
+#[case("participants.tsv")]
+#[case("dataset_description.json")]
 #[tokio::test]
 async fn every_file_class_is_addressable_by_its_own_path(
     #[case] pattern: &str,
-    #[case] kind: &str,
 ) -> anyhow::Result<()> {
     let db = common::ingest(common::bids_example("ds000117")).await?;
 
     let n: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM file_registry WHERE file_path LIKE ? AND kind = ?",
-        duckdb::params![pattern, kind],
+        "SELECT COUNT(*) FROM file_registry WHERE file_path LIKE ?",
+        duckdb::params![pattern],
         |r| r.get(0),
     )?;
 
-    assert!(n > 0, "no {kind} row for {pattern}");
+    assert!(n > 0, "no registry row for {pattern}");
     Ok(())
 }
 
@@ -387,7 +379,6 @@ async fn a_malformed_id_is_refused_by_the_engine() -> anyhow::Result<()> {
         "dataset_id": "ds",
         "root_uri": "file:///r",
         "file_path": "sub-01/anat/sub-01_T1w.nii.gz",
-        "kind": "data",
     });
 
     // `{:#}` for the whole context chain: anyhow's plain `Display` prints only the outermost
