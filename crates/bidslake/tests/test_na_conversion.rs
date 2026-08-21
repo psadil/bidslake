@@ -31,7 +31,6 @@ fn na_in_a_numeric_column_becomes_null() -> anyhow::Result<()> {
             "dataset_id": "ds000002",
             "root_uri": "file:///r",
             "file_path": "sub-01/func/sub-01_task-x_run-01_bold.nii.gz",
-            "kind": "data",
         }),
     )?;
 

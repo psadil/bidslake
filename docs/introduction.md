@@ -26,7 +26,7 @@ you ask the catalog for its path.
 
   study/                                    +-- all_files -----------------+
     dataset_description.json  --parse-->    | file_id  sub  ses  task      |
-    participants.tsv          --read--->    | datatype  suffix  kind       |
+    participants.tsv          --read--->    | datatype  suffix  extension  |
     sub-01/anat/..._T1w.json  --parse-->    | file_path  root_uri  status  |
     sub-01/anat/..._T1w.nii.gz --record->   +--------------+---------------+
               |                                            | file_id

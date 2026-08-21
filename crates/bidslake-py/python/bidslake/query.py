@@ -94,11 +94,10 @@ def sibling(
     f = getattr(anchor, "element", anchor).alias(f"f_{name}")
 
     # `all_files` is the whole registry, and every image has a `.json` sidecar carrying
-    # identical entities — so without this every sibling matches two files and reads as
-    # ambiguous. Overridable, because a sidecar is sometimes what you want.
+    # identical entities — so a `where` that does not pin `extension` (or another
+    # discriminating column) matches both and reads as ambiguous (`__n == 2`), which the
+    # caller sees rather than a silently taken sidecar.
     conds: list[ColumnElement[bool]] = []
-    if "kind" not in where:
-        conds.append(f.c.kind == "data")
     conds += [f.c[k].is_(None) if v is None else f.c[k] == v for k, v in where.items()]
     # `IS NOT DISTINCT FROM`, not `==`: a sessionless or single-run dataset has NULL
     # entities, and `NULL = NULL` is NULL, which would drop those units entirely.

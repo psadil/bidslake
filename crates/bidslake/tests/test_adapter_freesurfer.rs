@@ -265,7 +265,7 @@ async fn a_surface_file_with_no_bids_term_is_cataloged_without_one() -> anyhow::
     let db = ingest_with_adapters(dir.path(), &["freesurfer"]).await?;
 
     let unnamed: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND suffix IS NULL \
+        "SELECT COUNT(*) FROM all_files WHERE datatype IS NOT NULL AND suffix IS NULL \
          AND file_path LIKE '%/surf/%'",
         [],
         |r| r.get(0),
@@ -286,13 +286,13 @@ async fn catalog_files_land_in_scans_and_labels_join() -> anyhow::Result<()> {
 
     // Catalog: surf/mri files are registered in the standard `scans` table (left on disk).
     let surf: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND file_path LIKE '%surf/lh.thickness'",
+        "SELECT COUNT(*) FROM all_files WHERE datatype IS NOT NULL AND file_path LIKE '%surf/lh.thickness'",
         [],
         |r| r.get(0),
     )?;
     assert_eq!(surf, 1, "surface cataloged in scans");
     let mri: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND file_path LIKE '%mri/aseg.mgz'",
+        "SELECT COUNT(*) FROM all_files WHERE datatype IS NOT NULL AND file_path LIKE '%mri/aseg.mgz'",
         [],
         |r| r.get(0),
     )?;
@@ -355,7 +355,7 @@ async fn adapter_dataset_records_a_root_uri() -> anyhow::Result<()> {
 
     // It must actually resolve: root_uri + a stored file_path is a real file on disk.
     let file_path: String = db.conn.query_row(
-        "SELECT file_path FROM all_files WHERE kind = 'data' AND file_path LIKE '%mri/aseg.mgz' LIMIT 1",
+        "SELECT file_path FROM all_files WHERE datatype IS NOT NULL AND file_path LIKE '%mri/aseg.mgz' LIMIT 1",
         [],
         |r| r.get(0),
     )?;
@@ -423,8 +423,17 @@ async fn cataloged_projection_reaches_the_registry() -> anyhow::Result<()> {
     );
 
     // Every cataloged file carries its term map's `datatype`, not just the segmentations.
+    // The fs_stats ingestion rule selects on suffix alone, so a mapping that forgot its
+    // `datatype` would still be read — and be visible only here, as a keeper that a
+    // `datatype IS NOT NULL` query can no longer find. The keeper directories are spelled
+    // out (mri/surf/stats/label) so the aparc and label mappings are covered, not only the
+    // files whose rows land in `freesurfer_aseg`.
     let missing: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND datatype IS NULL",
+        "SELECT COUNT(*) FROM all_files f \
+         WHERE f.datatype IS NULL \
+           AND (f.file_path LIKE '%/mri/%' OR f.file_path LIKE '%/surf/%' \
+                OR f.file_path LIKE '%/stats/%' OR f.file_path LIKE '%/label/%' \
+                OR EXISTS (SELECT 1 FROM freesurfer_aseg t WHERE t.file_id = f.file_id))",
         [],
         |r| r.get(0),
     )?;
@@ -613,7 +622,7 @@ async fn projected_subjects_register_as_participants() -> anyhow::Result<()> {
     // The point of the fix: the join is total. Every cataloged file resolves to a participant.
     let orphans: i64 = db.conn.query_row(
         "SELECT COUNT(*) FROM all_files s \
-         WHERE s.kind = 'data' AND s.sub IS NOT NULL \
+         WHERE s.datatype IS NOT NULL AND s.sub IS NOT NULL \
            AND NOT EXISTS (SELECT 1 FROM participants p \
                            WHERE p.dataset_id = s.dataset_id \
                              AND p.participant_id = 'sub-' || s.sub)",
@@ -639,13 +648,17 @@ async fn recognized_bookkeeping_files_are_not_cataloged(
     write_fs_tree(dir.path());
     let db = ingest_with_adapters(dir.path(), &["freesurfer"]).await?;
 
+    // `datatype` alone would be tautological here — the scripts/touch mappings project
+    // none, whatever the ingestion decides — so `status` carries the sensitivity: a rule
+    // that started cataloging (or reading) these files would stamp `on_disk`/`ingested`.
     let n: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND file_path LIKE ?",
+        "SELECT COUNT(*) FROM all_files \
+         WHERE (datatype IS NOT NULL OR status IS NOT NULL) AND file_path LIKE ?",
         [pattern],
         |r| r.get(0),
     )?;
 
-    assert_eq!(n, 0, "{pattern} must not reach scans");
+    assert_eq!(n, 0, "{pattern} must not be cataloged");
     Ok(())
 }
 

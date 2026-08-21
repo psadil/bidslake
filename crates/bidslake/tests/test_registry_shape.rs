@@ -57,12 +57,15 @@ fn registry_columns(db: &BidsDb) -> anyhow::Result<Vec<String>> {
 /// **That refusal is retired** (docs/adr/0006). The concept columns are select items of the
 /// `all_files` view, not generated columns of a table, and a view is emitted
 /// `CREATE OR REPLACE` — so a later, wider run simply redefines it, retroactively, for rows
-/// already stored. What a wider run once had nowhere to put, it now computes on read.
+/// already stored. What a wider run once had nowhere to put, it now computes on read. The
+/// second run still names the catalog's own adapter beside the new one — the adapter set
+/// describes the catalog, and dropping `freesurfer` would drop the `projected` column the
+/// registry physically carries (refused below).
 #[test]
 fn widening_an_existing_registry_now_succeeds() -> anyhow::Result<()> {
     let db = BidsDb::new(":memory:")?;
     db.create_tables(&schema_for(&["freesurfer"])?)?;
-    db.create_tables(&schema_for(&["fmriprep"])?)?;
+    db.create_tables(&schema_for(&["freesurfer", "fmriprep"])?)?;
 
     // The fMRIPrep entities the narrower first run knew nothing about are queryable now,
     // without re-indexing anything.
@@ -126,12 +129,47 @@ fn reindexing_with_the_same_adapters_is_allowed() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A catalog built with more than it needs is fine: only a *missing* column is a problem.
+/// Narrowing — indexing into an adapter-built catalog while naming no adapter — is refused
+/// with the same remedy as the missing-column direction. It *used* to be allowed, but the
+/// allowance was a trap: `create_tables` succeeded and the run then died at the registry
+/// upsert, whose appender feeds one value per column the run writes into a stage created
+/// from the wider physical table — after the whole walk, naming neither the column nor a
+/// remedy.
 #[test]
-fn narrowing_is_allowed() -> anyhow::Result<()> {
+fn narrowing_is_refused_with_the_adapter_remedy() -> anyhow::Result<()> {
     let db = BidsDb::new(":memory:")?;
     db.create_tables(&schema_for(&["fmriprep", "freesurfer"])?)?;
+
+    let err = db
+        .create_tables(&Schema::load(None)?)
+        .expect_err("a run without the catalog's adapters cannot write its registry");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("projected") && msg.contains("every adapter"),
+        "message should name the column and the remedy: {msg}"
+    );
+    Ok(())
+}
+
+/// A registry column this build does not write — a catalog written by an older bidslake,
+/// e.g. one whose registry still carried the removed `kind` — is refused up front, by
+/// name. Left unchecked, the run would instead die at the registry upsert's appender
+/// (fewer values per row than the stage, created from the wider physical table, has
+/// columns), after the whole walk and with nothing naming the actual difference.
+#[test]
+fn an_extra_registry_column_is_refused_by_name() -> anyhow::Result<()> {
+    let db = BidsDb::new(":memory:")?;
     db.create_tables(&Schema::load(None)?)?;
+    db.conn
+        .execute("ALTER TABLE file_registry ADD COLUMN kind TEXT", [])?;
+
+    let err = db
+        .create_tables(&Schema::load(None)?)
+        .expect_err("an extra physical column is another release's registry shape");
+    assert!(
+        err.to_string().contains("kind"),
+        "message should name the extra column: {err}"
+    );
     Ok(())
 }
 

@@ -21,12 +21,12 @@ use bidslake::schema::Schema;
 use bidslake::schema::tabular::{FileContext, TableSpec};
 use serde_json::Value;
 
-use crate::values::{Kind, cell, kind_for_key};
+use crate::values::{ValueKind, cell, value_kind_for_key};
 
 /// A column's header and the kind of value to put under it.
 struct Column {
     name: String,
-    kind: Kind,
+    kind: ValueKind,
 }
 
 fn columns_of(schema: &Schema, spec: &TableSpec) -> Vec<Column> {
@@ -34,7 +34,7 @@ fn columns_of(schema: &Schema, spec: &TableSpec) -> Vec<Column> {
         .iter()
         .map(|c| Column {
             name: c.name.clone(),
-            kind: kind_for_key(schema.raw(), &c.key),
+            kind: value_kind_for_key(schema.raw(), &c.key),
         })
         .collect()
 }
@@ -70,7 +70,7 @@ pub fn route<'a>(
 /// `format: participant_relative` and has to name files that exist, and `participant_id` has to
 /// match a subject directory. A column not overridden is filled from its declared kind.
 ///
-/// A [`Kind::NotApplicable`] column with no override is **dropped**, header and all. Emitting one
+/// A [`ValueKind::NotApplicable`] column with no override is **dropped**, header and all. Emitting one
 /// would add a column that can only ever say `n/a`, and for `HED` specifically it would ask the
 /// dataset for a `HEDVersion` it does not declare — a warning on every table, for a column
 /// carrying nothing. Every such column is optional in the schema, so dropping it is legal.
@@ -81,7 +81,7 @@ pub fn tsv(
     overrides: &BTreeMap<String, Vec<String>>,
 ) -> String {
     let mut columns = columns_of(schema, spec);
-    columns.retain(|c| c.kind != Kind::NotApplicable || overrides.contains_key(&c.name));
+    columns.retain(|c| c.kind != ValueKind::NotApplicable || overrides.contains_key(&c.name));
     let mut out = String::new();
     out.push_str(
         &columns
@@ -147,7 +147,7 @@ pub fn fs_stats(schema: &Schema, spec: &TableSpec, rows: usize) -> String {
         for (i, column) in columns_of(schema, measures).iter().enumerate() {
             // `Measure <structkey>, <shortname>, <description>, <value>, <units>`; the reader
             // keys on the *second* field and reads the fourth.
-            let value = cell(&Kind::Number, &column.name, i);
+            let value = cell(&ValueKind::Number, &column.name, i);
             out.push_str(&format!(
                 "# Measure {n}, {n}, {n}, {value}, unitless\n",
                 n = column.name
@@ -188,10 +188,10 @@ pub fn fs_stats(schema: &Schema, spec: &TableSpec, rows: usize) -> String {
 pub fn confounds(schema: &Schema, spec: &TableSpec, rows: usize, extra: usize) -> String {
     let declared = columns_of(schema, spec);
     let mut headers: Vec<String> = declared.iter().map(|c| c.name.clone()).collect();
-    let mut kinds: Vec<Kind> = declared.iter().map(|c| c.kind.clone()).collect();
+    let mut kinds: Vec<ValueKind> = declared.iter().map(|c| c.kind.clone()).collect();
     for i in 0..extra {
         headers.push(format!("a_comp_cor_{i:04}"));
-        kinds.push(Kind::Number);
+        kinds.push(ValueKind::Number);
     }
 
     let mut out = String::with_capacity(headers.len() * (rows + 1) * 8);

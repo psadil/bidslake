@@ -47,14 +47,17 @@ non-hidden files on disk, its two `.bidsignore` patterns accounting for the 238 
 A view over a table with no generated columns buys two things: widening the concept set is free, and
 the bulk staged upsert can write the base table, which a table full of generated columns refuses.
 The same mechanism cuts the other way: a later *narrower* run redefines the view without the
-concepts the wider run added and without the `COALESCE` over `projected`. A catalog built with the
-`fmriprep` and `freesurfer` adapters, indexed again with neither, loses `from`, `to`, `mode` and
-`parc`, and its FreeSurfer rows read `datatype` NULL — which `check_registry_shape` cannot see, no
-*physical* column being missing.
+concepts the wider run added. A catalog built with the `fmriprep` and `freesurfer` adapters,
+indexed again with **neither**, is refused up front — the run would not write `projected`, so it
+could not write a single registry row (`check_registry_shape` names the column and the remedy).
+Indexed again with only *one* of the two, the physical shape matches, the run proceeds, and the
+view silently loses the other adapter's concepts (`from`, `to`, `mode` or `parc`) — which no check
+can see, no physical column being missing (Open Issues).
 
-The view spans every kind because the concepts are functions of `file_path`, as meaningful for a
-sidecar or a `*_events.tsv` as for the image beside it — and the per-row tables key on *tabular*
-files, so a data-file-only view would leave "which subject is this row from?" unanswerable for them.
+The view spans every walked file because the concepts are functions of `file_path`, as meaningful
+for a sidecar or a `*_events.tsv` as for the image beside it — and the per-row tables key on
+*tabular* files, so a data-file-only view would leave "which subject is this row from?"
+unanswerable for them.
 
 ### On the surrogate key
 
@@ -157,7 +160,7 @@ None of the three is documented upstream; all hold on DuckDB 1.5.5, the bundled 
 ```sql
 CREATE TABLE file_registry (
     file_id UUID PRIMARY KEY,
-    dataset_id TEXT, root_uri TEXT, file_path TEXT, kind TEXT, status TEXT,
+    dataset_id TEXT, root_uri TEXT, file_path TEXT, status TEXT,
     size_bytes UBIGINT, mtime_ns BIGINT   -- , projected JSON   (only with a term map)
 );
 ```
@@ -168,14 +171,17 @@ row, carrying `status = 'on_disk'`. The one exclusion is what the walk never rea
 `mtime_ns` are what the filesystem said, NULL under `--no-stat` and where a backend could not stat
 it; `bidslake verify` is their consumer ([ADR 0007](0007-root-tenure.md)).
 
-### 2. `kind` classifies the file; `status` records what bidslake did with it
+### 2. `status` records what bidslake did with the file
 
-`kind` ∈ `data`, `sidecar`, `tabular`, `gradient`, `description`, `other` — bidslake's own
-vocabulary, and what lets one table hold every class of file. `kind_of` encodes the companion rule
-in its order: the four companion extensions are claimed before `datatype.is_some()` is consulted, so
-a `.json` beside a `.nii.gz` is a sidecar, not a second data file. `status` ∈ `ingested`, `on_disk`,
-`skipped`, `failed` — the fate of a file bidslake *tried to read*, NULL for one it never would have,
-an image having no reading to report.
+`status` ∈ `ingested`, `on_disk`, `skipped`, `failed` — the fate of a file bidslake *tried to
+read*, NULL for one it never would have, an image having no reading to report.
+
+What a file *is* stays a function of its path, spelled by the caller: `extension` for a format,
+`datatype` for the files under a datatype directory. The walk's own classifier is
+`is_primary_data` over `COMPANION_EXTENSIONS`, which encodes the companion rule: the four
+companion extensions are claimed before the datatype is consulted, so a `.json` beside a
+`.nii.gz` is a sidecar, not a second data file. (An earlier revision stored that classification
+as a six-valued `kind` column; see Rejected Ideas.)
 
 ### 3. The concepts live on `all_files`, a view — once, not 26 times
 
@@ -188,9 +194,10 @@ CREATE OR REPLACE VIEW all_files AS
 Each concept select item is a regex over `file_path`, wrapped as
 `COALESCE(json_extract(projected, …), <regex>)` where a term map can supply the concept — so a
 term-mapped file's `datatype` comes from the projection and a BIDS-named file's from its path. The
-view covers every `kind`; "data files only" is `WHERE kind = 'data'`, spelled by the caller. It is
-emitted `CREATE OR REPLACE`, so its concept set is whatever the current run's schema yields, for
-rows already stored as much as for new ones; `projected`, a physical column, is not.
+view covers every walked file; "data files only" is an `extension` predicate, spelled by the
+caller (`datatype` does not discriminate — a sidecar sits in its image's datatype directory). It is emitted `CREATE OR REPLACE`, so its concept set is whatever the current
+run's schema yields, for rows already stored as much as for new ones; `projected`, a physical
+column, is not.
 
 ### 4. `file_id` is a surrogate key over the identity triple
 
@@ -218,7 +225,7 @@ registry row carries its `status`, and which table its rows landed in is a join 
 
 `BidsLake._relation` joins a file-keyed table back to `all_files` on `file_id` and `_filter_columns`
 reports the union, so `lake.get(table="scans", suffix="bold")` works against a table storing neither
-`sub` nor `suffix`. `get()` defaults to `all_files`, hence to every kind.
+`sub` nor `suffix`. `get()` defaults to `all_files`, hence to every walked file.
 
 ## Backwards Compatibility
 
@@ -231,10 +238,17 @@ catalog.
 
 ## Rejected Ideas
 
-**Deriving `kind` from BIDS's own `rules.files` taxonomy.** Its 179 leaves look like exactly this
-classification, but 149 of the 169 extension-bearing rules list `.json` alongside a non-JSON
-extension, so it cannot separate a data file from its sidecar — the one distinction `kind` exists to
-draw. Upstream defines a sidecar as `extension == ".json"` plus a hand-written exception.
+**A stored `kind` classification column.** An earlier revision stored a six-valued classifier
+(`data`/`sidecar`/`tabular`/`gradient`/`description`/`other`) on every registry row, as the query
+idiom for "just the data files". Removed: nothing in the product read it, five of its six values
+had at most one query site each (all redundant with `extension`), every known external query
+already pinned `extension` beside it, and the vocabulary was bidslake's own invention where
+everything else on the view is BIDS's. What the column recorded beyond a path function — the
+promoted metadata-only records, and an adapter disposition — remains recoverable: a promoted
+`.json` owns its `sidecars` row, and an adapter catalog's data files carry a projected
+`datatype`. Its cousin was **deriving `kind` from BIDS's own `rules.files` taxonomy**, rejected
+earlier still: 149 of the 169 extension-bearing rules list `.json` alongside a non-JSON
+extension, so that taxonomy cannot separate a data file from its sidecar.
 
 **`(dataset_id, root_uri, file_path)` as a composite key everywhere.** The same information spread
 over three columns and 26 tables' worth of index, `root_uri` being a long absolute path repeated per
@@ -259,15 +273,17 @@ the stubs would be rows claiming to describe acquisitions nothing describes — 
 run is not a property of the file; a row count is `SELECT count(*) … WHERE file_id = ?` against the
 table the rows landed in.
 
-**A second view for the data files.** `WHERE kind = 'data'` is short enough not to earn a view that
-could drift from `all_files`' concept expressions.
+**A second view for the data files.** An `extension`/`datatype` predicate is short enough not to
+earn a view that could drift from `all_files`' concept expressions.
 
 ## Open Issues
 
-- **A narrower later run silently strips concept columns off `all_files`.** Either union the
-  incoming concept set with the catalog's stamped `bidslake_schema`, or refuse the run the way a
-  missing `projected` is refused; the first needs the stamp read back at `create_tables` time, which
-  nothing does. `test_registry_shape.rs::narrowing_is_allowed` asserts only that no error is raised.
+- **A same-shape narrower run silently strips concept columns off `all_files`.** The physical
+  cases are refused (`check_registry_shape`, both directions), but a run naming a *subset* of the
+  catalog's adapters that still writes `projected` redefines the view without the missing
+  adapter's concepts. Either union the incoming concept set with the catalog's stamped
+  `bidslake_schema`, or refuse such a run too; the first needs the stamp read back at
+  `create_tables` time, which nothing does.
 - **Extending the foreign key to the 22 per-row tables**, once a per-row check on the bulk
   `read_csv` path has been measured against the batched-ingest benchmark.
 - **Nothing enforces that a file's subject is a subject the dataset has.** `all_files.sub` and `ses`

@@ -191,17 +191,40 @@ pub fn count(db: &BidsDb, table: &str) -> Result<i64> {
 
 /// How many primary **data files** the catalog holds.
 ///
-/// The thing tests used to spell `count(db, "scans")`. Since docs/adr/0006 that is the wrong
-/// relation twice over: the registry holds every *kind* of file, and `scans` holds only the
-/// data files a `scans.tsv` describes — none at all for a dataset that ships no `scans.tsv`,
-/// which is most fixtures.
+/// The thing tests used to spell `count(db, "scans")`, then `WHERE kind = 'data'`. Since
+/// docs/adr/0006 `scans` is the wrong relation twice over: the registry holds every walked
+/// file, and `scans` holds only the data files a `scans.tsv` describes — none at all for a
+/// dataset that ships no `scans.tsv`, which is most fixtures. With the `kind` column gone,
+/// this restates the walk's own classification in SQL:
+///
+/// - a data file sits in a datatype directory (`parent_datatype`, as a regex over
+///   `file_path`) and is not one of the [`bidslake::bids::COMPANION_EXTENSIONS`] — the same
+///   list the walk's `is_primary_data` reads, imported rather than copied so the two cannot
+///   drift;
+/// - plus the promoted metadata-only records (MRIQC-style): a `.json` that owns its own
+///   `sidecars` row is a record rather than a sidecar — an ordinary sidecar's `sidecars`
+///   row is keyed by the image it describes, never by the `.json` itself.
+///
+/// The datatype set comes from the same schema the walk classifies with. Term-mapped
+/// (adapter) data files are not counted — no caller ingests through an adapter; extend
+/// with `projected` if one ever does.
 #[allow(dead_code)]
 pub fn count_data_files(db: &BidsDb) -> Result<i64> {
-    Ok(db.conn.query_row(
-        "SELECT COUNT(*) FROM file_registry WHERE kind = 'data'",
-        [],
-        |r| r.get(0),
-    )?)
+    let schema: serde_json::Value = serde_json::from_str(bids_schema::SCHEMA_JSON)?;
+    let datatypes = bids_schema::datatypes::datatypes(&schema).join("|");
+    let companions = bidslake::bids::COMPANION_EXTENSIONS
+        .iter()
+        .map(|e| format!("'{e}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT COUNT(*) FROM all_files f \
+         WHERE (regexp_matches(f.file_path, '(?:^|/)({datatypes})/[^/]+$') \
+                AND (f.extension IS NULL OR f.extension NOT IN ({companions}))) \
+            OR (f.extension = '.json' \
+                AND EXISTS (SELECT 1 FROM sidecars sc WHERE sc.file_id = f.file_id))"
+    );
+    Ok(db.conn.query_row(&sql, [], |r| r.get(0))?)
 }
 
 /// Every file under `root` that ingest would *see* — the set the file registry is meant to

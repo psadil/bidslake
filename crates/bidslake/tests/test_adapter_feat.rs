@@ -113,7 +113,7 @@ async fn feat_roles_are_projected_onto_bids_concepts(
     let db = ingest_with_adapters(dir.path(), &["feat"]).await?;
 
     let got: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND suffix = ? AND \"desc\" = ?",
+        "SELECT COUNT(*) FROM all_files WHERE datatype IS NOT NULL AND suffix = ? AND \"desc\" = ?",
         duckdb::params![suffix, desc],
         |r| r.get(0),
     )?;
@@ -130,7 +130,7 @@ async fn unit_entities_come_from_the_directory_name() -> anyhow::Result<()> {
     let db = ingest_with_adapters(dir.path(), &["feat"]).await?;
 
     let (sub, ses, task, run): (String, String, String, String) = db.conn.query_row(
-        "SELECT sub, ses, task, run FROM all_files WHERE kind = 'data' AND suffix = 'mixing'",
+        "SELECT sub, ses, task, run FROM all_files WHERE datatype IS NOT NULL AND suffix = 'mixing'",
         [],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
@@ -151,7 +151,7 @@ async fn a_sessionless_runless_unit_still_resolves() -> anyhow::Result<()> {
     let db = ingest_with_adapters(dir.path(), &["feat"]).await?;
 
     let bare: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND sub = '02' AND ses IS NULL AND run IS NULL \
+        "SELECT COUNT(*) FROM all_files WHERE datatype IS NOT NULL AND sub = '02' AND ses IS NULL AND run IS NULL \
          AND task = 'cuff' AND suffix = 'mask'",
         [],
         |r| r.get(0),
@@ -183,7 +183,7 @@ async fn registration_transforms_carry_from_and_to(
     let db = ingest_with_adapters(dir.path(), &["feat"]).await?;
 
     let got: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND suffix = 'xfm' \
+        "SELECT COUNT(*) FROM all_files WHERE datatype IS NOT NULL AND suffix = 'xfm' \
          AND \"from\" = ? AND \"to\" = ? AND extension = ? AND mode = 'image'",
         duckdb::params![from, to, ext],
         |r| r.get(0),
@@ -205,13 +205,13 @@ async fn desc_separates_hand_classification_from_automatic() -> anyhow::Result<(
     let db = ingest_with_adapters(dir.path(), &["feat"]).await?;
 
     let reviewed: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND suffix = 'classification' \
+        "SELECT COUNT(*) FROM all_files WHERE datatype IS NOT NULL AND suffix = 'classification' \
          AND \"desc\" = 'manual'",
         [],
         |r| r.get(0),
     )?;
     let automatic: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND suffix = 'classification' \
+        "SELECT COUNT(*) FROM all_files WHERE datatype IS NOT NULL AND suffix = 'classification' \
          AND \"desc\" = 'auto'",
         [],
         |r| r.get(0),
@@ -233,7 +233,7 @@ async fn an_underscored_training_set_still_classifies() -> anyhow::Result<()> {
     let db = ingest_with_adapters(dir.path(), &["feat"]).await?;
 
     let got: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND suffix = 'classification' \
+        "SELECT COUNT(*) FROM all_files WHERE datatype IS NOT NULL AND suffix = 'classification' \
          AND \"desc\" = 'auto' AND file_path LIKE '%/fix4melview_HCP25_hp2000_thr10.txt'",
         [],
         |r| r.get(0),
@@ -261,7 +261,7 @@ async fn scratch_is_ignored_not_cataloged(#[case] pattern: &str) -> anyhow::Resu
     let db = ingest_with_adapters(dir.path(), &["feat"]).await?;
 
     let got: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND file_path LIKE ?",
+        "SELECT COUNT(*) FROM all_files WHERE datatype IS NOT NULL AND file_path LIKE ?",
         duckdb::params![pattern],
         |r| r.get(0),
     )?;
@@ -474,7 +474,7 @@ async fn a_keeper_beside_the_scratch_survives(#[case] keeper: &str) -> anyhow::R
     let db = ingest_with_adapters(dir.path(), &["feat"]).await?;
 
     let got: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM all_files WHERE kind = 'data' AND file_path LIKE ?",
+        "SELECT COUNT(*) FROM all_files WHERE datatype IS NOT NULL AND file_path LIKE ?",
         duckdb::params![keeper],
         |r| r.get(0),
     )?;

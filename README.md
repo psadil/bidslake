@@ -53,7 +53,7 @@ duckdb dataset.duckdb
 ```sql
 SELECT p.participant_id, p.age, f.file_path
 FROM participants p
-JOIN all_files f ON f.dataset_id = p.dataset_id AND f.kind = 'data'
+JOIN all_files f ON f.dataset_id = p.dataset_id AND f.extension = '.nii.gz'
                 AND f.file_path LIKE p.participant_id || '/%'
 WHERE p.age < 30 AND f.suffix = 'T1w';
 ```

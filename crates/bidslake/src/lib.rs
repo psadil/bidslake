@@ -72,8 +72,9 @@
 //!
 //! `all_files` — the file registry — exposes BIDS entities plus
 //! `datatype`/`suffix`/`modality` as derived columns, so you filter by concept instead
-//! of matching path substrings. It holds every file the walk saw, so add
-//! `kind = 'data'` to narrow it to primary data files. And because every row carries a
+//! of matching path substrings. It holds every file the walk saw, so narrow with
+//! `extension` when you mean only the primary data files. And because
+//! every row carries a
 //! `dataset_id`, many datasets can share one database and be queried together — `ses` is
 //! simply `NULL` for datasets that don't use sessions, so one query spans a mixed pool.
 //!

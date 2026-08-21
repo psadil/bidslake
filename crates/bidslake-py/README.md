@@ -43,7 +43,7 @@ lf = lake.sidecars.lazy().select("file_id", "RepetitionTime")
 
 # Typed per-table column expressions and the wide one-big-table view:
 from bidslake import C
-lake.all_files.pl().filter(C.all_files.kind == "data")   # narrow it yourself
+lake.all_files.pl().filter(C.all_files.extension == ".nii.gz")   # narrow it yourself
 lake.all_files.pl().filter((C.all_files.task == "rest") & (C.all_files.suffix == "bold"))
 lake.files.pl()                      # registry + sidecar__*/participant__*/dataset__*/scan__*
 
@@ -103,7 +103,7 @@ from bidslake.schema.models import AllFiles, Sidecars
 lake.sql(
     select(AllFiles.file_path, Sidecars.RepetitionTime)
     .join(Sidecars, Sidecars.file_id == AllFiles.file_id)
-    .where(AllFiles.task == "rest", AllFiles.kind == "data")
+    .where(AllFiles.task == "rest", AllFiles.extension == ".nii.gz")
 )
 ```
 
@@ -134,10 +134,12 @@ ROLES = {
     # One mask per run, so this joins on the whole unit key. `space=None` is IS NULL —
     # what separates a native-space image from its `space-*` resamplings.
     "brain": (UNIT, None,
-              {"datatype": "func", "suffix": "mask", "desc": "brain", "space": None}),
+              {"datatype": "func", "suffix": "mask", "desc": "brain", "space": None,
+               "extension": ".nii.gz"}),
     # One T1w per session, so this matches on *less* than the key.
     "anat": (("sub", "ses"), None,
-             {"datatype": "anat", "suffix": "T1w", "desc": "preproc", "space": None}),
+             {"datatype": "anat", "suffix": "T1w", "desc": "preproc", "space": None,
+              "extension": ".nii.gz"}),
     # A different dataset, reached by the name the catalog gives it.
     "wmparc": (("sub", "ses"), "freesurfer", {"seg": "wmparc", "extension": ".mgz"}),
 }
@@ -151,15 +153,15 @@ for name, (join, via, where) in ROLES.items():
     frm = frm.outerjoin(lat, true())
 
 units = lake.sql(select(*cols).select_from(frm).where(
-    a.c.kind == "data", a.c.datatype == "func", a.c.suffix == "bold",
+    a.c.extension == ".nii.gz", a.c.datatype == "func", a.c.suffix == "bold",
     a.c.desc == "preproc", a.c.space.is_(None),
 ))
 ```
 
 `where` is a mapping rather than keyword arguments because `from` is a Python keyword and
-fMRIPrep uses it as an entity. `kind == "data"` is applied for you — `all_files` is the
-whole registry and every image has a `.json` sidecar carrying identical entities, so
-without it every sibling matches two files — and passing `kind` yourself overrides it.
+fMRIPrep uses it as an entity. Pin `extension` in every role — `all_files` is the whole
+registry and every image has a `.json` sidecar carrying identical entities, so a role
+that does not discriminate matches two files and reads as ambiguous.
 
 One row per unit, every sibling beside it, in **one** query — not one per role per unit.
 DuckDB decorrelates the laterals (`EXPLAIN` shows `HASH_JOIN` + `HASH_GROUP_BY`, no

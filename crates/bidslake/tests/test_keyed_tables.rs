@@ -170,7 +170,7 @@ async fn reingesting_the_same_dataset_rebuilds_it() -> Result<()> {
         "DELETE FROM file_associations WHERE source_file_id IN \
           (SELECT file_id FROM all_files WHERE file_path LIKE '%run-01%')",
         "DELETE FROM scans WHERE file_id IN \
-          (SELECT file_id FROM all_files WHERE kind = 'data' AND file_path LIKE '%run-01%' \
+          (SELECT file_id FROM all_files WHERE file_path LIKE '%run-01%' \
            AND file_path LIKE '%.nii.gz')",
     ] {
         db.conn.execute(sql, [])?;

@@ -15,7 +15,7 @@ use serde_json::Value;
 /// What kind of value a column holds, once `type` and the `definition.Format` fallback are
 /// reconciled.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Kind {
+pub enum ValueKind {
     /// A closed value set, from `enum` or the keys of `definition.Levels`.
     OneOf(Vec<String>),
     /// `type: integer`.
@@ -57,16 +57,16 @@ pub enum Kind {
 /// in this workspace (nothing enables `preserve_order`), so its keys arrive alphabetically. That
 /// is the property worth having anyway — [`cell`] cycles through the set by row index, and a
 /// generated tree has to be byte-identical across runs.
-pub fn kind_of(column: &Value) -> Kind {
+pub fn value_kind_of(column: &Value) -> ValueKind {
     // Checked before the value sets, because a column that must not be invented must not be
     // invented from an `enum` either.
     let name = column.get("name").and_then(Value::as_str).unwrap_or("");
     let format = column.get("format").and_then(Value::as_str).unwrap_or("");
     if name == "HED" || matches!(format, "participant_relative" | "stimuli_relative") {
-        return Kind::NotApplicable;
+        return ValueKind::NotApplicable;
     }
     if format == "datetime" {
-        return Kind::DateTime;
+        return ValueKind::DateTime;
     }
 
     if let Some(values) = column.get("enum").and_then(Value::as_array) {
@@ -76,7 +76,7 @@ pub fn kind_of(column: &Value) -> Kind {
             .map(str::to_string)
             .collect();
         if !allowed.is_empty() {
-            return Kind::OneOf(allowed);
+            return ValueKind::OneOf(allowed);
         }
     }
     if let Some(levels) = column
@@ -86,7 +86,7 @@ pub fn kind_of(column: &Value) -> Kind {
     {
         let allowed: Vec<String> = levels.keys().cloned().collect();
         if !allowed.is_empty() {
-            return Kind::OneOf(allowed);
+            return ValueKind::OneOf(allowed);
         }
     }
 
@@ -102,10 +102,10 @@ pub fn kind_of(column: &Value) -> Kind {
         .unwrap_or("string");
 
     match declared {
-        "integer" => Kind::Integer,
-        "number" | "float" => Kind::Number,
-        "boolean" => Kind::Boolean,
-        _ => Kind::Text,
+        "integer" => ValueKind::Integer,
+        "number" | "float" => ValueKind::Number,
+        "boolean" => ValueKind::Boolean,
+        _ => ValueKind::Text,
     }
 }
 
@@ -113,44 +113,44 @@ pub fn kind_of(column: &Value) -> Kind {
 ///
 /// `column` names the header only so text values are distinguishable in a dump; nothing
 /// interprets it.
-pub fn cell(kind: &Kind, column: &str, row: usize) -> String {
+pub fn cell(kind: &ValueKind, column: &str, row: usize) -> String {
     match kind {
         // Cycling rather than fixing one value, so a column with levels exercises more than the
         // first of them — a `sex` column that only ever said `male` would let a levels bug
         // through.
-        Kind::OneOf(allowed) => allowed[row % allowed.len()].clone(),
-        Kind::Integer => row.to_string(),
+        ValueKind::OneOf(allowed) => allowed[row % allowed.len()].clone(),
+        ValueKind::Integer => row.to_string(),
         // Two decimals, and never an integer-looking string: DuckDB's CSV sniffer types a column
         // from what it sees, and `1` in row one would have it guess BIGINT for a DOUBLE column.
-        Kind::Number => format!("{:.2}", (row as f64) * 0.25 + 0.5),
-        Kind::Boolean => {
+        ValueKind::Number => format!("{:.2}", (row as f64) * 0.25 + 0.5),
+        ValueKind::Boolean => {
             if row.is_multiple_of(2) {
                 "true".to_string()
             } else {
                 "false".to_string()
             }
         }
-        Kind::NotApplicable => "n/a".to_string(),
+        ValueKind::NotApplicable => "n/a".to_string(),
         // BIDS permits a date-only or a full timestamp; the full one is what a scanner writes,
         // and the year is fixed so a generated tree is byte-identical whenever it is built.
-        Kind::DateTime => format!("2026-01-01T{:02}:{:02}:00", row / 60 % 24, row % 60),
-        Kind::Text => format!("{column}{row}"),
+        ValueKind::DateTime => format!("2026-01-01T{:02}:{:02}:00", row / 60 % 24, row % 60),
+        ValueKind::Text => format!("{column}{row}"),
     }
 }
 
-/// The kind of the column whose *schema key* is `key`, or [`Kind::Text`] when the schema declares
+/// The kind of the column whose *schema key* is `key`, or [`ValueKind::Text`] when the schema declares
 /// no such column.
 ///
 /// Falling back to text rather than refusing is deliberate: a table's `TableSpec` may carry a
 /// column an overlay declared and this lookup is against the same effective schema, so a miss
 /// means a column resolved by name rather than by key, and a text cell is always writable.
-pub fn kind_for_key(schema: &Value, key: &str) -> Kind {
+pub fn value_kind_for_key(schema: &Value, key: &str) -> ValueKind {
     schema
         .get("objects")
         .and_then(|o| o.get("columns"))
         .and_then(|c| c.get(key))
-        .map(kind_of)
-        .unwrap_or(Kind::Text)
+        .map(value_kind_of)
+        .unwrap_or(ValueKind::Text)
 }
 
 #[cfg(test)]
@@ -169,19 +169,19 @@ mod tests {
     #[rstest]
     // Alphabetical, not document order: `serde_json::Map` is a `BTreeMap` here, and the
     // determinism that buys is what a benchmark tree needs.
-    #[case::levels_under_definition("sex", Kind::OneOf(vec![
+    #[case::levels_under_definition("sex", ValueKind::OneOf(vec![
         "F".into(), "FEMALE".into(), "Female".into(), "M".into(), "MALE".into(), "Male".into(),
         "O".into(), "OTHER".into(), "Other".into(), "f".into(), "female".into(), "m".into(),
         "male".into(), "o".into(), "other".into(),
     ]))]
-    #[case::format_under_definition("age", Kind::Number)]
-    #[case::plain_type("participant_id", Kind::Text)]
-    #[case::plain_integer("index", Kind::Integer)]
+    #[case::format_under_definition("age", ValueKind::Number)]
+    #[case::plain_type("participant_id", ValueKind::Text)]
+    #[case::plain_integer("index", ValueKind::Integer)]
     fn a_columns_kind_comes_from_type_or_the_definition_fallback(
         #[case] key: &str,
-        #[case] expected: Kind,
+        #[case] expected: ValueKind,
     ) {
-        let kind = kind_for_key(&schema(), key);
+        let kind = value_kind_for_key(&schema(), key);
 
         assert_eq!(kind, expected, "column {key}");
     }
@@ -190,7 +190,7 @@ mod tests {
     /// values it sees and a leading `1` would have it guess BIGINT for a DOUBLE column.
     #[test]
     fn a_number_cell_always_carries_a_decimal_point() {
-        let cells: Vec<String> = (0..8).map(|r| cell(&Kind::Number, "x", r)).collect();
+        let cells: Vec<String> = (0..8).map(|r| cell(&ValueKind::Number, "x", r)).collect();
 
         assert!(
             cells.iter().all(|c| c.contains('.')),
@@ -202,7 +202,7 @@ mod tests {
     /// exercises more than one of them.
     #[test]
     fn a_closed_value_set_cycles_across_rows() {
-        let kind = kind_of(&json!({ "enum": ["L", "R"] }));
+        let kind = value_kind_of(&json!({ "enum": ["L", "R"] }));
 
         let cells: Vec<String> = (0..4).map(|r| cell(&kind, "hemi", r)).collect();
 

@@ -172,7 +172,7 @@ async fn overlay_makes_confounds_a_typed_ordered_table() -> anyhow::Result<()> {
 
     // The transform's non-BIDS entities are parsed into generated scans columns.
     let (from, to, mode, suffix): (String, String, String, String) = db.conn.query_row(
-        r#"SELECT "from", "to", "mode", suffix FROM all_files WHERE kind = 'data' AND "from" IS NOT NULL"#,
+        r#"SELECT "from", "to", "mode", suffix FROM all_files WHERE "from" IS NOT NULL"#,
         [],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;

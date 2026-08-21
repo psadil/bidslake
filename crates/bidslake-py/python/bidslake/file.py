@@ -30,7 +30,6 @@ _NON_CONCEPT = frozenset(
         "dataset_id",
         "root_uri",
         "file_path",
-        "kind",
         "status",
         "other_data",
         "HED",
@@ -140,7 +139,7 @@ class BidsFile:
 
     def get_described_by(
         self,
-        kind: str,
+        association_type: str,
         *,
         table: str | None = None,
         order_by: str | None = "row_idx",
@@ -156,9 +155,9 @@ class BidsFile:
         concepts (`lake.get(table="diffusion", sub="01")`); this is the per-file lookup.
 
         Args:
-            kind: The `association_type` of the edge to follow, which also names the table
-                the rows are read from unless `table` overrides it.
-            table: Read the rows from this table instead of the one `kind` names.
+            association_type: The `association_type` of the edge to follow, which also names
+                the table the rows are read from unless `table` overrides it.
+            table: Read the rows from this table instead of the one `association_type` names.
             order_by: Column to sort by; `None` leaves the rows in whatever order the join
                 produces. The default, `row_idx`, is the describing file's own row order.
 
@@ -166,16 +165,18 @@ class BidsFile:
             An empty frame when the catalog has no such table — an adapter's table is absent
             from a catalog built without that adapter, which is an answer, not an error.
         """
-        return self._require_lake()._rows_for(self.file_id, kind, table=table, order_by=order_by)
+        return self._require_lake()._rows_for(
+            self.file_id, association_type, table=table, order_by=order_by
+        )
 
-    def get_associated(self, kind: str | None = None) -> list[BidsFile]:
+    def get_associated(self, association_type: str | None = None) -> list[BidsFile]:
         """Files cross-referenced from this one (fieldmaps, events, …) via `file_associations`.
 
         Args:
-            kind: One `association_type` to filter to. `None` returns every kind.
+            association_type: One `association_type` to filter to. `None` returns every edge.
         """
         return self._require_lake()._associated_for(
-            self.dataset_id, self.root_uri, self.file_id, kind
+            self.dataset_id, self.root_uri, self.file_id, association_type
         )
 
     def related_datasets(self, relation: Relation | str | None = None) -> list[str]:

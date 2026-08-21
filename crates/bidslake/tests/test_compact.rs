@@ -91,7 +91,7 @@ async fn compact_preserves_everything_and_reclaims_space() -> anyhow::Result<()>
     // Generated (virtual) columns are re-derived, not copied — `SELECT *` on the
     // source would have included them and the INSERT would have been rejected.
     let with_task: i64 = db.conn.query_row(
-        "SELECT count(*) FROM all_files WHERE kind = 'data' AND task IS NOT NULL",
+        "SELECT count(*) FROM all_files WHERE task IS NOT NULL",
         [],
         |r| r.get(0),
     )?;

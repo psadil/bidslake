@@ -65,14 +65,14 @@ def test_the_effective_schema_carries_the_overlays_rules(aug_lake) -> None:
 
 
 def test_the_preprocessed_image_is_found_by_its_base_entities(aug_lake) -> None:
-    # `kind` because `get` iterates the whole registry: the image and its sidecar share
-    # every entity, and which of them you want is the caller's to say.
-    files = list(aug_lake.get(desc="preproc", suffix="bold", kind="data"))
+    # `extension` because `get` iterates the whole registry: the image and its sidecar
+    # share every entity, and which of them you want is the caller's to say.
+    files = list(aug_lake.get(desc="preproc", suffix="bold", extension=".nii.gz"))
 
     assert len(files) == 1
 
 
-def test_without_kind_the_sidecar_is_a_row_too(aug_lake) -> None:
+def test_without_a_discriminating_filter_the_sidecar_is_a_row_too(aug_lake) -> None:
     files = list(aug_lake.get(desc="preproc", suffix="bold"))
 
     assert len(files) == 2

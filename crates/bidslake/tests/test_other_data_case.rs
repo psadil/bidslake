@@ -32,7 +32,6 @@ fn db() -> anyhow::Result<(BidsDb, Schema)> {
             "dataset_id": "d",
             "root_uri": "file:///r",
             "file_path": FILE,
-            "kind": "data",
         }),
     )?;
     Ok((db, schema))

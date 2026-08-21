@@ -107,7 +107,6 @@ COLUMNS: dict[str, dict[str, str]] = {
         "dataset_id": "VARCHAR",
         "root_uri": "VARCHAR",
         "file_path": "VARCHAR",
-        "kind": "VARCHAR",
         "status": "VARCHAR",
         "size_bytes": "UBIGINT",
         "mtime_ns": "BIGINT",
@@ -377,7 +376,6 @@ COLUMNS: dict[str, dict[str, str]] = {
         "dataset_id": "VARCHAR",
         "root_uri": "VARCHAR",
         "file_path": "VARCHAR",
-        "kind": "VARCHAR",
         "status": "VARCHAR",
         "size_bytes": "UBIGINT",
         "mtime_ns": "BIGINT",
@@ -1048,7 +1046,6 @@ class C:
         dataset_id: pl.Expr = pl.col("dataset_id")
         root_uri: pl.Expr = pl.col("root_uri")
         file_path: pl.Expr = pl.col("file_path")
-        kind: pl.Expr = pl.col("kind")
         status: pl.Expr = pl.col("status")
         size_bytes: pl.Expr = pl.col("size_bytes")
         mtime_ns: pl.Expr = pl.col("mtime_ns")
@@ -1318,7 +1315,6 @@ class C:
         dataset_id: pl.Expr = pl.col("dataset_id")
         root_uri: pl.Expr = pl.col("root_uri")
         file_path: pl.Expr = pl.col("file_path")
-        kind: pl.Expr = pl.col("kind")
         status: pl.Expr = pl.col("status")
         size_bytes: pl.Expr = pl.col("size_bytes")
         mtime_ns: pl.Expr = pl.col("mtime_ns")

@@ -22,7 +22,7 @@ engine:
     lake.sql(
         select(AllFiles.file_path, Sidecars.RepetitionTime)
         .join(Sidecars, Sidecars.file_id == AllFiles.file_id)
-        .where(AllFiles.task == "rest", AllFiles.kind == "data")
+        .where(AllFiles.task == "rest", AllFiles.extension == ".nii.gz")
     )
 
 Beyond those two ways in: `sibling`, `sibling_path` and `unresolved` answer "which other
