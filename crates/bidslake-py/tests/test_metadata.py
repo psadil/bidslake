@@ -173,3 +173,18 @@ def test_no_bare_metadata_column_leaks(files_view_columns):
     joined source.
     """
     assert "RepetitionTime" not in files_view_columns
+
+
+def test_files_spans_every_walked_file(lake):
+    """`files` is the whole registry widened, not a data-file subset.
+
+    One row per `all_files` row — sidecars, tabular files and documentation included, with
+    their joined columns simply NULL — and the caller narrows with `extension`. (It was
+    once filtered to data files; this pins the widening.)
+    """
+    files = lake.files.pl()
+
+    assert files.height == lake.all_files.pl().height
+    assert files.filter(files["extension"] == ".json").height > 0, (
+        "sidecar rows belong to the wide view too"
+    )

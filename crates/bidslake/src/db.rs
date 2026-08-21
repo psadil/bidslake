@@ -220,19 +220,23 @@ impl BidsDb {
     /// Tables are created `IF NOT EXISTS`, so `file_registry` keeps the shape the *first*
     /// run gave it — while datasets are meant to accumulate across runs (ADR 0002). A
     /// second run needing a physical column the registry lacks would drop it silently. A
-    /// column the *catalog* has that this run does not write (a registry written by an older
-    /// bidslake — e.g. the removed `kind`) would instead break the staged upsert, whose
-    /// `INSERT … SELECT *` is positional: an arity error at flush time, long after the walk,
-    /// with nothing naming the actual mismatch. Both directions are refused here, up front.
+    /// column the *catalog* has that this run does not write — a registry written by an
+    /// older bidslake (the removed `kind`), or one written with adapters this run does not
+    /// name (`projected`) — would instead break the staged upsert: its stage is created
+    /// `AS SELECT * FROM` the physical table, so the appender feeds one value per column
+    /// *this run* writes into a wider stage and errors on the first row, after the whole
+    /// walk, naming neither the column nor a remedy. Both directions are refused here,
+    /// up front.
     ///
     /// Only the *physical* shape is frozen. The BIDS-concept columns are select items
     /// of the `all_files` view, emitted `CREATE OR REPLACE`, so a wider run redefines them
     /// retroactively for rows already stored and needs no refusal (ADR 0006).
     ///
-    /// The remedy for a missing column is that the adapter set describes the **catalog**,
-    /// not the dataset being added: name every adapter the catalog uses on every run, or
-    /// index into a fresh one. For an extra column the catalog predates this bidslake's
-    /// registry shape, and the remedy is to re-index into a new catalog.
+    /// The remedy for `projected` (either direction) is that the adapter set describes the
+    /// **catalog**, not the dataset being added: name every adapter the catalog uses on
+    /// every run, or index into a fresh one. For any other extra column the catalog
+    /// predates this bidslake's registry shape, and the remedy is to re-index into a new
+    /// catalog.
     fn check_registry_shape(&self, schema: &Schema) -> Result<()> {
         let exists: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM duckdb_tables() WHERE table_name = 'file_registry'",
@@ -266,15 +270,20 @@ impl BidsDb {
             )
         }
         let want: std::collections::HashSet<&String> = want.iter().collect();
-        // `projected` is the one legitimately optional physical column: a catalog built with
-        // term maps stays openable by a plain run (the pinned narrowing allowance, with the
-        // caveat ADR 0006 records). Anything else extra is another release's registry shape.
-        let mut extra: Vec<&String> = have
-            .iter()
-            .filter(|c| !want.contains(c) && c.as_str() != "projected")
-            .collect();
+        let mut extra: Vec<&String> = have.iter().filter(|c| !want.contains(c)).collect();
         if !extra.is_empty() {
             extra.sort();
+            // `projected` extra means the catalog was built WITH adapters and this run names
+            // none (or fewer). The run could get as far as the registry write and would then
+            // die in the appender (see above), so refuse it with the remedy instead.
+            if extra.len() == 1 && extra[0] == "projected" {
+                anyhow::bail!(
+                    "this catalog's `file_registry` carries `projected`, which a run without \
+                     a term map does not write. The adapter set describes the catalog rather \
+                     than one dataset: pass every adapter this catalog uses on every index \
+                     run (order does not matter), or index into a new catalog."
+                )
+            }
             anyhow::bail!(
                 "this catalog's `file_registry` carries {}, which this bidslake does not \
                  write — the catalog was built by an older release with a different registry \

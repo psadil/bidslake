@@ -425,11 +425,14 @@ async fn cataloged_projection_reaches_the_registry() -> anyhow::Result<()> {
     // Every cataloged file carries its term map's `datatype`, not just the segmentations.
     // The fs_stats ingestion rule selects on suffix alone, so a mapping that forgot its
     // `datatype` would still be read — and be visible only here, as a keeper that a
-    // `datatype IS NOT NULL` query can no longer find.
+    // `datatype IS NOT NULL` query can no longer find. The keeper directories are spelled
+    // out (mri/surf/stats/label) so the aparc and label mappings are covered, not only the
+    // files whose rows land in `freesurfer_aseg`.
     let missing: i64 = db.conn.query_row(
         "SELECT COUNT(*) FROM all_files f \
          WHERE f.datatype IS NULL \
            AND (f.file_path LIKE '%/mri/%' OR f.file_path LIKE '%/surf/%' \
+                OR f.file_path LIKE '%/stats/%' OR f.file_path LIKE '%/label/%' \
                 OR EXISTS (SELECT 1 FROM freesurfer_aseg t WHERE t.file_id = f.file_id))",
         [],
         |r| r.get(0),
@@ -645,13 +648,17 @@ async fn recognized_bookkeeping_files_are_not_cataloged(
     write_fs_tree(dir.path());
     let db = ingest_with_adapters(dir.path(), &["freesurfer"]).await?;
 
+    // `datatype` alone would be tautological here — the scripts/touch mappings project
+    // none, whatever the ingestion decides — so `status` carries the sensitivity: a rule
+    // that started cataloging (or reading) these files would stamp `on_disk`/`ingested`.
     let n: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM all_files WHERE datatype IS NOT NULL AND file_path LIKE ?",
+        "SELECT COUNT(*) FROM all_files \
+         WHERE (datatype IS NOT NULL OR status IS NOT NULL) AND file_path LIKE ?",
         [pattern],
         |r| r.get(0),
     )?;
 
-    assert_eq!(n, 0, "{pattern} must not reach scans");
+    assert_eq!(n, 0, "{pattern} must not be cataloged");
     Ok(())
 }
 

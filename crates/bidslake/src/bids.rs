@@ -2043,6 +2043,14 @@ impl BidsParser {
                     file_path: rel_path.to_string(),
                     projected: projected_json(&facts),
                 });
+                // A cataloged file is deliberately left on disk, contents unread — record
+                // that outcome the way the BIDS-path `catalog` arm does. It is also what
+                // keeps a *cataloged* file distinguishable in the registry from one the
+                // term map merely recognized (disposition `None`, NULL status).
+                if disposition == Some(Disposition::Catalog) {
+                    self.walk_status
+                        .insert(rel_path.to_string(), TabularStatus::OnDisk);
+                }
             }
             // `ignore` is the deliberate opt-out and gets no row at all; a file no rule
             // claimed still belongs in the manifest.

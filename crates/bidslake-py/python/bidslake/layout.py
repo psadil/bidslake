@@ -190,9 +190,10 @@ class BidsLake:
     def files(self) -> Table:
         """One row per walked file, widened with sidecar/participant/dataset columns.
 
-        The whole registry — narrow with `extension`/`datatype` when you mean only the
-        primary data files (a non-data file's `sidecar__*`/`scan__*` columns are simply
-        NULL). Hides the joins (sidecars and scans by `file_id`; files↔participants by
+        The whole registry — narrow with `extension` when you mean only the primary data
+        files (`datatype` does not discriminate: a sidecar sits in the same datatype
+        directory as its image; a non-data file's `sidecar__*`/`scan__*` columns are
+        simply NULL). Hides the joins (sidecars and scans by `file_id`; files↔participants by
         `sub`/path-prefix). Joined-table columns are namespaced
         `sidecar__*`/`participant__*`/`dataset__*`/`scan__*` (BIDS's own `__` convention) so
         they never collide with the registry's own columns.

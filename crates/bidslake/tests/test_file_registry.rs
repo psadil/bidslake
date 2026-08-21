@@ -4,7 +4,7 @@
 //! points at. `all_files` is that registry widened with the generated BIDS-concept columns —
 //! which live on the *view* rather than the base table, so widening the concept set is a
 //! `CREATE OR REPLACE VIEW` rather than a table rebuild. "Just the data files" is an
-//! `extension`/`datatype` predicate spelled by the caller, not a second view.
+//! `extension` predicate spelled by the caller, not a second view.
 
 mod common;
 

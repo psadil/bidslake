@@ -83,7 +83,7 @@
 //!   BrainVision `.vhdr`+`.vmrk`+`.eeg` — still get a row each.)
 //! - **`all_files`** (VIEW) — `file_registry` widened with the BIDS-concept columns
 //!   (see below). The query surface; every walked file is a row, and "just the data
-//!   files" is an `extension`/`datatype` predicate spelled by the caller
+//!   files" is an `extension` predicate spelled by the caller
 //!   (`bidslake-py`'s `get()` likewise iterates the whole view unless narrowed).
 //! - **`participants`** — one row per subject. PK `(dataset_id, participant_id)`.
 //!   Columns from the BIDS participants schema (`age`, `sex`, `handedness`, …).

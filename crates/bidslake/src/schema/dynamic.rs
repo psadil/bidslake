@@ -679,8 +679,9 @@ impl Schema {
                 concepts.join(",\n         ")
             ),
         );
-        // The one view. "Just the data files" is an `extension`/`datatype` predicate spelled
-        // by the caller — short enough not to earn a second view that could drift from this
+        // The one view. "Just the data files" is an `extension` predicate spelled by the
+        // caller (`datatype` does not discriminate: a sidecar sits in its image's datatype
+        // directory) — short enough not to earn a second view that could drift from this
         // one's concept expressions.
     }
 

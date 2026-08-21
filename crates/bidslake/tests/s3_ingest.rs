@@ -106,10 +106,11 @@ async fn s3_full_ingest_ds000001() -> anyhow::Result<()> {
     // Every tabular file must be recorded as ingested (materialize no longer fails).
     // Scoped to the tabular extensions explicitly: a file bidslake never tried to read has a
     // NULL `status`, and `NULL <> 'ingested'` would silently exclude it rather than fail.
+    // (`all_files`, not `file_registry`: `extension` is a select item of the view.)
     let skipped: i64 = db
         .conn
         .query_row(
-            "SELECT count(*) FROM file_registry \
+            "SELECT count(*) FROM all_files \
              WHERE extension IN ('.tsv', '.tsv.gz') AND status IS DISTINCT FROM 'ingested' \
                                     AND status IS DISTINCT FROM 'on_disk'",
             [],
