@@ -1128,7 +1128,7 @@ fn check_input_supported(input: &str) -> Result<()> {
     if input.starts_with("s3://") {
         anyhow::bail!(
             "cannot index {input}: this bidslake was built without the `s3` feature. \
-             Rebuild with `--features s3` (the default), or pass a local directory."
+             Rebuild with `--features s3`, or pass a local directory."
         );
     }
     Ok(())

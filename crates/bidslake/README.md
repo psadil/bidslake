@@ -32,19 +32,19 @@ If you cloned without `--recurse-submodules`, fetch the test corpus with:
 git submodule update --init
 ```
 
-### Building without S3
+### Building with S3
 
-Reading datasets from `s3://` is the `s3` feature, on by default. If you only ever
-index local datasets, turning it off drops the AWS SDK — most of the dependency tree,
-and none of it on the local path:
+Reading datasets from `s3://` is the `s3` feature, off by default: the AWS SDK behind
+it is most of the dependency tree, and none of it runs on the local path. Opt in to
+index straight from S3:
 
 ```bash
-cargo build --release --no-default-features
+cargo build --release --features s3
 ```
 
-Everything else is unchanged; DuckDB's httpfs extension, which is what actually reads
-`s3://` tabular files, is part of the bundled engine either way. An `s3://` input is then
-refused with an explanation rather than mistaken for a directory name.
+DuckDB's httpfs extension, which is what actually reads `s3://` tabular files, is part
+of the bundled engine either way. Without the feature, an `s3://` input is refused with
+an explanation rather than mistaken for a directory name.
 
 ## Quickstart
 
@@ -56,7 +56,7 @@ cargo run --release -- index \
     --output dataset.duckdb
 ```
 
-The input may also be an S3 URI (`s3://bucket/prefix`); pass `--no-sign-request` for anonymous access to public buckets like OpenNeuro. S3 ingest is full-fidelity: object listing and JSON metadata go through the AWS SDK, and `.tsv` contents stream straight into DuckDB via its `httpfs` extension — so working with a dataset on S3 is the same as one on local disk. (The first S3 ingest runs `INSTALL httpfs`, which needs network; the region comes from `AWS_REGION`, default `us-east-1`.)
+With the `s3` feature (see above), the input may also be an S3 URI (`s3://bucket/prefix`); pass `--no-sign-request` for anonymous access to public buckets like OpenNeuro. S3 ingest is full-fidelity: object listing and JSON metadata go through the AWS SDK, and `.tsv` contents stream straight into DuckDB via its `httpfs` extension — so working with a dataset on S3 is the same as one on local disk. (The first S3 ingest runs `INSTALL httpfs`, which needs network; the region comes from `AWS_REGION`, default `us-east-1`.)
 
 Then open it and query:
 

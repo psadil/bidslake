@@ -30,8 +30,10 @@ duckdb = { workspace = true }
 arrow = { version = "58", features = ["ipc"] }
 anyhow = { workspace = true }
 # Used by the `emit-types` bin to reuse the exact schema/DDL model (no Python
-# port of the naming/type logic).
-bidslake = { path = "../bidslake" }
+# port of the naming/type logic). `default-features = false` so no CLI default
+# ever rides into a Python build: this crate only queries, and ingestion — the
+# S3 client included — is the CLI's job.
+bidslake = { path = "../bidslake", default-features = false }
 bids-schema = { path = "../bids-schema" }
 serde_json = { workspace = true }
 uuid = { workspace = true }

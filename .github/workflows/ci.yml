@@ -35,6 +35,12 @@ jobs:
         run: cargo fmt --all -- --check
       - name: cargo clippy
         run: cargo clippy --all-targets -- -D warnings
+      - name: cargo clippy (all features)
+        # `s3` is opt-in, so the plain run above no longer compiles the S3
+        # backend, its network tests, or its bench arm. Those tests are all
+        # #[ignore] (they need the network), so compile-and-lint is the
+        # coverage CI can hold for that code — this pass is it.
+        run: cargo clippy --all-targets --all-features -- -D warnings
       - name: cargo test
         # Default-members only (excludes the maturin bidslake-py crate). The
         # whole-corpus tests — the bids-examples smoke test and the tabular

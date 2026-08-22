@@ -709,7 +709,7 @@ impl BidsParser {
         if self.s3_httpfs.is_some() {
             anyhow::bail!(
                 "an S3 configuration was supplied, but this bidslake was built without \
-                 the `s3` feature; rebuild with `--features s3` (the default)"
+                 the `s3` feature; rebuild with `--features s3`"
             );
         }
         Ok(())

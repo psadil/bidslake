@@ -3,7 +3,7 @@
 //! [`BidsFileSystem`] lets the parser walk and read a dataset without caring
 //! whether it lives on local disk ([`LocalFileSystem`]) or in S3 (`s3::S3Client`, present
 //! only with the `s3` feature — hence a plain span rather than a link, which would dangle in
-//! a `--no-default-features` build). All paths returned by `walk` are relative to the
+//! the default build). All paths returned by `walk` are relative to the
 //! dataset root.
 
 use anyhow::{Context as _, Result};

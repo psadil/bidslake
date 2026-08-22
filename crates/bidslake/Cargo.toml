@@ -34,15 +34,15 @@ name = "ingest"
 harness = false
 
 [features]
-default = ["s3"]
+default = []
 
 # Ingest datasets straight from S3 (`bidslake index -i s3://bucket/prefix`).
 #
-# On by default, so nothing changes unless you ask. `--no-default-features` drops
-# the AWS SDK — a large dependency tree that a purely local install never
-# executes — leaving a smaller binary and a much shorter build. Without it, an
-# `s3://` input is refused with an explanation rather than being mistaken for a
-# relative directory.
+# Opt-in (`--features s3`): the AWS SDK behind it is a large dependency tree —
+# twenty-five `aws-*` crates, including the cmake-built `aws-lc-sys` — that a
+# purely local install never executes, so leaving it out means a smaller binary
+# and a much shorter build. Without the feature, an `s3://` input is refused
+# with an explanation rather than being mistaken for a relative directory.
 #
 # Only the `aws-sdk-s3` client is behind the feature. DuckDB's httpfs extension,
 # which is what actually reads `s3://` tabular files, is part of the bundled

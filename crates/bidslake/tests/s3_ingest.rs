@@ -4,7 +4,7 @@
 //!
 //! These hit the network and the DuckDB httpfs extension (installed on first
 //! use), so they are `#[ignore]` — run explicitly:
-//!   `cargo test -p bidslake --test s3_ingest -- --ignored`
+//!   `cargo test -p bidslake --features s3 --test s3_ingest -- --ignored`
 //! Anonymous/unsigned access is used, so no AWS credentials are required.
 //!
 //! The whole file is behind the `s3` feature: without it there is no S3 backend to
