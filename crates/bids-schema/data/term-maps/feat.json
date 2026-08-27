@@ -3,6 +3,16 @@
   "BIDSMapVersion": "0.1.0",
   "Mappings": [
     {
+      "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/fix/features\\.csv",
+      "Entities": {
+        "desc": "fix"
+      },
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "metrics"
+      }
+    },
+    {
       "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/fix/[^/]+",
       "Concepts": {
         "datatype": "func"
@@ -85,6 +95,36 @@
       "Concepts": {
         "datatype": "func",
         "suffix": "components"
+      }
+    },
+    {
+      "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/filtered_func_data\\.ica/melodic_FTmix",
+      "Entities": {
+        "desc": "MELODIC"
+      },
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "spectrum"
+      }
+    },
+    {
+      "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/filtered_func_data\\.ica/melodic_ICstats",
+      "Entities": {
+        "desc": "MELODIC"
+      },
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "metrics"
+      }
+    },
+    {
+      "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/filtered_func_data\\.ica/mean\\.nii\\.gz",
+      "Entities": {
+        "desc": "mean"
+      },
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "boldref"
       }
     },
     {

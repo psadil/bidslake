@@ -79,6 +79,50 @@
       },
       "Description": "Component spatial maps before thresholding."
     },
+    "melodic_ftmix": {
+      "Template": "filtered_func_data.ica/melodic_FTmix",
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "spectrum"
+      },
+      "Entities": {
+        "desc": "MELODIC"
+      },
+      "Description": "Power spectrum of each component's time course: one column per component, one row per positive-frequency bin of a zero-padded FFT."
+    },
+    "melodic_icstats": {
+      "Template": "filtered_func_data.ica/melodic_ICstats",
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "metrics"
+      },
+      "Entities": {
+        "desc": "MELODIC"
+      },
+      "Description": "Per-component variance table: explained variance and total variance percentages, one row per component."
+    },
+    "melodic_mean": {
+      "Template": "filtered_func_data.ica/mean.nii.gz",
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "boldref"
+      },
+      "Entities": {
+        "desc": "mean"
+      },
+      "Description": "Temporal mean of the decomposed series — the background a melodic-style viewer draws component maps over."
+    },
+    "fix_features": {
+      "Template": "fix/features.csv",
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "metrics"
+      },
+      "Entities": {
+        "desc": "fix"
+      },
+      "Description": "The per-component feature matrix FIX classifies from: a header row of feature names, then one row per component."
+    },
     "motion_params": {
       "Template": "mc/prefiltered_func_data_mcf.par",
       "Concepts": {

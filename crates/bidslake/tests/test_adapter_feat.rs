@@ -41,8 +41,15 @@ fn write_feat_tree(root: &Path) {
         ("filtered_func_data_clean_vn.nii.gz", b"nii"),
         ("mask.nii.gz", b"nii"),
         ("filtered_func_data.ica/melodic_mix", b"1 2\n3 4\n"),
+        ("filtered_func_data.ica/melodic_FTmix", b"1 2\n3 4\n"),
+        (
+            "filtered_func_data.ica/melodic_ICstats",
+            b"9.1 2.3\n8.2 1.9\n",
+        ),
         ("filtered_func_data.ica/melodic_IC.nii.gz", b"nii"),
         ("filtered_func_data.ica/melodic_oIC.nii.gz", b"nii"),
+        ("filtered_func_data.ica/mean.nii.gz", b"nii"),
+        ("fix/features.csv", b"a,b\n1,2\n"),
         (MCF_PAR_PATH, MCF_PAR),
         ("fix4melview_UKBiobank_thr1.txt", b"1, Signal\n"),
         ("fix4melview_UKBiobank_thr1_psadil.txt", b"1, Signal\n"),
@@ -63,7 +70,6 @@ fn write_feat_tree(root: &Path) {
         // -- scratch: everything below must be ignored --------------------------------
         ("fix/icmap0.nii.gz", b"nii"),
         ("fix/edge1.nii.gz", b"nii"),
-        ("fix/features.csv", b"a,b\n"),
         ("mc/prefiltered_func_data_mcf_conf.nii.gz", b"nii"),
         ("filtered_func_data.ica/melodic_pcaD", b"junk"),
         ("filtered_func_data.ica/eigenvalues_percent", b"junk"),
@@ -92,10 +98,14 @@ fn write_feat_tree_with_par(root: &Path, par: &[u8]) {
 // The mask is the one slot both units write, so it is the only count above one.
 #[case("mask", "brain", 2)]
 #[case("mixing", "MELODIC", 1)]
+#[case("spectrum", "MELODIC", 1)]
+#[case("metrics", "MELODIC", 1)]
+#[case("metrics", "fix", 1)]
 #[case("timeseries", "motion", 1)]
 #[case("components", "IC", 1)]
 #[case("components", "oIC", 1)]
 #[case("boldref", "exfunc", 1)]
+#[case("boldref", "mean", 1)]
 #[case("dseg", "pveseg", 1)]
 #[case("T1w", "standard", 1)]
 #[case("T1w", "brain", 1)]
@@ -247,7 +257,8 @@ async fn an_underscored_training_set_still_classifies() -> anyhow::Result<()> {
 /// as stray BIDS files) and then dropped — otherwise a single run contributes hundreds of
 /// meaningless registry rows.
 #[rstest]
-#[case("%/fix/%")]
+#[case("%/fix/icmap0.nii.gz")]
+#[case("%/fix/edge1.nii.gz")]
 #[case("%/mc/prefiltered_func_data_mcf_conf.nii.gz")]
 #[case("%/melodic_pcaD")]
 #[case("%/eigenvalues_percent")]
@@ -462,11 +473,15 @@ async fn trans_x_is_one_column_across_producers(#[case] table: &str) -> anyhow::
     Ok(())
 }
 
-/// `mc/` and `filtered_func_data.ica/` hold one keeper each amongst the scratch, so the
+/// `mc/`, `fix/` and `filtered_func_data.ica/` hold keepers amongst the scratch, so the
 /// ignore rules must discriminate within a directory rather than by prefix alone.
 #[rstest]
 #[case("%/mc/prefiltered_func_data_mcf.par")]
 #[case("%/melodic_mix")]
+#[case("%/melodic_FTmix")]
+#[case("%/melodic_ICstats")]
+#[case("%/filtered_func_data.ica/mean.nii.gz")]
+#[case("%/fix/features.csv")]
 #[tokio::test]
 async fn a_keeper_beside_the_scratch_survives(#[case] keeper: &str) -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;

@@ -24,6 +24,10 @@ FEAT_ROLES = (
     "filtered_func_clean",
     "mask",
     "melodic_mix",
+    "melodic_ftmix",
+    "melodic_icstats",
+    "melodic_mean",
+    "fix_features",
     "motion_params",
     "classification",
     "example_func",
@@ -52,7 +56,7 @@ def test_the_layout_names_its_term_map(feat: bidslake.Layout) -> None:
 # -- rendering ---------------------------------------------------------------
 #
 # The roles needing no bindings are rendered from `under()` alone; this is also what pins
-# that the 21 such roles keep working when nothing is bound.
+# that the 25 such roles keep working when nothing is bound.
 
 
 @pytest.mark.parametrize(

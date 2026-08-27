@@ -53,6 +53,16 @@
         "value": "classification",
         "display_name": "Component classification",
         "description": "A labelling of a decomposition's components (e.g. signal versus noise), produced automatically or by a rater.\n"
+      },
+      "spectrum": {
+        "value": "spectrum",
+        "display_name": "Component power spectra",
+        "description": "The power spectra of a decomposition's components: one column per component, one row per frequency bin.\n"
+      },
+      "metrics": {
+        "value": "metrics",
+        "display_name": "Component metrics",
+        "description": "Scalar metrics describing a decomposition's components, one row per component (e.g. MELODIC's explained-variance table, FIX's classifier features).\n"
       }
     },
     "extensions": {

@@ -313,7 +313,7 @@ knowing which roles are special:
 
 ```python
 out = bidslake.layout("feat").under(dst / stem, training="UKBiobank", threshold="1", rater="ab")
-[out[role] for role in out.layout.roles]             # all 23, no special-casing
+[out[role] for role in out.layout.roles]             # all 27, no special-casing
 ```
 
 A layout is a separate artifact from the adapter's term map rather than that term map run
