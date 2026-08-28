@@ -19,11 +19,17 @@
       "reader": "matrix"
     },
     {
+      "selectors": ["suffix == \"metrics\"", "extension == null"],
+      "disposition": "read",
+      "reader": "matrix"
+    },
+    {
       "selectors": ["intersects([datatype], [\"func\", \"anat\"])"],
       "disposition": "catalog"
     }
   ],
   "tables": {
-    "feat_motion": { "ordered": true }
+    "feat_motion": { "ordered": true },
+    "feat_icstats": { "ordered": true }
   }
 }

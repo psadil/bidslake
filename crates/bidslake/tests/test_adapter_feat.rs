@@ -23,6 +23,16 @@ const BARE: &str = "sub-02_task-cuff_desc-preproc_bold";
 /// Where the motion parameters sit inside a unit.
 const MCF_PAR_PATH: &str = "mc/prefiltered_func_data_mcf.par";
 
+/// Where the per-component variance table sits inside a unit.
+const ICSTATS_PATH: &str = "filtered_func_data.ica/melodic_ICstats";
+
+/// Two components of ICstats in `melodic`'s own output format (double-space separated,
+/// trailing pair before the newline), columns in the order its report prints them:
+/// % of explained variance, % of total variance, then % signal change at the positive
+/// and negative peak voxels. Explained > total (the PCA kept less than everything) and
+/// the last column negative — so a read that scrambled the order fails on the values.
+const ICSTATS: &[u8] = b"57.2  24.8  12.3  -8.1  \n42.8  18.6  9.9  -5.5  \n";
+
 /// Three volumes of motion in `mcflirt`'s own output format: fields separated by two spaces
 /// with a trailing pair before the newline, values at the default `ostream` precision of six
 /// significant figures (so a small one prints in scientific notation), and rotations — the
@@ -42,10 +52,7 @@ fn write_feat_tree(root: &Path) {
         ("mask.nii.gz", b"nii"),
         ("filtered_func_data.ica/melodic_mix", b"1 2\n3 4\n"),
         ("filtered_func_data.ica/melodic_FTmix", b"1 2\n3 4\n"),
-        (
-            "filtered_func_data.ica/melodic_ICstats",
-            b"9.1 2.3\n8.2 1.9\n",
-        ),
+        (ICSTATS_PATH, ICSTATS),
         ("filtered_func_data.ica/melodic_IC.nii.gz", b"nii"),
         ("filtered_func_data.ica/melodic_oIC.nii.gz", b"nii"),
         ("filtered_func_data.ica/mean.nii.gz", b"nii"),
@@ -88,6 +95,12 @@ fn write_feat_tree(root: &Path) {
 fn write_feat_tree_with_par(root: &Path, par: &[u8]) {
     write_feat_tree(root);
     write(root, &format!("{UNIT}/{MCF_PAR_PATH}"), par);
+}
+
+/// The same tree with a different ICstats, for the shorter legitimate variants.
+fn write_feat_tree_with_icstats(root: &Path, icstats: &[u8]) {
+    write_feat_tree(root);
+    write(root, &format!("{UNIT}/{ICSTATS_PATH}"), icstats);
 }
 
 /// Each FEAT slot is reachable by what it *is*, not by where it sits.
@@ -447,6 +460,106 @@ async fn reindexing_does_not_duplicate_motion_rows() -> anyhow::Result<()> {
         .query_row("SELECT COUNT(*) FROM feat_motion", [], |r| r.get(0))?;
 
     assert_eq!(rows, 3, "a re-index replaces the file's rows");
+    Ok(())
+}
+
+/// The per-component variance table is a table too: `melodic_ICstats` is read by the same
+/// `matrix` engine as the motion parameters, one row per component.
+#[tokio::test]
+async fn icstats_are_read_into_a_table() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_feat_tree(dir.path());
+    let db = ingest_with_adapters(dir.path(), &["feat"]).await?;
+
+    let rows: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM feat_icstats", [], |r| r.get(0))?;
+
+    assert_eq!(rows, 2, "one row per component in melodic_ICstats");
+    Ok(())
+}
+
+/// Nothing in the file says which column is which, so the mapping is the declared order —
+/// which is the order MELODIC's own report prints (melreport.cc): % of explained variance,
+/// % of total variance, then the % signal change at the positive and negative peak voxels.
+#[rstest]
+#[case("explained_variance", 57.2)]
+#[case("total_variance", 24.8)]
+#[case("signal_change_pos", 12.3)]
+#[case("signal_change_neg", -8.1)]
+#[tokio::test]
+async fn icstats_columns_follow_melodics_report_order(
+    #[case] column: &str,
+    #[case] want: f64,
+) -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_feat_tree(dir.path());
+    let db = ingest_with_adapters(dir.path(), &["feat"]).await?;
+
+    let got: f64 = db.conn.query_row(
+        &format!("SELECT {column} FROM feat_icstats WHERE row_idx = 0"),
+        [],
+        |r| r.get(0),
+    )?;
+
+    assert!((got - want).abs() < 1e-12, "{column}: {got} != {want}");
+    Ok(())
+}
+
+/// `row_idx` is the component ordinal (IC number − 1) — the key that joins a row to the
+/// component's spatial map and mixing-matrix column.
+#[tokio::test]
+async fn icstats_row_idx_is_the_component_ordinal() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_feat_tree(dir.path());
+    let db = ingest_with_adapters(dir.path(), &["feat"]).await?;
+
+    let trace: Vec<(i64, f64)> = db
+        .conn
+        .prepare("SELECT row_idx, explained_variance FROM feat_icstats ORDER BY row_idx")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+
+    assert_eq!(trace, vec![(0, 57.2), (1, 42.8)]);
+    Ok(())
+}
+
+/// MELODIC writes the signal-change pair only when the data are still in memory
+/// (`meldata.cc` guards on `Data.Storage()`), so a two-column file is a legitimate
+/// variant, not a malformed one: the missing trailing fields read as NULL and the
+/// row keeps its variance columns.
+#[tokio::test]
+async fn a_two_column_icstats_leaves_the_conditional_pair_null() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_feat_tree_with_icstats(dir.path(), b"57.2  24.8  \n42.8  18.6  \n");
+    let db = ingest_with_adapters(dir.path(), &["feat"]).await?;
+
+    let (total, sig_pos): (f64, Option<f64>) = db.conn.query_row(
+        "SELECT total_variance, signal_change_pos FROM feat_icstats WHERE row_idx = 0",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+
+    assert_eq!((total, sig_pos), (24.8, None));
+    Ok(())
+}
+
+/// `fix/features.csv` shares the `metrics` suffix but carries a header and a site-varying
+/// column set; the extension selector is what keeps it cataloged on disk rather than read
+/// into `feat_icstats`.
+#[tokio::test]
+async fn fix_features_stay_cataloged_not_read() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    write_feat_tree(dir.path());
+    let db = ingest_with_adapters(dir.path(), &["feat"]).await?;
+
+    let status: String = db.conn.query_row(
+        "SELECT status FROM file_registry WHERE file_path LIKE '%/fix/features.csv'",
+        [],
+        |r| r.get(0),
+    )?;
+
+    assert_eq!(status, "on_disk");
     Ok(())
 }
 

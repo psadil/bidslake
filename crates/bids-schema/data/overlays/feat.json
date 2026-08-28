@@ -113,6 +113,30 @@
         "display_name": "Rotation (z)",
         "description": "Estimated framewise rotation about the z axis (radians).\n",
         "type": "number"
+      },
+      "explained_variance__icstats": {
+        "name": "explained_variance",
+        "display_name": "Explained variance (%)",
+        "description": "The component's share of the variance the decomposition retained, as a percentage (MELODIC's report calls this '% of explained variance').\n",
+        "type": "number"
+      },
+      "total_variance__icstats": {
+        "name": "total_variance",
+        "display_name": "Total variance (%)",
+        "description": "The component's share of the total data variance: explained variance scaled by the fraction of variance the PCA subspace kept (MELODIC's report calls this '% of total variance').\n",
+        "type": "number"
+      },
+      "signal_change_pos__icstats": {
+        "name": "signal_change_pos",
+        "display_name": "Signal change at positive peak (%)",
+        "description": "Percent signal change of the fitted component at the voxel where its spatial map is maximal (MELODIC's report calls this '% signal change (pos peak voxel)'). MELODIC writes this pair only when the data are in memory, so a two-column file leaves it NULL.\n",
+        "type": "number"
+      },
+      "signal_change_neg__icstats": {
+        "name": "signal_change_neg",
+        "display_name": "Signal change at negative peak (%)",
+        "description": "Percent signal change of the fitted component at the voxel where its spatial map is minimal, negated (MELODIC's report calls this '% signal change (peak neg. voxel)').\n",
+        "type": "number"
       }
     }
   },
@@ -141,6 +165,26 @@
             "trans_x__confounds": "required",
             "trans_y__confounds": "required",
             "trans_z__confounds": "required"
+          }
+        },
+        "feat_icstats": {
+          "selectors": [
+            "datatype == \"func\"",
+            "suffix == \"metrics\"",
+            "extension == null"
+          ],
+          "additional_columns": "not_allowed",
+          "initial_columns": [
+            "explained_variance__icstats",
+            "total_variance__icstats",
+            "signal_change_pos__icstats",
+            "signal_change_neg__icstats"
+          ],
+          "columns": {
+            "explained_variance__icstats": "required",
+            "total_variance__icstats": "required",
+            "signal_change_pos__icstats": "optional",
+            "signal_change_neg__icstats": "optional"
           }
         }
       }
