@@ -63,6 +63,11 @@
         "value": "metrics",
         "display_name": "Component metrics",
         "description": "Scalar metrics describing a decomposition's components, one row per component (e.g. MELODIC's explained-variance table, FIX's classifier features).\n"
+      },
+      "design": {
+        "value": "design",
+        "display_name": "Analysis design",
+        "description": "The settings an analysis was configured with, in the producer's own format (e.g. FSL FEAT's `design.fsf`, whose `set fmri(...)` lines FIX reads for the highpass cutoff).\n"
       }
     },
     "extensions": {
@@ -75,6 +80,11 @@
         "value": ".par",
         "display_name": "Motion parameters",
         "description": "A whitespace-delimited, headerless table of rigid-body motion parameters, one row per volume, as written by `mcflirt`.\n"
+      },
+      "fsf": {
+        "value": ".fsf",
+        "display_name": "FEAT setup file",
+        "description": "FSL FEAT's plain-text design file: one `set fmri(<key>) <value>` Tcl assignment per line.\n"
       }
     },
     "columns": {

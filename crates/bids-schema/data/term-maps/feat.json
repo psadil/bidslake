@@ -279,6 +279,16 @@
       }
     },
     {
+      "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/design\\.fsf",
+      "Entities": {
+        "desc": "FEAT"
+      },
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "design"
+      }
+    },
+    {
       "Template": "sub-(?P<subject>[0-9A-Za-z]+)(?:_ses-(?P<session>[0-9A-Za-z]+))?_task-(?P<task>[0-9A-Za-z]+)(?:_run-(?P<run>[0-9A-Za-z]+))?[^/]*/(?:pyfix\\.log|report\\.html|report_log\\.html)",
       "Concepts": {
         "datatype": "func"

@@ -134,6 +134,17 @@
       },
       "Description": "Rigid-body motion parameters in FSL's column order, one row per retained volume."
     },
+    "design": {
+      "Template": "design.fsf",
+      "Concepts": {
+        "datatype": "func",
+        "suffix": "design"
+      },
+      "Entities": {
+        "desc": "FEAT"
+      },
+      "Description": "FEAT's setup file. FIX reads two of its settings, `fmri(temphp_yn)` and `fmri(paradigm_hp)`, to highpass the motion regressors its motion-correlation features are computed on — `fix -h` reaches only the cleanup stage — so a MELODIC tree that FEAT did not make still needs one, and two `set` lines are enough. `desc-FEAT` names the format's producer, as `desc-MELODIC` does for the decomposition's own files."
+    },
     "classification": {
       "Template": "fix4melview_{training}_thr{threshold}.txt",
       "Concepts": {

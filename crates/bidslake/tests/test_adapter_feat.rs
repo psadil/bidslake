@@ -58,6 +58,12 @@ fn write_feat_tree(root: &Path) {
         ("filtered_func_data.ica/mean.nii.gz", b"nii"),
         ("fix/features.csv", b"a,b\n1,2\n"),
         (MCF_PAR_PATH, MCF_PAR),
+        // The two settings FIX reads from a FEAT design: the highpass its motion features
+        // assume. A tree MELODIC wrote outside FEAT carries only these lines.
+        (
+            "design.fsf",
+            b"set fmri(temphp_yn) 1\nset fmri(paradigm_hp) 100\n",
+        ),
         ("fix4melview_UKBiobank_thr1.txt", b"1, Signal\n"),
         ("fix4melview_UKBiobank_thr1_psadil.txt", b"1, Signal\n"),
         // A second automatic labelling, from a training set whose name carries an
@@ -115,6 +121,7 @@ fn write_feat_tree_with_icstats(root: &Path, icstats: &[u8]) {
 #[case("metrics", "MELODIC", 1)]
 #[case("metrics", "fix", 1)]
 #[case("timeseries", "motion", 1)]
+#[case("design", "FEAT", 1)]
 #[case("components", "IC", 1)]
 #[case("components", "oIC", 1)]
 #[case("boldref", "exfunc", 1)]
